@@ -54,7 +54,11 @@
                                                 {% trans "In Date" %}
                                             </div>
                                             <div class='oh-sticky-table__th'>{% trans "Check In" %}</div>
+                                            <div class='oh-sticky-table__th'>{% trans "In Photo" %}</div>
+                                            
                                             <div class='oh-sticky-table__th'>{% trans "Check Out" %}</div>
+                                            <div class='oh-sticky-table__th'>{% trans "Out Photo" %}</div>
+
                                             <div class='oh-sticky-table__th' hx-target='#activity-table'
                                                 hx-get="{% url 'attendance-activity-search' %}?{{pd}}&orderby=clock_out_date">
                                                 {% trans "Out Date" %}
@@ -88,7 +92,23 @@
                                                 </div>
                                                 <div class="oh-sticky-table__td dateformat_changer">{{activity.clock_in_date}}</div>
                                                 <div class="oh-sticky-table__td timeformat_changer">{{activity.clock_in}}</div>
+                                                <div class="oh-sticky-table__td" onclick="event.stopPropagation();">
+                                                  {% if activity.clock_in_image %}
+                                                    <a href="{{ activity.clock_in_image.url }}" target="_blank" onclick="event.stopPropagation();">
+                                                      <img src="{{ activity.clock_in_image.url }}" style="height:32px;width:32px;object-fit:cover;border-radius:6px;" />
+                                                    </a>
+                                                  {% else %}-{% endif %}
+                                                </div>
+                                                
                                                 <div class="oh-sticky-table__td timeformat_changer">{{activity.clock_out}}</div>
+                                                <div class="oh-sticky-table__td" onclick="event.stopPropagation();">
+                                                  {% if activity.clock_out_image %}
+                                                    <a href="{{ activity.clock_out_image.url }}" target="_blank" onclick="event.stopPropagation();">
+                                                      <img src="{{ activity.clock_out_image.url }}" style="height:32px;width:32px;object-fit:cover;border-radius:6px;" />
+                                                    </a>
+                                                  {% else %}-{% endif %}
+                                                </div>
+                                                
                                                 <div class="oh-sticky-table__td dateformat_changer">{{activity.clock_out_date}}
                                                 </div>
                                                 {% if perms.attendance.delete_attendanceactivity %}

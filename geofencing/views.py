@@ -105,7 +105,11 @@ class GeoFencingEmployeeLocationCheckAPIView(APIView):
             raise serializers.ValidationError(e)
 
     def post(self, request):
-        serializer = EmployeeLocationSerializer(data=request.data)
+        serializer = EmployeeLocationSerializer(data={
+            "latitude": request.data.get("latitude"),
+            "longitude": request.data.get("longitude"),
+        })
+        
         company_location = self.get_company_location(request)
         if company_location.start:
             if serializer.is_valid():

@@ -73,6 +73,8 @@ class AttendanceActivity(HorillaModel):
     objects = HorillaCompanyManager(
         related_company_field="employee_id__employee_work_info__company_id"
     )
+    clock_in_image = models.ImageField(upload_to=upload_path, null=True, blank=True)
+    clock_out_image = models.ImageField(upload_to=upload_path, null=True, blank=True
 
     class Meta:
         """
@@ -235,6 +237,9 @@ class Attendance(HorillaModel):
             HorillaAuditInfo,
         ],
     )
+    attendance_clock_in_image = models.ImageField(upload_to=upload_path, null=True, blank=True)
+    attendance_clock_out_image = models.ImageField(upload_to=upload_path, null=True, blank=True)
+
 
     class Meta:
         """

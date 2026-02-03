@@ -12,6 +12,7 @@ from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 
 from attendance.models import Attendance, AttendanceActivity, EmployeeShiftDay
 from attendance.views.clock_in_out import *
@@ -66,6 +67,7 @@ class ClockInAPIView(APIView):
     """
 
     permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def post(self, request):
         if not request.user.employee_get.check_online():
@@ -116,6 +118,9 @@ class ClockInAPIView(APIView):
                         )
                         attendance_date = date_yesterday
                         day = day_yesterday
+
+                image = request.FILES.get("image")
+                
                 clock_in_attendance_and_activity(
                     employee=employee,
                     date_today=date_today,
@@ -127,6 +132,7 @@ class ClockInAPIView(APIView):
                     start_time=start_time_sec,
                     end_time=end_time_sec,
                     in_datetime=datetime_now,
+                    clock_in_image=image,
                 )
                 return Response({"message": "Clocked-In"}, status=200)
             return Response(
@@ -146,6 +152,7 @@ class ClockOutAPIView(APIView):
     """
 
     permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def post(self, request):
 
@@ -164,6 +171,8 @@ class ClockOutAPIView(APIView):
             current_time = datetime.now().time()
             current_datetime = datetime.now()
 
+            image = request.FILES.get("image")
+
             try:
                 clock_out(
                     Request(
@@ -171,6 +180,7 @@ class ClockOutAPIView(APIView):
                         date=current_date,
                         time=current_time,
                         datetime=current_datetime,
+                        image=image,
                     )
                 )
                 return Response({"message": "Clocked-Out"}, status=200)

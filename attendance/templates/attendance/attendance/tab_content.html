@@ -79,6 +79,11 @@
                                 hx-target="#tab_contents">
                                 {% trans "In Date" %}
                             </div>
+                            
+                            <div data-cell-index="14" data-cell-title="{% trans 'In Photo' %}" class="oh-sticky-table__th">
+                              {% trans "In Photo" %}
+                            </div>
+                            
                             <div data-cell-index="6" data-cell-title='{% trans "Check-Out" %}' class="oh-sticky-table__th">
                                 {% trans "Check-Out" %}</div>
                             <div data-cell-index="7" data-cell-title='{% trans "Out Date" %}'
@@ -87,6 +92,11 @@
                                 hx-target="#tab_contents">
                                 {% trans "Out Date" %}
                             </div>
+
+                            <div data-cell-index="15" data-cell-title="{% trans 'Out Photo' %}" class="oh-sticky-table__th">
+                              {% trans "Out Photo" %}
+                            </div>
+                            
                             <div data-cell-index="8" data-cell-title='{% trans "Shift" %}' class="oh-sticky-table__th">
                                 {% trans "Shift" %}</div>
                             <div data-cell-index="9" data-cell-title='{% trans "Work Type" %}' class="oh-sticky-table__th">
@@ -145,12 +155,36 @@
                                 <div data-cell-index="5" class="oh-sticky-table__td dateformat_changer">
                                     {{attendance.attendance_clock_in_date}}
                                 </div>
+
+                                <div data-cell-index="14" class="oh-sticky-table__td" onclick="event.stopPropagation();">
+                                  {% if attendance.attendance_clock_in_image %}
+                                    <a href="{{ attendance.attendance_clock_in_image.url }}" target="_blank" onclick="event.stopPropagation();">
+                                      <img src="{{ attendance.attendance_clock_in_image.url }}"
+                                           style="height:32px;width:32px;object-fit:cover;border-radius:6px;">
+                                    </a>
+                                  {% else %}
+                                    -
+                                  {% endif %}
+                                </div>
+                                
                                 <div data-cell-index="6" class="oh-sticky-table__td timeformat_changer">
                                     {{attendance.attendance_clock_out}}
                                 </div>
                                 <div data-cell-index="7" class="oh-sticky-table__td dateformat_changer">
                                     {{attendance.attendance_clock_out_date}}
                                 </div>
+
+                                <div data-cell-index="15" class="oh-sticky-table__td" onclick="event.stopPropagation();">
+                                  {% if attendance.attendance_clock_out_image %}
+                                    <a href="{{ attendance.attendance_clock_out_image.url }}" target="_blank" onclick="event.stopPropagation();">
+                                      <img src="{{ attendance.attendance_clock_out_image.url }}"
+                                           style="height:32px;width:32px;object-fit:cover;border-radius:6px;">
+                                    </a>
+                                  {% else %}
+                                    -
+                                  {% endif %}
+                                </div>
+                                
                                 <div data-cell-index="8" class="oh-sticky-table__td">{{attendance.shift_id}}</div>
                                 <div data-cell-index="9" class="oh-sticky-table__td">{{attendance.work_type_id}}</div>
                                 <div data-cell-index="10" class="oh-sticky-table__td">{{attendance.minimum_hour}}</div>
@@ -306,6 +340,11 @@
                                     hx-target="#tab_contents">
                                     {% trans "In Date" %}
                                 </div>
+
+                                <div data-cell-index="34" data-cell-title="{% trans 'In Photo' %}" class="oh-sticky-table__th">
+                                  {% trans "In Photo" %}
+                                </div>
+                                
                                 <div data-cell-index="26" data-cell-title='{% trans "Check-Out" %}'
                                     class="oh-sticky-table__th">{% trans "Check-Out" %}</div>
                                 <div data-cell-index="27" data-cell-title='{% trans "Out Date" %}'
@@ -314,6 +353,11 @@
                                     hx-target="#tab_contents">
                                     {% trans "Out Date" %}
                                 </div>
+
+                                <div data-cell-index="35" data-cell-title="{% trans 'Out Photo' %}" class="oh-sticky-table__th">
+                                  {% trans "Out Photo" %}
+                                </div>
+                                
                                 <div data-cell-index="28" data-cell-title='{% trans "Shift" %}' class="oh-sticky-table__th">
                                     {% trans "Shift" %}</div>
                                 <div data-cell-index="29" data-cell-title='{% trans "Work Type" %}'
@@ -373,12 +417,32 @@
                                     <div data-cell-index="25" class="oh-sticky-table__td dateformat_changer">
                                         {{attendance.attendance_clock_in_date}}
                                     </div>
+
+                                    <div data-cell-index="34" class="oh-sticky-table__td" onclick="event.stopPropagation();">
+                                      {% if attendance.attendance_clock_in_image %}
+                                        <a href="{{ attendance.attendance_clock_in_image.url }}" target="_blank" onclick="event.stopPropagation();">
+                                          <img src="{{ attendance.attendance_clock_in_image.url }}"
+                                               style="height:32px;width:32px;object-fit:cover;border-radius:6px;">
+                                        </a>
+                                      {% else %}-{% endif %}
+                                    </div>
+                                    
                                     <div data-cell-index="26" class="oh-sticky-table__td timeformat_changer">
                                         {{attendance.attendance_clock_out}}
                                     </div>
                                     <div data-cell-index="27" class="oh-sticky-table__td dateformat_changer">
                                         {{attendance.attendance_clock_out_date}}
                                     </div>
+
+                                    <div data-cell-index="35" class="oh-sticky-table__td" onclick="event.stopPropagation();">
+                                      {% if attendance.attendance_clock_out_image %}
+                                        <a href="{{ attendance.attendance_clock_out_image.url }}" target="_blank" onclick="event.stopPropagation();">
+                                          <img src="{{ attendance.attendance_clock_out_image.url }}"
+                                               style="height:32px;width:32px;object-fit:cover;border-radius:6px;">
+                                        </a>
+                                      {% else %}-{% endif %}
+                                    </div>
+                                    
                                     <div data-cell-index="28" class="oh-sticky-table__td">{{attendance.shift_id}}</div>
                                     <div data-cell-index="29" class="oh-sticky-table__td">{{attendance.work_type_id}}</div>
                                     <div data-cell-index="30" class="oh-sticky-table__td">{{attendance.minimum_hour}}</div>
@@ -542,6 +606,11 @@
                                 hx-target="#tab_contents">
                                 {% trans "In Date" %}
                             </div>
+
+                            <div data-cell-index="54" data-cell-title="{% trans 'In Photo' %}" class="oh-sticky-table__th">
+                              {% trans "In Photo" %}
+                            </div>
+                            
                             <div data-cell-index="46" data-cell-title='{% trans "Check-Out" %}'
                                 class="oh-sticky-table__th">{% trans "Check-Out" %}</div>
                             <div data-cell-index="47" data-cell-title='{% trans "Out Date" %}'
@@ -550,6 +619,11 @@
                                 hx-target="#tab_contents">
                                 {% trans "Out Date" %}
                             </div>
+
+                            <div data-cell-index="55" data-cell-title="{% trans 'Out Photo' %}" class="oh-sticky-table__th">
+                              {% trans "Out Photo" %}
+                            </div>
+                            
                             <div data-cell-index="48" data-cell-title='{% trans "Shift" %}' class="oh-sticky-table__th">
                                 {% trans "Shift" %}</div>
                             <div data-cell-index="49" data-cell-title='{% trans "Work Type" %}'
@@ -609,12 +683,36 @@
                             <div data-cell-index="45" class="oh-sticky-table__td dateformat_changer">
                                 {{attendance.attendance_clock_in_date}}
                             </div>
+
+                            <div data-cell-index="54" class="oh-sticky-table__td" onclick="event.stopPropagation();">
+                              {% if attendance.attendance_clock_in_image %}
+                                <a href="{{ attendance.attendance_clock_in_image.url }}" target="_blank" onclick="event.stopPropagation();">
+                                  <img src="{{ attendance.attendance_clock_in_image.url }}"
+                                       style="height:32px;width:32px;object-fit:cover;border-radius:6px;">
+                                </a>
+                              {% else %}
+                                -
+                              {% endif %}
+                            </div>
+                            
                             <div data-cell-index="46" class="oh-sticky-table__td timeformat_changer">
                                 {{attendance.attendance_clock_out}}
                             </div>
                             <div data-cell-index="47" class="oh-sticky-table__td dateformat_changer">
                                 {{attendance.attendance_clock_out_date}}
                             </div>
+
+                            <div data-cell-index="55" class="oh-sticky-table__td" onclick="event.stopPropagation();">
+                              {% if attendance.attendance_clock_out_image %}
+                                <a href="{{ attendance.attendance_clock_out_image.url }}" target="_blank" onclick="event.stopPropagation();">
+                                  <img src="{{ attendance.attendance_clock_out_image.url }}"
+                                       style="height:32px;width:32px;object-fit:cover;border-radius:6px;">
+                                </a>
+                              {% else %}
+                                -
+                              {% endif %}
+                            </div>
+                            
                             <div data-cell-index="48" class="oh-sticky-table__td">{{attendance.shift_id}}</div>
                             <div data-cell-index="49" class="oh-sticky-table__td">{{attendance.work_type_id}}</div>
                             <div data-cell-index="50" class="oh-sticky-table__td">{{attendance.minimum_hour}}</div>
