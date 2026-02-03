@@ -122,6 +122,7 @@ def clock_in_attendance_and_activity(
     start_time,
     end_time,
     in_datetime,
+    clock_in_image=None,
 ):
     """
     This method is used to create attendance activity or attendance when an employee clocks-in
@@ -158,6 +159,7 @@ def clock_in_attendance_and_activity(
         shift_day=day,
         clock_in=in_datetime,
         in_datetime=in_datetime,
+        clock_in_image=clock_in_image,
     )
     # create attendance if not exist
     attendance = Attendance.objects.filter(
@@ -173,6 +175,10 @@ def clock_in_attendance_and_activity(
         attendance.attendance_clock_in = now
         attendance.attendance_clock_in_date = date_today
         attendance.minimum_hour = minimum_hour
+
+        if clock_in_image:
+        attendance.attendance_clock_in_image = clock_in_image
+
         attendance.save()
         # check here late come or not
 
@@ -184,6 +190,10 @@ def clock_in_attendance_and_activity(
         attendance = attendance[0]
         attendance.attendance_clock_out = None
         attendance.attendance_clock_out_date = None
+
+        if clock_in_image:
+        attendance.attendance_clock_in_image = clock_in_image
+        
         attendance.save()
         # delete if the attendance marked the early out
         early_out_instance = attendance.late_come_early_out.filter(type="early_out")
@@ -347,7 +357,7 @@ def clock_in(request):
         return HttpResponse("<script>location.reload();</script>")
 
 
-def clock_out_attendance_and_activity(employee, date_today, now, out_datetime=None):
+def clock_out_attendance_and_activity(employee, date_today, now, out_datetime=None, clock_out_image=None):
     """
     Clock out the attendance and activity
     args:
@@ -368,6 +378,10 @@ def clock_out_attendance_and_activity(employee, date_today, now, out_datetime=No
         attendance_activity.clock_out = out_datetime
         attendance_activity.clock_out_date = date_today
         attendance_activity.out_datetime = out_datetime
+        
+        if clock_out_image:
+            attendance_activity.clock_out_image = clock_out_image
+        
         attendance_activity.save()
 
         attendance_activities = attendance_activities.filter(
@@ -391,6 +405,10 @@ def clock_out_attendance_and_activity(employee, date_today, now, out_datetime=No
         attendance.attendance_clock_out = now + ":00"
         attendance.attendance_clock_out_date = date_today
         attendance.attendance_worked_hour = duration
+        
+        if clock_out_image:
+            attendance.attendance_clock_out_image = clock_out_image
+        
         # Overtime calculation
         attendance.attendance_overtime = overtime_calculation(attendance)
 
@@ -479,6 +497,9 @@ def clock_out(request):
     """
     This method is used to set the out date and time for attendance and attendance activity
     """
+
+    clock_out_image = getattr(request, "image", None)
+    
     # check wether check in/check out feature is enabled
     selected_company = request.session.get("selected_company")
     if selected_company == "all":
@@ -523,7 +544,7 @@ def clock_out(request):
             day=day, shift=shift
         )
         attendance = clock_out_attendance_and_activity(
-            employee=employee, date_today=date_today, now=now, out_datetime=datetime_now
+            employee=employee, date_today=date_today, now=now, out_datetime=datetime_now, clock_out_image=clock_out_image,
         )
         if attendance:
             early_out_instance = attendance.late_come_early_out.filter(type="early_out")
