@@ -4024,31 +4024,56 @@ $(document).on("htmx:afterSettle", function (event) {
 
 
 // Helper function to hash data using SHA-256
+// Helper function to hash data using SHA-256 (with fallback for HTTP)
 async function hashData(data) {
-    const encoder = new TextEncoder();
-    const dataBuffer = encoder.encode(data);
-    const hashBuffer = await crypto.subtle.digest('SHA-256', dataBuffer);
-    const hashArray = Array.from(new Uint8Array(hashBuffer));
-    return hashArray.map(byte => byte.toString(16).padStart(2, '0')).join('');
+    // Check if Secure Context (HTTPS/Localhost) is available
+    if (window.crypto && window.crypto.subtle && window.crypto.subtle.digest) {
+        const encoder = new TextEncoder();
+        const dataBuffer = encoder.encode(data);
+        const hashBuffer = await crypto.subtle.digest('SHA-256', dataBuffer);
+        const hashArray = Array.from(new Uint8Array(hashBuffer));
+        return hashArray.map(byte => byte.toString(16).padStart(2, '0')).join('');
+    }
+
+    // Fallback for non-secure contexts (HTTP) to prevent crash
+    // Using a simple hashing logic (djb2 equivalent) to ensure data consistency
+    let hash = 5381;
+    for (let i = 0; i < data.length; i++) {
+        hash = ((hash << 5) + hash) + data.charCodeAt(i); /* hash * 33 + c */
+    }
+    return (hash >>> 0).toString(16);
 }
 
 // Save installed apps with a hash to localStorage
 async function saveToLocalStorage(data) {
-    const dataString = JSON.stringify(data);
-    const hash = await hashData(dataString);
-    localStorage.setItem("cachedInstalledApps", dataString);
-    localStorage.setItem("cachedInstalledAppsHash", hash);
+    try {
+        const dataString = JSON.stringify(data);
+        const hash = await hashData(dataString);
+        localStorage.setItem("cachedInstalledApps", dataString);
+        localStorage.setItem("cachedInstalledAppsHash", hash);
+    } catch (error) {
+        console.error("Error saving to localStorage:", error);
+    }
 }
 
 // Verify and load installed apps from localStorage
 async function loadFromLocalStorage() {
-    const dataString = localStorage.getItem("cachedInstalledApps");
-    const storedHash = localStorage.getItem("cachedInstalledAppsHash");
-    if (dataString && storedHash) {
-        const currentHash = await hashData(dataString);
-        if (currentHash === storedHash) {
-            return JSON.parse(dataString);
+    try {
+        const dataString = localStorage.getItem("cachedInstalledApps");
+        const storedHash = localStorage.getItem("cachedInstalledAppsHash");
+
+        if (dataString && storedHash) {
+            // This will now work even on HTTP because hashData has a fallback
+            const currentHash = await hashData(dataString);
+            
+            if (currentHash === storedHash) {
+                return JSON.parse(dataString);
+            } else {
+                console.warn("Hash mismatch in localStorage. Data might be corrupted.");
+            }
         }
+    } catch (error) {
+        console.error("Error loading from localStorage:", error);
     }
     return null;
 }
