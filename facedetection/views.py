@@ -122,18 +122,18 @@ class EmployeeFaceDetectionGetPostAPIView(APIView):
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     def post(self, request):
-        if self.get_facedetection(request).start:
-            employee_id = request.user.employee_get.id
-            data = request.data
-            if isinstance(data, QueryDict):
-                data = data.dict()
-            data["employee_id"] = employee_id
-            serializer = EmployeeFaceDetectionSerializer(data=data)
-            if serializer.is_valid():
-                serializer.save()
-                return Response(serializer.data, status=status.HTTP_201_CREATED)
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-        raise serializers.ValidationError("Facedetection not yet started..")
+        if not self.get_facedetection(request).start:
+            raise serializers.ValidationError("Facedetection not yet started..")
+    
+        employee = request.user.employee_get
+        obj, created = EmployeeFaceDetection.objects.get_or_create(employee_id=employee)
+    
+        if "image" in request.FILES:
+            obj.image = request.FILES["image"]
+            obj.save()
+    
+        serializer = EmployeeFaceDetectionSerializer(obj)
+        return Response(serializer.data, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
 
 
 def get_company(request):
