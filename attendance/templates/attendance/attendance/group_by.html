@@ -78,8 +78,12 @@
                   <div class="oh-sticky-table__th">{% trans "Day" %}</div>
                   <div class="oh-sticky-table__th">{% trans "Check-In" %}</div>
                   <div class="oh-sticky-table__th">{% trans "In Date" %}</div>
+				  <div class="oh-sticky-table__th">{% trans "In Photo" %}</div>
+					
                   <div class="oh-sticky-table__th">{% trans "Check-Out" %}</div>
                   <div class="oh-sticky-table__th">{% trans "Out Date" %}</div>
+				  <div class="oh-sticky-table__th">{% trans "Out Photo" %}</div>
+					
                   <div class="oh-sticky-table__th">{% trans "Shift" %}</div>
                   <div class="oh-sticky-table__th">{% trans "Work Type" %}</div>
                   <div class="oh-sticky-table__th">{% trans "Min Hour" %}</div>
@@ -135,13 +139,35 @@
                   <div class="oh-sticky-table__td dateformat_changer">
                     {{attendance.attendance_clock_in_date}}
                   </div>
-                  <div class="oh-sticky-table__td timeformat_changer">
+				  <div class="oh-sticky-table__td" onclick="event.stopPropagation();">
+				    {% if attendance.attendance_clock_in_image %}
+				      <a href="{{ attendance.attendance_clock_in_image.url }}" target="_blank" onclick="event.stopPropagation();">
+				        <img src="{{ attendance.attendance_clock_in_image.url }}"
+				             style="height:32px;width:32px;object-fit:cover;border-radius:6px;">
+				      </a>
+				    {% else %}
+				      -
+				    {% endif %}
+				  </div>				  
+                  
+				  <div class="oh-sticky-table__td timeformat_changer">
                     {{attendance.attendance_clock_out}}
                   </div>
                   <div class="oh-sticky-table__td dateformat_changer">
                     {{attendance.attendance_clock_out_date}}
                   </div>
-                  <div class="oh-sticky-table__td">{{attendance.shift_id}}</div>
+				  <div class="oh-sticky-table__td" onclick="event.stopPropagation();">
+				    {% if attendance.attendance_clock_out_image %}
+				      <a href="{{ attendance.attendance_clock_out_image.url }}" target="_blank" onclick="event.stopPropagation();">
+				        <img src="{{ attendance.attendance_clock_out_image.url }}"
+				             style="height:32px;width:32px;object-fit:cover;border-radius:6px;">
+				      </a>
+				    {% else %}
+				      -
+				    {% endif %}
+				  </div>
+					
+				  <div class="oh-sticky-table__td">{{attendance.shift_id}}</div>
                   <div class="oh-sticky-table__td">
                     {{attendance.work_type_id}}
                   </div>
@@ -379,9 +405,13 @@
                   <div class="oh-sticky-table__th">{% trans "Day" %}</div>
                   <div class="oh-sticky-table__th">{% trans "Check-In" %}</div>
                   <div class="oh-sticky-table__th">{% trans "In Date" %}</div>
-                  <div class="oh-sticky-table__th">{% trans "Check-Out" %}</div>
+				  <div class="oh-sticky-table__th">{% trans "In Photo" %}</div>
+                  
+				  <div class="oh-sticky-table__th">{% trans "Check-Out" %}</div>
                   <div class="oh-sticky-table__th">{% trans "Out Date" %}</div>
-                  <div class="oh-sticky-table__th">{% trans "Shift" %}</div>
+				  <div class="oh-sticky-table__th">{% trans "Out Photo" %}</div>
+                  
+				  <div class="oh-sticky-table__th">{% trans "Shift" %}</div>
                   <div class="oh-sticky-table__th">{% trans "Work Type" %}</div>
                   <div class="oh-sticky-table__th">{% trans "Min Hour" %}</div>
                   <div class="oh-sticky-table__th">{% trans "At Work" %}</div>
@@ -435,12 +465,34 @@
                   <div class="oh-sticky-table__td dateformat_changer">
                     {{attendance.attendance_clock_in_date}}
                   </div>
+				  <div class="oh-sticky-table__td" onclick="event.stopPropagation();">
+				    {% if attendance.attendance_clock_in_image %}
+				      <a href="{{ attendance.attendance_clock_in_image.url }}" target="_blank" onclick="event.stopPropagation();">
+				        <img src="{{ attendance.attendance_clock_in_image.url }}"
+				             style="height:32px;width:32px;object-fit:cover;border-radius:6px;">
+				      </a>
+				    {% else %}
+				      -
+				    {% endif %}
+				  </div>
+
                   <div class="oh-sticky-table__td timeformat_changer">
                     {{attendance.attendance_clock_out}}
                   </div>
                   <div class="oh-sticky-table__td dateformat_changer">
                     {{attendance.attendance_clock_out_date}}
                   </div>
+				  <div class="oh-sticky-table__td" onclick="event.stopPropagation();">
+				    {% if attendance.attendance_clock_out_image %}
+				      <a href="{{ attendance.attendance_clock_out_image.url }}" target="_blank" onclick="event.stopPropagation();">
+				        <img src="{{ attendance.attendance_clock_out_image.url }}"
+				             style="height:32px;width:32px;object-fit:cover;border-radius:6px;">
+				      </a>
+				    {% else %}
+				      -
+				    {% endif %}
+				  </div>
+					
                   <div class="oh-sticky-table__td">{{attendance.shift_id}}</div>
                   <div class="oh-sticky-table__td">
                     {{attendance.work_type_id}}
@@ -671,8 +723,12 @@
                   <div class="oh-sticky-table__th">{% trans "Day" %}</div>
                   <div class="oh-sticky-table__th">{% trans "Check-In" %}</div>
                   <div class="oh-sticky-table__th">{% trans "In Date" %}</div>
+				  <div class="oh-sticky-table__th">{% trans "In Photo" %}</div>
+					
                   <div class="oh-sticky-table__th">{% trans "Check-Out" %}</div>
                   <div class="oh-sticky-table__th">{% trans "Out Date" %}</div>
+				  <div class="oh-sticky-table__th">{% trans "Out Photo" %}</div>
+					
                   <div class="oh-sticky-table__th">{% trans "Shift" %}</div>
                   <div class="oh-sticky-table__th">{% trans "Work Type" %}</div>
                   <div class="oh-sticky-table__th">{% trans "Min Hour" %}</div>
@@ -728,12 +784,34 @@
                   <div class="oh-sticky-table__td dateformat_changer">
                     {{attendance.attendance_clock_in_date}}
                   </div>
+				  <div class="oh-sticky-table__td" onclick="event.stopPropagation();">
+				    {% if attendance.attendance_clock_in_image %}
+				      <a href="{{ attendance.attendance_clock_in_image.url }}" target="_blank" onclick="event.stopPropagation();">
+				        <img src="{{ attendance.attendance_clock_in_image.url }}"
+				             style="height:32px;width:32px;object-fit:cover;border-radius:6px;">
+				      </a>
+				    {% else %}
+				      -
+				    {% endif %}
+				  </div>
+					
                   <div class="oh-sticky-table__td timeformat_changer">
                     {{attendance.attendance_clock_out}}
                   </div>
                   <div class="oh-sticky-table__td dateformat_changer">
                     {{attendance.attendance_clock_out_date}}
                   </div>
+				  <div class="oh-sticky-table__td" onclick="event.stopPropagation();">
+				    {% if attendance.attendance_clock_out_image %}
+				      <a href="{{ attendance.attendance_clock_out_image.url }}" target="_blank" onclick="event.stopPropagation();">
+				        <img src="{{ attendance.attendance_clock_out_image.url }}"
+				             style="height:32px;width:32px;object-fit:cover;border-radius:6px;">
+				      </a>
+				    {% else %}
+				      -
+				    {% endif %}
+				  </div>
+					
                   <div class="oh-sticky-table__td">{{attendance.shift_id}}</div>
                   <div class="oh-sticky-table__td">
                     {{attendance.work_type_id}}
