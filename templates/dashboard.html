@@ -414,4 +414,11 @@ HTML
     }
 </script>
 
+<script src="{% static 'build/js/dashboardDriver.js' %}"></script>
+
+{% if not request.user.driverviewed_set.first or "dashboard" not in request.user.driverviewed_set.first.user_viewed %}
+<script>
+    runDriver()
+</script>
 {% endif %}
+
