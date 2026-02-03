@@ -512,6 +512,7 @@ class Request:
         date,
         time,
         datetime,
+        image=None,
     ) -> None:
         self.user = user
         self.path = "/"
@@ -519,6 +520,7 @@ class Request:
         self.date = date
         self.time = time
         self.datetime = datetime
+        self.image = image
         self.META = META()
 
 
