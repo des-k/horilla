@@ -44,15 +44,18 @@ class FaceDetectionConfigAPIView(APIView):
         name="dispatch",
     )
     def post(self, request):
-        data = request.data
-        if isinstance(data, QueryDict):
-            data = data.dict()
-        data["company_id"] = self.get_company(request).id
-        serializer = FaceDetectionSerializer(data=data)
-        if serializer.is_valid():
-            serializer.save()
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        if self.get_facedetection(request).start:
+            employee_id = request.user.employee_get.id
+            data = request.data
+            if isinstance(data, QueryDict):
+                data = data.dict()
+            data["employee_id"] = employee_id
+            serializer = EmployeeFaceDetectionSerializer(data=data)
+            if serializer.is_valid():
+                serializer.save()
+                return Response(serializer.data, status=status.HTTP_201_CREATED)
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        raise serializers.ValidationError("Facedetection not yet started..")
 
     @method_decorator(
         permission_required("facedetection.change_facedetection", raise_exception=True),
@@ -134,7 +137,6 @@ class EmployeeFaceDetectionGetPostAPIView(APIView):
     
         serializer = EmployeeFaceDetectionSerializer(obj)
         return Response(serializer.data, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
-
 
 def get_company(request):
     try:
