@@ -3,7 +3,6 @@
 <link href="https://fonts.googleapis.com/css2?family=Lobster&display=swap" rel="stylesheet">
 
 <div id="mainNav"></div>
-<!-- End of Navigation -->
 <style>
     .oh-card-dashboard--moveable {
         padding: 0 10px 20px 10px;
@@ -113,13 +112,11 @@
 
 <div class="oh-wrapper">
 
-    <!-- back button -->
     <div class="d-none mt-5" id="back_button" style="width: 10%">
         <a href="{% url 'home-page' %}" class="oh-btn oh-btn--secondary oh-btn--shadow ms-3">
             <ion-icon class="me-2 md hydrated" name="arrow-back-outline" role="img"
                 aria-label="arrow-back-outline"></ion-icon>{% trans "Back" %}</a>
     </div>
-    <!-- end of back button -->
     <div class="oh-dashboard row" id="dashboard" style="padding-bottom: 3.5rem;">
 
 
@@ -232,7 +229,6 @@
                     <div class="oh-card-dashboard__header oh-card-dashboard__header--divider">
                         <span class="oh-card-dashboard__title">{% trans "Employee Work Information" %}</span>
                     </div>
-                    <!-- Search bar -->
                     <div class="oh-search-bar mb-3">
                         <input type="text" hx-get="{% url 'emp-workinfo-complete' %}" hx-target="#pending"
                             hx-trigger="keyup  changed delay:0.3s" id="employeeSearch" name="search"
@@ -315,25 +311,15 @@
 {% endif %}
 
 {% if "onboarding"|app_installed %}
-    <!-- onboarding dashboard -->
     <script src="{% static 'dashboard/onboardChart.js' %}"></script>
 {% endif %}
 
 {% if "pms"|app_installed %}
-    <!-- PMS chart -->
     <script src="{% static 'src/dashboard/pmsChart.js' %}"></script>
 {% endif %}
 
-<!-- leave dashboard -->
-Here is the clean, fixed code with English comments.
-
-I have removed all the "Happy Birthday" animation code (which caused the error) and kept only the Dashboard Tile ordering logic so your dashboard remains functional.
-
-Replace your entire old <script> block with this one:
-
-HTML
 <script>
-    // --- SECTION 1: DASHBOARD TILE ORDERING LOGIC (Keep this) ---
+    // --- SECTION 1: DASHBOARD TILE ORDERING LOGIC ---
     $(document).ready(function () {
 
         // Helper function to calculate the difference between two arrays
@@ -421,4 +407,3 @@ HTML
     runDriver()
 </script>
 {% endif %}
-
