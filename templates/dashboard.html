@@ -186,9 +186,6 @@
             </div>
         </div>
         <div class="oh-dashboard__right col-12 col-sm-12 col-md-12 col-lg-3">
-            {% if 'birthday_view'|feature_is_accessible:request or perms.employee.view_employee %}
-                <div class="oh-dashboard__events" hx-get="{% url 'get-birthday' %}" hx-trigger="load"> </div>
-            {% endif %}
             <div class="oh-card-dashboard oh-card-dashboard--no-scale oh-card-dashboard--transparent mb-3">
                 <div style="display: flex;align-items:center;justify-content:space-between;margin-right:20px">
                     <span class="oh-card-dashboard__title">{% trans "Announcements" %}</span>
@@ -298,7 +295,6 @@
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 
-<script src="{% static 'dashboard/getBirthday.js' %}"></script>
 <script src="{% static 'dashboard/employeeChart.js' %}"></script>
 
 {% if "leave"|app_installed %}
@@ -329,71 +325,52 @@
 {% endif %}
 
 <!-- leave dashboard -->
+Here is the clean, fixed code with English comments.
+
+I have removed all the "Happy Birthday" animation code (which caused the error) and kept only the Dashboard Tile ordering logic so your dashboard remains functional.
+
+Replace your entire old <script> block with this one:
+
+HTML
 <script>
-
-    // Function to remove the div after 20 seconds
-    function removeBirthdayDiv() {
-        const pageWrapper = document.querySelector('.page-wrapper');
-        if (pageWrapper) {
-            pageWrapper.remove(); // Remove the div
-            localStorage.setItem('birthdayShown', 'true'); // Set a flag in localStorage
-        }
-    }
-
-    // Check localStorage to see if the div has already been shown
-    if (!localStorage.getItem('birthdayShown')) {
-        // If not shown before, display the div
-        setTimeout(removeBirthdayDiv, 12000); // Remove after 12 seconds
-    } else {
-        // If already shown, remove it immediately (or don't add it at all)
-        document.addEventListener("DOMContentLoaded", () => {
-            const pageWrapper = document.querySelector('.page-wrapper');
-            if (pageWrapper) {
-                pageWrapper.remove(); // Remove if already shown
-            }
-        });
-    }
-
-    function setDifference(setA, setB) {
-        if (setB.length > setA.length) {
-            temp = setA
-            setA = setB
-            setB = temp
-        }
-        return [...setA.filter(element => !setB.includes(element))];
-    }
+    // --- SECTION 1: DASHBOARD TILE ORDERING LOGIC (Keep this) ---
     $(document).ready(function () {
+
+        // Helper function to calculate the difference between two arrays
         function setDifference(arr1, arr2) {
             return arr2.filter(id => !arr1.includes(id));
         }
 
+        // Default tile order if the user has never saved a preference
         const defaultTileOrder = [
             "notInYetId", "LeaveApprove", "shiftRequestApprove", "WorkTypeRequestApprove", "AttendanceValidate", "OTApprove",
             "LeaveAllocationApprove", "feedbackAnswer", "assetRequestApprove", "movable8", "pendingHours", "notoutYetId",
             "movable2", "movable3", "movable4", "movable1", "movable5", "movable6", "movable7", "movable9", "movable10", "movable11"
         ];
 
+        // Get all current tile IDs present in the DOM
         const allCurrentTileIds = $(".oh-card-dashboard--moveable[id]").map(function () {
             return $(this).attr("id");
         }).get();
 
-        // If tile order is not saved, initialize it
+        // Check LocalStorage. If no order is saved, use the default one.
         if (!localStorage.getItem("tileOrder")) {
             localStorage.setItem("tileOrder", JSON.stringify(defaultTileOrder));
         } else {
             let storedIds = JSON.parse(localStorage.getItem("tileOrder")) || [];
 
-            // Add only new tiles (not already in storage) to the end
-            const newTileIds = setDifference(storedIds, allCurrentTileIds);  // removes missing IDs
-            const missingTileIds = setDifference(allCurrentTileIds, storedIds);  // adds new IDs
+            // Synchronization: Remove IDs that no longer exist, add new IDs that are missing
+            const newTileIds = setDifference(storedIds, allCurrentTileIds);
+            const missingTileIds = setDifference(allCurrentTileIds, storedIds);
 
-            const updatedOrder = storedIds.filter(id => allCurrentTileIds.includes(id)); // clean invalid
+            // Clean invalid IDs and append new ones
+            const updatedOrder = storedIds.filter(id => allCurrentTileIds.includes(id));
             const finalOrder = [...updatedOrder, ...missingTileIds];
 
             localStorage.setItem("tileOrder", JSON.stringify(finalOrder));
         }
 
-        // Reorder dashboard tiles based on tileOrder
+        // Main function to reorder the HTML elements based on the saved order
         function orderDashboardTile() {
             const parentContainer = $("#tileContainer");
             const orderIds = JSON.parse(localStorage.getItem("tileOrder")) || [];
@@ -414,9 +391,10 @@
             }
         }
 
+        // Execute the reordering function on page load
         orderDashboardTile();
 
-        // Update tileOrder on mouseup
+        // Event Listener: Save the new order whenever the user finishes dragging a tile
         $(".oh-card-dashboard--moveable").on("mouseup", function () {
             setTimeout(() => {
                 const newOrder = $(".oh-card-dashboard--moveable").map(function () {
@@ -428,390 +406,12 @@
         });
     });
 
+    // --- SECTION 2: GENERAL HELPER FUNCTIONS ---
+    
+    // Function to close the "New" tab/badge
     function closeNew(anchorElement) {
         $(anchorElement).parent().find('#newTab').hide();
     }
-
-    var w = c.width = window.innerWidth,
-        h = c.height = window.innerHeight,
-        ctx = c.getContext('2d'),
-
-        hw = w / 2, // half-width
-        hh = h / 2,
-
-        opts = {
-            strings: ['HAPPY', 'BIRTHDAY!', "{{request.user.employee_get|escapejs}}"],
-            charSize: 60,
-            charSpacing: 45,
-            lineHeight: 65,
-            cx: w / 2,
-            cy: h / 2,
-            fireworkPrevPoints: 10,
-            fireworkBaseLineWidth: 5,
-            fireworkAddedLineWidth: 8,
-            fireworkSpawnTime: 200,
-            fireworkBaseReachTime: 30,
-            fireworkAddedReachTime: 30,
-            fireworkCircleBaseSize: 20,
-            fireworkCircleAddedSize: 10,
-            fireworkCircleBaseTime: 30,
-            fireworkCircleAddedTime: 30,
-            fireworkCircleFadeBaseTime: 10,
-            fireworkCircleFadeAddedTime: 5,
-            fireworkBaseShards: 20,
-            fireworkAddedShards: 5,
-            fireworkShardPrevPoints: 3,
-            fireworkShardBaseVel: 4,
-            fireworkShardAddedVel: 2,
-            fireworkShardBaseSize: 10,
-            fireworkShardAddedSize: 3,
-            gravity: 0.1,
-            upFlow: -0.1,
-            letterContemplatingWaitTime: 360,
-            balloonSpawnTime: 10,
-            balloonBaseInflateTime: 10,
-            balloonAddedInflateTime: 10,
-            balloonBaseSize: 60,
-            balloonAddedSize: 20,
-            balloonBaseVel: 0.4,
-            balloonAddedVel: 0.4,
-            balloonBaseRadian: -(Math.PI / 2 - 0.5),
-            balloonAddedRadian: -1,
-        },
-        calc = {
-            totalWidth: opts.charSpacing * Math.max(opts.strings[0].length, opts.strings[1].length)
-        },
-
-        Tau = Math.PI * 2,
-        TauQuarter = Tau / 4,
-
-        letters = [];
-
-    ctx.font = opts.charSize + 'px "Lobster"';
-
-
-    function Letter(char, x, y) {
-        this.char = char;
-        this.x = x;
-        this.y = y;
-
-        this.dx = -ctx.measureText(char).width / 2;
-        this.dy = +opts.charSize / 2;
-
-        this.fireworkDy = this.y - hh;
-
-        var hue = x / calc.totalWidth * 360;
-
-        this.color = 'hsl(hue,80%,50%)'.replace('hue', hue);
-        this.lightAlphaColor = 'hsla(hue,80%,light%,alp)'.replace('hue', hue);
-        this.lightColor = 'hsl(hue,80%,light%)'.replace('hue', hue);
-        this.alphaColor = 'hsla(hue,80%,50%,alp)'.replace('hue', hue);
-
-        {% comment %} this.color = 'hsl(8, 77%, 56%)'; // Base color
-        this.lightAlphaColor = 'hsla(8, 77%, 56%, 0.5)'; // Semi-transparent
-        this.lightColor = 'hsla(8, 77%, 56%, 0.8)'; // Slightly transparent
-        this.alphaColor = 'hsla(8, 77%, 56%, 0.6)'; // Semi-transparent {% endcomment %}
-
-
-        this.reset();
-    }
-    Letter.prototype.reset = function () {
-        this.phase = 'firework';
-        this.tick = 0;
-        this.spawned = false;
-        this.spawningTime = opts.fireworkSpawnTime * Math.random() | 0;
-        this.reachTime = opts.fireworkBaseReachTime + opts.fireworkAddedReachTime * Math.random() | 0;
-        this.lineWidth = opts.fireworkBaseLineWidth + opts.fireworkAddedLineWidth * Math.random();
-        this.prevPoints = [[0, hh, 0]];
-    }
-    Letter.prototype.step = function () {
-        if (this.phase === 'firework') {
-            if (!this.spawned) {
-                ++this.tick;
-                if (this.tick >= this.spawningTime) {
-                    this.tick = 0;
-                    this.spawned = true;
-                }
-            } else {
-                ++this.tick;
-
-                var linearProportion = this.tick / this.reachTime,
-                    harmonicProportion = Math.sin(linearProportion * TauQuarter),
-
-                    x = linearProportion * this.x,
-                    y = hh + harmonicProportion * this.fireworkDy;
-
-                if (this.prevPoints.length > opts.fireworkPrevPoints)
-                    this.prevPoints.shift();
-
-                this.prevPoints.push([x, y, linearProportion * this.lineWidth]);
-
-                var lineWidthProportion = 1 / (this.prevPoints.length - 1);
-
-                for (var i = 1; i < this.prevPoints.length; ++i) {
-                    var point = this.prevPoints[i],
-                        point2 = this.prevPoints[i - 1];
-
-                    ctx.strokeStyle = this.alphaColor.replace('alp', i / this.prevPoints.length);
-                    ctx.lineWidth = point[2] * lineWidthProportion * i;
-                    ctx.beginPath();
-                    ctx.moveTo(point[0], point[1]);
-                    ctx.lineTo(point2[0], point2[1]);
-                    ctx.stroke();
-                }
-
-                if (this.tick >= this.reachTime) {
-                    this.phase = 'contemplate';
-
-                    this.circleFinalSize = opts.fireworkCircleBaseSize + opts.fireworkCircleAddedSize * Math.random();
-                    this.circleCompleteTime = opts.fireworkCircleBaseTime + opts.fireworkCircleAddedTime * Math.random() | 0;
-                    this.circleCreating = true;
-                    this.circleFading = false;
-
-                    this.circleFadeTime = opts.fireworkCircleFadeBaseTime + opts.fireworkCircleFadeAddedTime * Math.random() | 0;
-                    this.tick = 0;
-                    this.tick2 = 0;
-
-                    this.shards = [];
-
-                    var shardCount = opts.fireworkBaseShards + opts.fireworkAddedShards * Math.random() | 0,
-                        angle = Tau / shardCount,
-                        cos = Math.cos(angle),
-                        sin = Math.sin(angle),
-
-                        x = 1,
-                        y = 0;
-
-                    for (var i = 0; i < shardCount; ++i) {
-                        var x1 = x;
-                        x = x * cos - y * sin;
-                        y = y * cos + x1 * sin;
-
-                        this.shards.push(new Shard(this.x, this.y, x, y, this.alphaColor));
-                    }
-                }
-            }
-        } else if (this.phase === 'contemplate') {
-            ++this.tick;
-
-            if (this.circleCreating) {
-                ++this.tick2;
-                var proportion = this.tick2 / this.circleCompleteTime,
-                    harmonic = -Math.cos(proportion * Math.PI) / 2 + 0.5;
-
-                ctx.beginPath();
-                ctx.fillStyle = this.lightAlphaColor.replace('light', 50 + 50 * proportion).replace('alp', proportion);
-                ctx.arc(this.x, this.y, harmonic * this.circleFinalSize, 0, Tau);
-                ctx.fill();
-
-                if (this.tick2 > this.circleCompleteTime) {
-                    this.tick2 = 0;
-                    this.circleCreating = false;
-                    this.circleFading = true;
-                }
-            } else if (this.circleFading) {
-                ctx.fillStyle = this.lightColor.replace('light', 70);
-                ctx.fillText(this.char, this.x + this.dx, this.y + this.dy);
-
-                ++this.tick2;
-                var proportion = this.tick2 / this.circleFadeTime,
-                    harmonic = -Math.cos(proportion * Math.PI) / 2 + 0.5;
-
-                ctx.beginPath();
-                ctx.fillStyle = this.lightAlphaColor.replace('light', 100).replace('alp', 1 - harmonic);
-                ctx.arc(this.x, this.y, this.circleFinalSize, 0, Tau);
-                ctx.fill();
-
-                if (this.tick2 >= this.circleFadeTime)
-                    this.circleFading = false;
-
-            } else {
-                ctx.fillStyle = this.lightColor.replace('light', 70);
-                ctx.fillText(this.char, this.x + this.dx, this.y + this.dy);
-            }
-
-            for (var i = 0; i < this.shards.length; ++i) {
-                this.shards[i].step();
-
-                if (!this.shards[i].alive) {
-                    this.shards.splice(i, 1);
-                    --i;
-                }
-            }
-
-            if (this.tick > opts.letterContemplatingWaitTime) {
-                this.phase = 'balloon';
-
-                this.tick = 0;
-                this.spawning = true;
-                this.spawnTime = opts.balloonSpawnTime * Math.random() | 0;
-                this.inflating = false;
-                this.inflateTime = opts.balloonBaseInflateTime + opts.balloonAddedInflateTime * Math.random() | 0;
-                this.size = opts.balloonBaseSize + opts.balloonAddedSize * Math.random() | 0;
-
-                var rad = opts.balloonBaseRadian + opts.balloonAddedRadian * Math.random(),
-                    vel = opts.balloonBaseVel + opts.balloonAddedVel * Math.random();
-
-                this.vx = Math.cos(rad) * vel;
-                this.vy = Math.sin(rad) * vel;
-            }
-        } else if (this.phase === 'balloon') {
-            ctx.strokeStyle = this.lightColor.replace('light', 80);
-
-            if (this.spawning) {
-                ++this.tick;
-                ctx.fillStyle = this.lightColor.replace('light', 70);
-                ctx.fillText(this.char, this.x + this.dx, this.y + this.dy);
-
-                if (this.tick >= this.spawnTime) {
-                    this.tick = 0;
-                    this.spawning = false;
-                    this.inflating = true;
-                }
-            } else if (this.inflating) {
-                ++this.tick;
-
-                var proportion = this.tick / this.inflateTime,
-                    x = this.cx = this.x,
-                    y = this.cy = this.y - this.size * proportion;
-
-                ctx.fillStyle = this.alphaColor.replace('alp', proportion);
-                ctx.beginPath();
-                generateBalloonPath(x, y, this.size * proportion);
-                ctx.fill();
-
-                ctx.beginPath();
-                ctx.moveTo(x, y);
-                ctx.lineTo(x, this.y);
-                ctx.stroke();
-
-                ctx.fillStyle = this.lightColor.replace('light', 70);
-                ctx.fillText(this.char, this.x + this.dx, this.y + this.dy);
-
-                if (this.tick >= this.inflateTime) {
-                    this.tick = 0;
-                    this.inflating = false;
-                }
-            } else {
-                this.cx += this.vx;
-                this.cy += this.vy += opts.upFlow;
-
-                ctx.fillStyle = this.color;
-                ctx.beginPath();
-                generateBalloonPath(this.cx, this.cy, this.size);
-                ctx.fill();
-
-                ctx.beginPath();
-                ctx.moveTo(this.cx, this.cy);
-                ctx.lineTo(this.cx, this.cy + this.size);
-                ctx.stroke();
-
-                ctx.fillStyle = this.lightColor.replace('light', 70);
-                ctx.fillText(this.char, this.cx + this.dx, this.cy + this.dy + this.size);
-
-                if (this.cy + this.size < -hh || this.cx < -hw || this.cy > hw)
-                    this.phase = 'done';
-            }
-        }
-    }
-    function Shard(x, y, vx, vy, color) {
-        var vel = opts.fireworkShardBaseVel + opts.fireworkShardAddedVel * Math.random();
-
-        this.vx = vx * vel;
-        this.vy = vy * vel;
-
-        this.x = x;
-        this.y = y;
-
-        this.prevPoints = [[x, y]];
-        this.color = color;
-
-        this.alive = true;
-
-        this.size = opts.fireworkShardBaseSize + opts.fireworkShardAddedSize * Math.random();
-    }
-    Shard.prototype.step = function () {
-        this.x += this.vx;
-        this.y += this.vy += opts.gravity;
-
-        if (this.prevPoints.length > opts.fireworkShardPrevPoints)
-            this.prevPoints.shift();
-
-        this.prevPoints.push([this.x, this.y]);
-
-        var lineWidthProportion = this.size / this.prevPoints.length;
-
-        for (var k = 0; k < this.prevPoints.length - 1; ++k) {
-            var point = this.prevPoints[k],
-                point2 = this.prevPoints[k + 1];
-
-            ctx.strokeStyle = this.color.replace('alp', k / this.prevPoints.length);
-            ctx.lineWidth = k * lineWidthProportion;
-            ctx.beginPath();
-            ctx.moveTo(point[0], point[1]);
-            ctx.lineTo(point2[0], point2[1]);
-            ctx.stroke();
-        }
-
-        if (this.prevPoints[0][1] > hh)
-            this.alive = false;
-    }
-    function generateBalloonPath(x, y, size) {
-        ctx.moveTo(x, y);
-        ctx.bezierCurveTo(x - size / 2, y - size / 2,
-            x - size / 4, y - size,
-            x, y - size);
-        ctx.bezierCurveTo(x + size / 4, y - size,
-            x + size / 2, y - size / 2,
-            x, y);
-    }
-
-    function anim() {
-        window.requestAnimationFrame(anim);
-
-        // Clear the canvas for the next frame
-        ctx.clearRect(0, 0, w, h);
-
-        ctx.translate(hw, hh);
-
-        var done = true;
-        for (var l = 0; l < letters.length; ++l) {
-            letters[l].step();
-            if (letters[l].phase !== 'done') done = false;
-        }
-
-        ctx.translate(-hw, -hh);
-
-        if (done)
-            for (var l = 0; l < letters.length; ++l)
-                letters[l].reset();
-    }
-
-    for (var i = 0; i < opts.strings.length; ++i) {
-        for (var j = 0; j < opts.strings[i].length; ++j) {
-            letters.push(new Letter(opts.strings[i][j],
-                j * opts.charSpacing + opts.charSpacing / 2 - opts.strings[i].length * opts.charSize / 2,
-                i * opts.lineHeight + opts.lineHeight / 2 - opts.strings.length * opts.lineHeight / 2));
-        }
-    }
-
-    anim();
-
-    window.addEventListener('resize', function () {
-        w = c.width = window.innerWidth;
-        h = c.height = window.innerHeight;
-
-        hw = w / 2;
-        hh = h / 2;
-
-        ctx.font = opts.charSize + 'px Verdana';
-    })
-
 </script>
-<script src="{% static 'build/js/dashboardDriver.js' %}"></script>
 
-{% if not request.user.driverviewed_set.first or "dashboard" not in request.user.driverviewed_set.first.user_viewed %}
-<script>
-    runDriver()
-</script>
 {% endif %}
