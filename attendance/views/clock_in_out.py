@@ -177,7 +177,7 @@ def clock_in_attendance_and_activity(
         attendance.minimum_hour = minimum_hour
 
         if clock_in_image:
-        attendance.attendance_clock_in_image = clock_in_image
+            attendance.attendance_clock_in_image = clock_in_image
 
         attendance.save()
         # check here late come or not
@@ -192,7 +192,7 @@ def clock_in_attendance_and_activity(
         attendance.attendance_clock_out_date = None
 
         if clock_in_image:
-        attendance.attendance_clock_in_image = clock_in_image
+            attendance.attendance_clock_in_image = clock_in_image
         
         attendance.save()
         # delete if the attendance marked the early out
