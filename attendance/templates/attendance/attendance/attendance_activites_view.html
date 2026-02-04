@@ -18,7 +18,11 @@
                         <div class="oh-sticky-table__th">{% trans "Attendance Date" %}</div>
                         <div class="oh-sticky-table__th">{% trans "In Date" %}</div>
                         <div class="oh-sticky-table__th">{% trans "Clock In" %}</div>
+                        <div class="oh-sticky-table__th">{% trans "In Photo" %}</div>
+                        
                         <div class="oh-sticky-table__th">{% trans "Clock Out" %}</div>
+                        <div class="oh-sticky-table__th">{% trans "Out Photo" %}</div>
+                        
                         <div class="oh-sticky-table__th">{% trans "Out Date" %}</div>
                     </div>
                 </div>
@@ -36,7 +40,29 @@
                             <div class="oh-sticky-table__td">{{activity.attendance_date}}</div>
                             <div class="oh-sticky-table__td">{{activity.clock_in_date}}</div>
                             <div class="oh-sticky-table__td">{{activity.clock_in}}</div>
+                            <div class="oh-sticky-table__td" onclick="event.stopPropagation();">
+                              {% if activity.clock_in_image %}
+                                <a href="{{ activity.clock_in_image.url }}" target="_blank" onclick="event.stopPropagation();">
+                                  <img src="{{ activity.clock_in_image.url }}"
+                                       style="height:32px;width:32px;object-fit:cover;border-radius:6px;">
+                                </a>
+                              {% else %}
+                                -
+                              {% endif %}
+                            </div>
+                            
                             <div class="oh-sticky-table__td">{{activity.clock_out}}</div>
+                            <div class="oh-sticky-table__td" onclick="event.stopPropagation();">
+                              {% if activity.clock_out_image %}
+                                <a href="{{ activity.clock_out_image.url }}" target="_blank" onclick="event.stopPropagation();">
+                                  <img src="{{ activity.clock_out_image.url }}"
+                                       style="height:32px;width:32px;object-fit:cover;border-radius:6px;">
+                                </a>
+                              {% else %}
+                                -
+                              {% endif %}
+                            </div>
+                            
                             <div class="oh-sticky-table__td">{{activity.clock_out_date}}</div>
                         </div>
                     {% endfor %}
