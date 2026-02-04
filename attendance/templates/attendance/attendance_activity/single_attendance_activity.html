@@ -21,7 +21,7 @@
             <ion-icon name="close-outline"></ion-icon>
         </button>
     </div>
-    <div class="oh-modal__dialog-body oh-modal__dialog-relative" style="max-height:70vh; overflow:auto;">
+    <div class="oh-modal__dialog-body oh-modal__dialog-relative">
         <div class="oh-modal__dialog oh-modal__dialog--navigation m-0 p-0">
             <button
                 hx-get="{% url 'attendance-activity-single-view' previous_instance %}?{{pd}}&instances_ids={{instance_ids_json}}"
@@ -86,36 +86,32 @@
                 </div>
             </div>
 
-            <div class="oh-timeoff-modal__stats-container mt-3 mb-3"
-                 style="display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:16px;">
-            
-              <div class="oh-timeoff-modal__stat" style="min-width:0;">
+            <div class="oh-timeoff-modal__stats-container mt-3 mb-3">
+              <div class="oh-timeoff-modal__stat">
                 <span class="oh-timeoff-modal__stat-title">{% trans "In Photo" %}</span>
                 {% if activity.clock_in_image %}
-                  <a href="{{ activity.clock_in_image.url }}" target="_blank"
-                     style="display:inline-block; max-width:100%;">
+                  <a href="{{ activity.clock_in_image.url }}" target="_blank">
                     <img src="{{ activity.clock_in_image.url }}"
-                         style="display:block; width:100%; max-width:180px; height:auto; max-height:180px; border-radius:10px; object-fit:cover;">
+                         style="width:180px;height:180px;max-width:100%;border-radius:10px;object-fit:cover;display:block;">
                   </a>
                 {% else %}
                   <span class="oh-timeoff-modal__stat-count">-</span>
                 {% endif %}
               </div>
             
-              <div class="oh-timeoff-modal__stat" style="min-width:0;">
+              <div class="oh-timeoff-modal__stat" style="margin-left: 20px;">
                 <span class="oh-timeoff-modal__stat-title">{% trans "Out Photo" %}</span>
                 {% if activity.clock_out_image %}
-                  <a href="{{ activity.clock_out_image.url }}" target="_blank"
-                     style="display:inline-block; max-width:100%;">
+                  <a href="{{ activity.clock_out_image.url }}"  target="_blank">
                     <img src="{{ activity.clock_out_image.url }}"
-                         style="display:block; width:100%; max-width:180px; height:auto; max-height:180px; border-radius:10px; object-fit:cover;">
+                         style="width:180px;height:180px;max-width:100%;border-radius:10px;object-fit:cover;display:block;">
                   </a>
                 {% else %}
                   <span class="oh-timeoff-modal__stat-count">-</span>
                 {% endif %}
               </div>
-            
             </div>
+           
             <div class="oh-timeoff-modal__stats-container mt-3 mb-3">
                 <div class="oh-timeoff-modal__stat">
                     <span class="oh-timeoff-modal__stat-title">{% trans "Shift" %}</span>
