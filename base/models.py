@@ -43,21 +43,29 @@ WEEK_DAYS = [
 ]
 
 
-def validate_time_format(value):
+def validate_hh_mm_ss_format(value):
     """
-    this method is used to validate the format of duration like fields.
+    Validates duration string in HH:MM:SS format.
     """
-    if len(value) > 6:
-        raise ValidationError(_("Invalid format, it should be HH:MM format"))
+    timeformat = "%H:%M:%S"
     try:
-        hour, minute = value.split(":")
-        hour = int(hour)
-        minute = int(minute)
-        if len(str(hour)) > 3 or minute not in range(60):
-            raise ValidationError(_("Invalid time, excepted HH:MM"))
+        datetime.strptime(value, timeformat)
     except ValueError as e:
-        raise ValidationError(_("Invalid format,  excepted HH:MM")) from e
+        raise ValidationError(_("Invalid format, it should be HH:MM:SS format")) from e
 
+
+def _normalize_hh_mm_ss_to_secs(value: str) -> tuple[str, int]:
+    """
+    Normalizes HH:MM:SS string (zero-pad) and returns (normalized_str, total_seconds).
+    """
+    hours, minutes, secs = value.split(":")
+    h = int(hours)
+    m = int(minutes)
+    s = int(secs)
+
+    normalized = f"{h:02d}:{m:02d}:{s:02d}"
+    total_secs = h * 3600 + m * 60 + s
+    return normalized, total_secs
 
 def clear_messages(request):
     storage = messages.get_messages(request)
@@ -633,15 +641,30 @@ class EmployeeShiftSchedule(HorillaModel):
         ),
     )
 
+    cutoff_check_in_offset = models.CharField(
+        default="04:30:00",
+        validators=[validate_hh_mm_ss_format],
+        max_length=10,
+        verbose_name=_("Cut-off Check In Offset"),
+        help_text=_("Last allowed check-in = start_time + this offset (HH:MM:SS)."),
+    )
     cutoff_check_in_offset_secs = models.PositiveIntegerField(
-        default=16200,
+        editable=False,
+        default=16200,  # 04:30:00
         verbose_name=_("Cut-off Check In Offset (secs)"),
-        help_text=_("Last allowed check-in = start_time + this offset (in seconds)."),
+    )
+
+    cutoff_check_out_offset = models.CharField(
+        default="07:00:00",
+        validators=[validate_hh_mm_ss_format],
+        max_length=10,
+        verbose_name=_("Cut-off Check Out Offset"),
+        help_text=_("Last allowed check-out = end_time + this offset (HH:MM:SS)."),
     )
     cutoff_check_out_offset_secs = models.PositiveIntegerField(
-        default=25200,
+        editable=False,
+        default=25200,  # 07:00:00
         verbose_name=_("Cut-off Check Out Offset (secs)"),
-        help_text=_("Last allowed check-out = end_time + this offset (in seconds)."),
     )
 
     if apps.is_installed("attendance"):
@@ -685,9 +708,61 @@ class EmployeeShiftSchedule(HorillaModel):
         return f"{self.shift_id.employee_shift} {self.day}"
 
     def save(self, *args, **kwargs):
+        # Night shift detection
         if self.start_time and self.end_time:
             self.is_night_shift = self.start_time > self.end_time
-        super().save(*args, **kwargs)
+    
+        # Normalize offsets & compute seconds (GraceTime-style)
+        if self.cutoff_check_in_offset:
+            normalized, secs = _normalize_hh_mm_ss_to_secs(self.cutoff_check_in_offset)
+            self.cutoff_check_in_offset = normalized
+            self.cutoff_check_in_offset_secs = secs
+    
+        if self.cutoff_check_out_offset:
+            normalized, secs = _normalize_hh_mm_ss_to_secs(self.cutoff_check_out_offset)
+            self.cutoff_check_out_offset = normalized
+            self.cutoff_check_out_offset_secs = secs
+    
+        super().save(*args, **kwargs))
+
+    def clean(self):
+        super().clean()
+    
+        # Normalize + compute secs for validation purpose (before save)
+        if self.cutoff_check_in_offset:
+            _, cutoff_in_secs = _normalize_hh_mm_ss_to_secs(self.cutoff_check_in_offset)
+        else:
+            cutoff_in_secs = 0
+    
+        if self.cutoff_check_out_offset:
+            _, cutoff_out_secs = _normalize_hh_mm_ss_to_secs(self.cutoff_check_out_offset)
+        else:
+            cutoff_out_secs = 0
+    
+        # Validate cutoff >= grace when grace applies
+        if apps.is_installed("attendance") and self.grace_time_id:
+            grace_secs = self.grace_time_id.allowed_time_in_secs
+    
+            if self.grace_time_id.allowed_clock_in:
+                if cutoff_in_secs < grace_secs:
+                    raise ValidationError(
+                        {
+                            "cutoff_check_in_offset": _(
+                                "Cut-off Check In offset must be greater than or equal to Grace Time."
+                            )
+                        }
+                    )
+    
+            if self.grace_time_id.allowed_clock_out:
+                if cutoff_out_secs < grace_secs:
+                    raise ValidationError(
+                        {
+                            "cutoff_check_out_offset": _(
+                                "Cut-off Check Out offset must be greater than or equal to Grace Time."
+                            )
+                        }
+                    )
+
 
 
 class RotatingShift(HorillaModel):
