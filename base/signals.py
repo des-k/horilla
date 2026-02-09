@@ -243,34 +243,40 @@ class Fail2BanMiddleware:
 
 settings.MIDDLEWARE.append("base.signals.Fail2BanMiddleware")
 
-@receiver(post_migrate)
+@receiver(post_migrate, dispatch_uid="base_ensure_default_company_shift_schedule")
 def ensure_default_company_and_shift(sender, **kwargs):
     """
-    Bootstrap after migrations:
-    - Ensure there is exactly ONE default company.
-    - If there is no company at all, create one (optionally from settings.HORILLA_BOOTSTRAP_COMPANY).
-    - Ensure the default company has a default shift and 7-day schedules with the desired defaults.
+    After migrations:
+    1) Ensure there is exactly ONE default company.
+    2) Ensure the default company has a default shift.
+    3) Ensure that shift has 7-day schedules.
+    4) (Optional but usually required) Assign default shift to employees who don't have a shift yet.
     """
-    # post_migrate runs for every app; only run this for the "base" app
+    # post_migrate runs for every app; only execute for the "base" app
     if getattr(sender, "label", None) != "base":
         return
 
+    using = kwargs.get("using")
+
     from base.models import Company, EmployeeShift, EmployeeShiftDay, EmployeeShiftSchedule
 
-    with transaction.atomic():
-        # =========================
-        # A) Ensure default Company
-        # =========================
-        default_company = Company.objects.filter(is_default=True).order_by("id").first()
+    # Fetch Employee model safely (in case of import order issues)
+    from django.apps import apps
+    Employee = apps.get_model("employee", "Employee")
 
-        if default_company is None:
-            first_company = Company.objects.order_by("id").first()
+    with transaction.atomic(using=using):
+        # =========================
+        # A) Ensure Default Company
+        # =========================
+        default_company = Company.objects.using(using).filter(is_default=True).order_by("id").first()
 
-            if first_company is None:
-                # No company exists -> create one (use settings if provided, otherwise placeholders)
+        if not default_company:
+            first_company = Company.objects.using(using).order_by("id").first()
+
+            if not first_company:
+                # No company exists -> create one (from settings seed if provided)
                 seed = getattr(settings, "HORILLA_BOOTSTRAP_COMPANY", None) or {}
-
-                first_company = Company.objects.create(
+                default_company = Company.objects.using(using).create(
                     company=seed.get("company", "Default Company"),
                     hq=seed.get("hq", True),
                     address=seed.get("address", "-"),
@@ -285,52 +291,59 @@ def ensure_default_company_and_shift(sender, **kwargs):
             else:
                 # Companies exist but none is default -> pick the first company as default
                 first_company.is_default = True
-                first_company.save(update_fields=["is_default"])
+                first_company.save(using=using, update_fields=["is_default"])
+                default_company = first_company
 
-            default_company = first_company
-        else:
-            # If multiple defaults exist, keep the oldest (smallest ID) and unset the rest
-            Company.objects.exclude(id=default_company.id).filter(is_default=True).update(
-                is_default=False
-            )
+        # If multiple defaults exist, keep the oldest (smallest ID) and unset the rest
+        Company.objects.using(using).exclude(id=default_company.id).filter(is_default=True).update(is_default=False)
 
         # =========================
-        # B) Ensure default Shift
+        # B) Ensure Default Shift
         # =========================
-        # If the company already has a default shift, nothing else to do
+        default_shift = None
+
+        # If company already has a default shift, reuse it
         if getattr(default_company, "default_employee_shift_id_id", None):
-            return
+            default_shift = default_company.default_employee_shift_id
+        else:
+            # Try to reuse an existing shift already linked to this company
+            default_shift = EmployeeShift.objects.using(using).filter(company_id=default_company).order_by("id").first()
 
-        # Try to reuse an existing shift already linked to this company
-        default_shift = (
-            EmployeeShift.objects.filter(company_id=default_company).order_by("id").first()
-        )
+            # If no shift exists, create a Default Shift
+            if not default_shift:
+                default_shift = EmployeeShift.objects.using(using).create(
+                    employee_shift="Default Shift",
+                    weekly_full_time="40:00",
+                    full_time="200:00",
+                )
+                default_shift.company_id.add(default_company)
 
-        # If no shift exists, create the Default Shift
-        if default_shift is None:
-            default_shift = EmployeeShift.objects.create(
-                employee_shift="Default Shift",
-                weekly_full_time="40:00",
-                full_time="200:00",
-            )
+            # Set as company's default shift
+            default_company.default_employee_shift_id = default_shift
+            default_company.save(using=using, update_fields=["default_employee_shift_id"])
+
+        # Ensure shift is linked to the company (safe add)
+        try:
             default_shift.company_id.add(default_company)
+        except Exception:
+            pass
 
         # =========================
-        # C) Ensure Shift Days + Schedules
+        # C) Ensure 7-Day Schedules
         # =========================
         day_codes = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
 
         for d in day_codes:
-            shift_day, _ = EmployeeShiftDay.objects.get_or_create(day=d)
+            shift_day, _ = EmployeeShiftDay.objects.using(using).get_or_create(day=d)
 
-            # Ensure the day is linked to the company (important for company-filtered views)
+            # Ensure day is linked to the company (if day has M2M company_id)
             try:
                 shift_day.company_id.add(default_company)
             except Exception:
                 pass
 
-            # Create schedule if not exists
-            schedule, _ = EmployeeShiftSchedule.objects.get_or_create(
+            # Create schedule if it doesn't exist
+            schedule, created = EmployeeShiftSchedule.objects.using(using).get_or_create(
                 shift_id=default_shift,
                 day=shift_day,
                 defaults={
@@ -339,19 +352,44 @@ def ensure_default_company_and_shift(sender, **kwargs):
                     "end_time": dt_time(16, 0),
                     "is_auto_punch_out_enabled": False,
                     "auto_punch_out_time": None,
-                    "cutoff_check_in_offset_secs": 16200,   # +4.5 hours
-                    "cutoff_check_out_offset_secs": 25200,  # +7 hours
-                    # grace_time_id intentionally not set -> NULL means no grace (0)
+                    # Use STRING values so model.save() can normalize and compute *_secs
+                    "cutoff_check_in_offset": "04:30:00",
+                    "cutoff_check_out_offset": "07:00:00",
+                    # grace_time_id intentionally left NULL -> means no grace
                 },
             )
 
-            # EmployeeShiftSchedule has a company_id M2M; link it for company filtering
+            # Link schedule to company (schedule also has M2M company_id)
             try:
                 schedule.company_id.add(default_company)
             except Exception:
                 pass
 
-        # Finally, set the company default shift
-        default_company.default_employee_shift_id = default_shift
-        default_company.save(update_fields=["default_employee_shift_id"])
+            # If schedule exists but cutoff fields are empty, fill them and resave
+            if not created:
+                changed = False
+                if not getattr(schedule, "cutoff_check_in_offset", None):
+                    schedule.cutoff_check_in_offset = "04:30:00"
+                    changed = True
+                if not getattr(schedule, "cutoff_check_out_offset", None):
+                    schedule.cutoff_check_out_offset = "07:00:00"
+                    changed = True
+                if changed:
+                    schedule.save(using=using)
+
+        # =========================
+        # D) Assign Default Shift to Employees (if missing)
+        # =========================
+        # Employees "have schedules" only when they are assigned to a shift.
+        # This step ensures employees who don't have a shift get the default shift.
+        try:
+            qs = Employee.objects.using(using).filter(employee_work_info__shift_id__isnull=True)
+
+            # If you want to limit by company (only if your work_info has company_id):
+            # qs = qs.filter(employee_work_info__company_id=default_company)
+
+            qs.update(employee_work_info__shift_id=default_shift)
+        except Exception:
+            # If your EmployeeWorkInfo relation/field names differ, adjust this block accordingly.
+            pass
         
