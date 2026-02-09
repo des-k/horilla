@@ -85,6 +85,22 @@ class Company(HorillaModel):
     date_format = models.CharField(max_length=30, blank=True, null=True)
     time_format = models.CharField(max_length=20, blank=True, null=True)
 
+    is_default = models.BooleanField(
+        default=False,
+        verbose_name=_("Default Company"),
+        help_text=_("If enabled, this company will be used as default when company is not selected."),
+    )
+
+    default_employee_shift_id = models.ForeignKey(
+        "base.EmployeeShift",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="default_for_companies",
+        verbose_name=_("Default Employee Shift"),
+        help_text=_("This shift will be assigned when an employee has no shift."),
+    )
+
     class Meta:
         """
         Meta class to add additional options
@@ -97,6 +113,11 @@ class Company(HorillaModel):
 
     def __str__(self) -> str:
         return str(self.company)
+    
+    def save(self, *args, **kwargs):
+        super().save(*args, **kwargs)
+        if self.is_default:
+            Company.objects.exclude(id=self.id).filter(is_default=True).update(is_default=False)
 
 
 class Department(HorillaModel):
@@ -583,7 +604,7 @@ class EmployeeShiftSchedule(HorillaModel):
         EmployeeShift, on_delete=models.PROTECT, verbose_name=_("Shift")
     )
     minimum_working_hour = models.CharField(
-        default="08:15",
+        default="09:00",
         max_length=5,
         validators=[validate_time_format],
         verbose_name=_("Minimum Working Hours"),
@@ -604,6 +625,30 @@ class EmployeeShiftSchedule(HorillaModel):
             "Time at which the horilla will automatically check out the employee attendance if they forget."
         ),
     )
+
+    cutoff_check_in_offset_secs = models.PositiveIntegerField(
+        default=16200,
+        verbose_name=_("Cut-off Check In Offset (secs)"),
+        help_text=_("Last allowed check-in = start_time + this offset (in seconds)."),
+    )
+    cutoff_check_out_offset_secs = models.PositiveIntegerField(
+        default=25200,
+        verbose_name=_("Cut-off Check Out Offset (secs)"),
+        help_text=_("Last allowed check-out = end_time + this offset (in seconds)."),
+    )
+
+    if apps.is_installed("attendance"):
+        grace_time_id = models.ForeignKey(
+            "attendance.GraceTime",
+            null=True,
+            blank=True,
+            related_name="employee_shift_schedules",
+            on_delete=models.PROTECT,
+            verbose_name=_("Grace Time"),
+            help_text=_("Grace time for this day schedule. NULL means no grace (0)."),
+        )
+
+
     company_id = models.ManyToManyField(Company, blank=True, verbose_name=_("Company"))
 
     objects = HorillaCompanyManager("shift_id__employee_shift__company_id")
