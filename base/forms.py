@@ -121,7 +121,12 @@ def get_next_week_date(target_day, start_date):
         days_until_target_day = 7
     return start_date + timedelta(days=days_until_target_day)
 
-
+def _add_months(d: date, months: int) -> date:
+    y = d.year + (d.month - 1 + months) // 12
+    m = (d.month - 1 + months) % 12 + 1
+    last = calendar.monthrange(y, m)[1]
+    return date(y, m, min(d.day, last))
+    
 def get_next_monthly_date(start_date, rotate_every):
     """
     Given a start date and a rotation day (specified as an integer between 1 and 31, or
@@ -145,37 +150,24 @@ def get_next_monthly_date(start_date, rotate_every):
     """
 
     if rotate_every == "last":
-        # Set rotate_every to the last day of the current month
-        last_day = calendar.monthrange(start_date.year, start_date.month)[1]
-        rotate_every = str(last_day)
+        rotate_every = calendar.monthrange(start_date.year, start_date.month)[1]
     rotate_every = int(rotate_every)
+    if rotate_every < 1:
+        raise ValidationError("rotate_every must be 1..31 or 'last'")
 
-    # Calculate the next change date
-    if start_date.day <= rotate_every or rotate_every == 0:
-        # If the rotation day has not occurred yet this month, or if it's the last-
-        # day of the month, set the next change date to the rotation day of this month
-        try:
-            next_change = date(start_date.year, start_date.month, rotate_every)
-        except ValueError:
-            next_change = date(
-                start_date.year, start_date.month + 1, 1
-            )  # Advance to next month
-            # Set day to rotate_every
-            next_change = date(next_change.year, next_change.month, rotate_every)
-    else:
-        # If the rotation day has already occurred this month, set the next change
-        # date to the rotation day of the next month
-        last_day = calendar.monthrange(start_date.year, start_date.month)[1]
-        next_month_start = start_date.replace(day=last_day) + timedelta(days=1)
-        try:
-            next_change = next_month_start.replace(day=rotate_every)
-        except ValueError:
-            next_change = (
-                next_month_start.replace(month=next_month_start.month + 1)
-                + timedelta(days=1)
-            ).replace(day=rotate_every)
+    # candidate this month
+    last_this = calendar.monthrange(start_date.year, start_date.month)[1]
+    day_this = min(rotate_every, last_this)
+    candidate = date(start_date.year, start_date.month, day_this)
 
-    return next_change
+    if candidate >= start_date:
+        return candidate
+
+    # change to next month
+    next_month = _add_months(start_date.replace(day=1), 1)
+    last_next = calendar.monthrange(next_month.year, next_month.month)[1]
+    day_next = min(rotate_every, last_next)
+    return date(next_month.year, next_month.month, day_next)
 
 
 class ModelForm(forms.ModelForm):
@@ -189,7 +181,8 @@ class ModelForm(forms.ModelForm):
         reload_queryset(self.fields)
 
         request = getattr(horilla_middlewares._thread_locals, "request", None)
-
+        instance = getattr(self, "instance", None)
+        is_create = not (instance and getattr(instance, "pk", None))
         today = date.today()
         now = datetime.now()
 
@@ -203,7 +196,8 @@ class ModelForm(forms.ModelForm):
 
             # Date field
             if isinstance(widget, forms.DateInput):
-                field.initial = today
+                if is_create:
+                    field.initial = today
                 widget.input_type = "date"
                 widget.format = "%Y-%m-%d"
                 field.input_formats = ["%Y-%m-%d"]
@@ -218,7 +212,8 @@ class ModelForm(forms.ModelForm):
 
             # Time field
             elif isinstance(widget, forms.TimeInput):
-                field.initial = now.strftime("%H:%M")
+                if is_create:
+                    field.initial = now.strftime("%H:%M")
                 widget.input_type = "time"
                 widget.format = "%H:%M"
                 field.input_formats = ["%H:%M"]
@@ -253,7 +248,8 @@ class ModelForm(forms.ModelForm):
             # Select fields
             elif isinstance(widget, forms.Select):
                 if not isinstance(field, forms.ModelMultipleChoiceField):
-                    field.empty_label = _("---Choose {label}---").format(label=label)
+                    if hasattr(field, "empty_label"):
+                        field.empty_label = _("---Choose {label}---").format(label=label)
                 existing_class = widget.attrs.get("class", select_class)
                 widget.attrs.update({"class": existing_class})
 
@@ -326,7 +322,8 @@ class Form(forms.Form):
                 label = ""
                 if field.label is not None:
                     label = field.label.replace("id", " ")
-                field.empty_label = _("---Choose {label}---").format(label=label)
+                if hasattr(field, "empty_label"):
+                    field.empty_label = _("---Choose {label}---").format(label=label)
                 field.widget.attrs.update({"class": "oh-select oh-select-2"})
             elif isinstance(widget, (forms.Textarea)):
                 label = _(field.label)
@@ -650,7 +647,7 @@ class JobRoleForm(ModelForm):
         fields = "__all__"
         exclude = ["is_active"]
 
-    def save(self, commit, *args, **kwargs) -> Any:
+    def save(self, commit=True, *args, **kwargs) -> Any:
         if not self.instance.pk:
             request = getattr(_thread_locals, "request")
             job_positions = JobPosition.objects.filter(
@@ -667,7 +664,7 @@ class JobRoleForm(ModelForm):
                     messages.info(request, f"Role already exists under {position}")
                 roles.append(role.pk)
             return JobRole.objects.filter(id__in=roles)
-        super().save(commit, *args, **kwargs)
+        return super().save(commit, *args, **kwargs)
 
 
 class WorkTypeForm(ModelForm):
@@ -806,7 +803,7 @@ class RotatingWorkTypeAssignForm(ModelForm):
         label=_trans("Employees"),
     )
     based_on = forms.ChoiceField(
-        choices=BASED_ON, initial="daily", label=_trans("Based on")
+        choices=BASED_ON, initial="after", label=_trans("Based on")
     )
     rotate_after_day = forms.IntegerField(initial=5, label=_trans("Rotate after day"))
 
@@ -884,19 +881,12 @@ class RotatingWorkTypeAssignForm(ModelForm):
         if employee_ids:
             return employee_ids[0]
         else:
-            return ValidationError(_("This field is required"))
+            raise ValidationError(_("This field is required"))
 
     def clean(self):
-        super().clean()
-        self.instance.employee_id = Employee.objects.filter(
-            id=self.data.get("employee_id")
-        ).first()
-
-        self.errors.pop("employee_id", None)
-        if self.instance.employee_id is None:
-            raise ValidationError({"employee_id": _("This field is required")})
-        super().clean()
         cleaned_data = super().clean()
+        if not self.data.getlist("employee_id"):
+            raise ValidationError({"employee_id": _("This field is required")})
         if "rotate_after_day" in self.errors:
             del self.errors["rotate_after_day"]
         return cleaned_data
@@ -939,6 +929,8 @@ class RotatingWorkTypeAssignForm(ModelForm):
                 employee.employee_work_info.work_type_id
             )
             rotating_work_type_assign.next_work_type = rotating_work_type.work_type1
+            if rotating_work_type_assign.additional_data is None:
+                rotating_work_type_assign.additional_data = {}
             rotating_work_type_assign.additional_data["next_work_type_index"] = 1
             based_on = self.cleaned_data["based_on"]
             start_date = self.cleaned_data["start_date"]
@@ -966,7 +958,7 @@ class RotatingWorkTypeAssignUpdateForm(ModelForm):
     """
 
     based_on = forms.ChoiceField(
-        choices=BASED_ON, initial="daily", label=_trans("Based on")
+        choices=BASED_ON, initial="after", label=_trans("Based on")
     )
 
     class Meta:
@@ -1105,6 +1097,14 @@ class EmployeeShiftForm(ModelForm):
         validate_time_format(full_time)
         return super().clean()
 
+def _seconds_to_hhmmss(value):
+    if value is None:
+        return ""
+    value = max(0, int(value))
+    h = value // 3600
+    m = (value % 3600) // 60
+    s = value % 60
+    return f"{h:02d}:{m:02d}:{s:02d}"
 
 class EmployeeShiftScheduleUpdateForm(ModelForm):
     """
@@ -1118,41 +1118,77 @@ class EmployeeShiftScheduleUpdateForm(ModelForm):
 
         model = EmployeeShiftSchedule
         fields = "__all__"
-        exclude = ["is_active", "is_night_shift"]
+        exclude = [
+            "is_active",
+            "is_night_shift",
+            "cutoff_check_in_offset_secs",
+            "cutoff_check_out_offset_secs",
+        ]
         widgets = {
             "start_time": forms.TimeInput(attrs={"type": "time"}),
             "end_time": forms.TimeInput(attrs={"type": "time"}),
+            "cutoff_check_in_offset": forms.TextInput(
+                attrs={"placeholder": "04:30:00", "class": "oh-input w-100 form-control"}
+            ),
+            "cutoff_check_out_offset": forms.TextInput(
+                attrs={"placeholder": "07:00:00", "class": "oh-input w-100 form-control"}
+            ),
         }
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        instance = kwargs.get("instance")
 
-        if instance:
-            self.fields["start_time"].initial = (
-                instance.start_time.strftime("%H:%M") if instance.start_time else None
-            )
-            self.fields["end_time"].initial = (
-                instance.end_time.strftime("%H:%M") if instance.end_time else None
-            )
+        # Grace time optional
+        if "grace_time_id" in self.fields:
+            self.fields["grace_time_id"].required = False
+            self.fields["grace_time_id"].help_text = "Leave empty to apply no grace time."
+
+        # Set initial values from instance (Django pops "instance" from kwargs, so use self.instance)
+        instance = getattr(self, "instance", None)
+        if instance and getattr(instance, "pk", None):
+
+            # HTML <input type="time"> expects HH:MM
+            if "start_time" in self.fields and instance.start_time:
+                self.fields["start_time"].initial = instance.start_time.strftime("%H:%M")
+
+            if "end_time" in self.fields and instance.end_time:
+                self.fields["end_time"].initial = instance.end_time.strftime("%H:%M")
+
             if apps.is_installed("attendance"):
-                self.fields["auto_punch_out_time"].initial = (
-                    instance.auto_punch_out_time.strftime("%H:%M")
-                    if instance.auto_punch_out_time
-                    else None
-                )
+                if "auto_punch_out_time" in self.fields and instance.auto_punch_out_time:
+                    self.fields["auto_punch_out_time"].initial = (
+                        instance.auto_punch_out_time.strftime("%H:%M")
+                    )
 
+            # Cutoff offsets shown as HH:MM:SS (string)
+            # Prefer string field if exists, else fallback to secs field
+            if "cutoff_check_in_offset" in self.fields:
+                val = getattr(instance, "cutoff_check_in_offset", "") or _seconds_to_hhmmss(
+                    getattr(instance, "cutoff_check_in_offset_secs", None)
+                )
+                self.fields["cutoff_check_in_offset"].initial = val
+
+            if "cutoff_check_out_offset" in self.fields:
+                val = getattr(instance, "cutoff_check_out_offset", "") or _seconds_to_hhmmss(
+                    getattr(instance, "cutoff_check_out_offset_secs", None)
+                )
+                self.fields["cutoff_check_out_offset"].initial = val
+
+        # Attendance app-dependent fields
         if not apps.is_installed("attendance"):
             self.fields.pop("auto_punch_out_time", None)
             self.fields.pop("is_auto_punch_out_enabled", None)
         else:
-            self.fields["auto_punch_out_time"].widget = forms.TimeInput(
-                attrs={"type": "time", "class": "oh-input w-100 form-control"}
-            )
-            self.fields["is_auto_punch_out_enabled"].widget.attrs.update(
-                {"onchange": "toggleDivVisibility(this)"}
-            )
-
+            # Set widgets only if fields exist
+            if "auto_punch_out_time" in self.fields:
+                self.fields["auto_punch_out_time"].widget = forms.TimeInput(
+                    attrs={"type": "time", "class": "oh-input w-100 form-control"}
+                )
+            if "is_auto_punch_out_enabled" in self.fields:
+                self.fields["is_auto_punch_out_enabled"].widget.attrs.update(
+                    {"onchange": "toggleDivVisibility(this)"}
+                )
+                
     def as_p(self):
         """
         Render the form fields as HTML table rows with Bootstrap styling.
@@ -1178,7 +1214,7 @@ class EmployeeShiftScheduleUpdateForm(ModelForm):
                             )
                         }
                     )
-                elif auto_punch_out_time < end_time:
+                if auto_punch_out_time and end_time and auto_punch_out_time < end_time:
                     raise ValidationError(
                         {
                             "auto_punch_out_time": _(
@@ -1206,38 +1242,79 @@ class EmployeeShiftScheduleForm(ModelForm):
 
         model = EmployeeShiftSchedule
         fields = "__all__"
-        exclude = ["is_night_shift", "is_active"]
+        exclude = [
+            "is_night_shift",
+            "is_active",
+            "cutoff_check_in_offset_secs",
+            "cutoff_check_out_offset_secs",
+        ]
+        widgets = {
+            "start_time": forms.TimeInput(attrs={"type": "time"}),
+            "end_time": forms.TimeInput(attrs={"type": "time"}),
+            "cutoff_check_in_offset": forms.TextInput(
+                attrs={"placeholder": "04:30:00", "class": "oh-input w-100 form-control"}
+            ),
+            "cutoff_check_out_offset": forms.TextInput(
+                attrs={"placeholder": "07:00:00", "class": "oh-input w-100 form-control"}
+            ),
+        }
 
     def __init__(self, *args, **kwargs):
-        if instance := kwargs.get("instance"):
-            # """
-            # django forms not showing value inside the date, time html element.
-            # so here overriding default forms instance method to set initial value
-            # """
-            initial = {
-                "start_time": instance.start_time.strftime("%H:%M"),
-                "end_time": instance.end_time.strftime("%H:%M"),
-            }
-            if apps.is_installed("attendance"):
-                initial["auto_punch_out_time"] = (
-                    instance.auto_punch_out_time.strftime("%H:%M")
-                    if instance.auto_punch_out_time
-                    else None
-                )
-            kwargs["initial"] = initial
         super().__init__(*args, **kwargs)
+
+        # Keep random IDs behavior you already had (optional but fine)
         self.fields["day"].widget.attrs.update({"id": str(uuid.uuid4())})
-        self.fields["shift_id"].widget.attrs.update({"id": str(uuid.uuid4())})
+        if "shift_id" in self.fields:
+            self.fields["shift_id"].widget.attrs.update({"id": str(uuid.uuid4())})
+
+        # Grace time optional
+        if "grace_time_id" in self.fields:
+            self.fields["grace_time_id"].required = False
+            self.fields["grace_time_id"].help_text = "Leave empty to apply no grace time."
+
+        # Set initial values from instance (use self.instance)
+        instance = getattr(self, "instance", None)
+        if instance and getattr(instance, "pk", None):
+
+            # HTML <input type="time"> expects HH:MM
+            if "start_time" in self.fields and instance.start_time:
+                self.fields["start_time"].initial = instance.start_time.strftime("%H:%M")
+
+            if "end_time" in self.fields and instance.end_time:
+                self.fields["end_time"].initial = instance.end_time.strftime("%H:%M")
+
+            if apps.is_installed("attendance"):
+                if "auto_punch_out_time" in self.fields and instance.auto_punch_out_time:
+                    self.fields["auto_punch_out_time"].initial = (
+                        instance.auto_punch_out_time.strftime("%H:%M")
+                    )
+
+            # Cutoff offsets shown as HH:MM:SS (string)
+            if "cutoff_check_in_offset" in self.fields:
+                val = getattr(instance, "cutoff_check_in_offset", "") or _seconds_to_hhmmss(
+                    getattr(instance, "cutoff_check_in_offset_secs", None)
+                )
+                self.fields["cutoff_check_in_offset"].initial = val
+
+            if "cutoff_check_out_offset" in self.fields:
+                val = getattr(instance, "cutoff_check_out_offset", "") or _seconds_to_hhmmss(
+                    getattr(instance, "cutoff_check_out_offset_secs", None)
+                )
+                self.fields["cutoff_check_out_offset"].initial = val
+
+        # Attendance app-dependent fields
         if not apps.is_installed("attendance"):
             self.fields.pop("auto_punch_out_time", None)
             self.fields.pop("is_auto_punch_out_enabled", None)
         else:
-            self.fields["auto_punch_out_time"].widget = forms.TimeInput(
-                attrs={"type": "time", "class": "oh-input w-100 form-control"}
-            )
-            self.fields["is_auto_punch_out_enabled"].widget.attrs.update(
-                {"onchange": "toggleDivVisibility(this)"}
-            )
+            if "auto_punch_out_time" in self.fields:
+                self.fields["auto_punch_out_time"].widget = forms.TimeInput(
+                    attrs={"type": "time", "class": "oh-input w-100 form-control"}
+                )
+            if "is_auto_punch_out_enabled" in self.fields:
+                self.fields["is_auto_punch_out_enabled"].widget.attrs.update(
+                    {"onchange": "toggleDivVisibility(this)"}
+                )
 
     def as_p(self):
         """
@@ -1427,7 +1504,7 @@ class RotatingShiftAssignForm(ModelForm):
         label=_trans("Employees"),
     )
     based_on = forms.ChoiceField(
-        choices=BASED_ON, initial="daily", label=_trans("Based on")
+        choices=BASED_ON, initial="after", label=_trans("Based on")
     )
     rotate_after_day = forms.IntegerField(initial=5, label=_trans("Rotate after day"))
 
@@ -1507,19 +1584,12 @@ class RotatingShiftAssignForm(ModelForm):
         if employee_ids:
             return employee_ids[0]
         else:
-            return ValidationError(_("This field is required"))
+            raise  ValidationError(_("This field is required"))
 
     def clean(self):
-        super().clean()
-        self.instance.employee_id = Employee.objects.filter(
-            id=self.data.get("employee_id")
-        ).first()
-
-        self.errors.pop("employee_id", None)
-        if self.instance.employee_id is None:
-            raise ValidationError({"employee_id": _("This field is required")})
-        super().clean()
         cleaned_data = super().clean()
+        if not self.data.getlist("employee_id"):
+            raise ValidationError({"employee_id": _("This field is required")})
         if "rotate_after_day" in self.errors:
             del self.errors["rotate_after_day"]
         return cleaned_data
@@ -1558,6 +1628,8 @@ class RotatingShiftAssignForm(ModelForm):
             rotating_shift_assign.next_change_date = self.cleaned_data["start_date"]
             rotating_shift_assign.current_shift = employee.employee_work_info.shift_id
             rotating_shift_assign.next_shift = rotating_shift.shift1
+            if rotating_shift_assign.additional_data is None:
+                rotating_shift_assign.additional_data = {}
             rotating_shift_assign.additional_data["next_shift_index"] = 1
             based_on = self.cleaned_data["based_on"]
             start_date = self.cleaned_data["start_date"]
@@ -1584,7 +1656,7 @@ class RotatingShiftAssignUpdateForm(ModelForm):
     """
 
     based_on = forms.ChoiceField(
-        choices=BASED_ON, initial="daily", label=_trans("Based on")
+        choices=BASED_ON, initial="after", label=_trans("Based on")
     )
 
     class Meta:
@@ -1994,15 +2066,12 @@ class ResetPasswordForm(SetPasswordForm):
                 messages.success(request, _("Password changed successfully"))
         return super().save()
 
-    def clean_confirm_password(self):
-        """
-        validation method for confirm password field
-        """
-        password = self.cleaned_data.get("password")
-        confirm_password = self.cleaned_data.get("confirm_password")
-        if password == confirm_password:
-            return confirm_password
-        raise forms.ValidationError(_("Password must be same."))
+    def clean_new_password2(self):
+        p1 = self.cleaned_data.get("new_password1")
+        p2 = self.cleaned_data.get("new_password2")
+        if p1 and p2 and p1 != p2:
+            raise ValidationError(_("Password must be same."))
+        return p2
 
 
 excluded_fields = [
@@ -2607,31 +2676,29 @@ class AttendanceAllowedIPForm(forms.ModelForm):
         fields = ["ip_addresses"]
 
     def clean_ip_addresses(self):
-        ip_addresses = self.cleaned_data.get("ip_addresses", "").strip().split("\n")
+        raw = self.cleaned_data.get("ip_addresses", "")
+        parts = [p.strip() for p in raw.replace("\n", ",").split(",")]
         cleaned_ips = []
-        for ip in ip_addresses:
-            ip = ip.strip().split(", ")
-            if ip:
-                for ip_addr in ip:
-                    validate_ip_or_cidr(ip_addr)
-                    cleaned_ips.append(ip_addr)
+        for ip_addr in parts:
+            if not ip_addr:
+                continue
+            validate_ip_or_cidr(ip_addr)
+            cleaned_ips.append(ip_addr)
         return cleaned_ips
 
     def save(self, commit=True):
         instance = super().save(commit=False)
+        instance.additional_data = instance.additional_data or {}
+    
         if instance.pk:
             existing_ips = set(instance.additional_data.get("allowed_ips", []))
             new_ips = set(self.cleaned_data["ip_addresses"])
-            merged_ips = list(existing_ips.union(new_ips))
-            instance.additional_data["allowed_ips"] = merged_ips
+            instance.additional_data["allowed_ips"] = list(existing_ips | new_ips)
         else:
-            instance.additional_data = {
-                "allowed_ips": self.cleaned_data["ip_addresses"]
-            }
-
+            instance.additional_data["allowed_ips"] = self.cleaned_data["ip_addresses"]
+    
         if commit:
             instance.save()
-
         return instance
 
 
@@ -2651,10 +2718,9 @@ class AttendanceAllowedIPUpdateForm(ModelForm):
 
     def clean(self):
         cleaned_data = super().clean()
-
-        for field_name, value in self.data.items():
-            cleaned_data[field_name] = self.validate_ip_address(value)
-
+        ip = cleaned_data.get("ip_address")
+        if ip:
+            cleaned_data["ip_address"] = self.validate_ip_address(ip)
         return cleaned_data
 
 
