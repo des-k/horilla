@@ -115,7 +115,14 @@ class Company(HorillaModel):
         return str(self.company)
     
     def save(self, *args, **kwargs):
+        is_new = self.pk is None
         super().save(*args, **kwargs)
+    
+        if is_new and Company.objects.count() == 1:
+            if not self.is_default:
+                Company.objects.filter(id=self.id).update(is_default=True)
+                self.is_default = True
+    
         if self.is_default:
             Company.objects.exclude(id=self.id).filter(is_default=True).update(is_default=False)
 
