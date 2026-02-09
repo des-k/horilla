@@ -723,7 +723,7 @@ class EmployeeShiftSchedule(HorillaModel):
             self.cutoff_check_out_offset = normalized
             self.cutoff_check_out_offset_secs = secs
     
-        super().save(*args, **kwargs))
+        super().save(*args, **kwargs)
 
     def clean(self):
         super().clean()
@@ -1814,12 +1814,15 @@ class AttendanceAllowedIP(models.Model):
         """
         Validate that all entries in `allowed_ips` are either valid IP addresses or network prefixes.
         """
-        allowed_ips = self.additional_data.get("allowed_ips", [])
-        for ip in allowed_ips:
+        allowed_ips = (self.additional_data or {}).get("allowed_ips", [])
+        for val in allowed_ips:
             try:
-                ipaddress.ip_network(ip)
+                ipaddress.ip_address(val)  # IP tunggal
             except ValueError:
-                raise ValidationError(f"Invalid IP address or network prefix: {ip}")
+                try:
+                    ipaddress.ip_network(val, strict=False)  # CIDR / prefix
+                except ValueError:
+                    raise ValidationError(f"Invalid IP address or network prefix: {val}")
 
     def __str__(self):
         return f"AttendanceAllowedIP - {self.is_enabled}"
