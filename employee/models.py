@@ -708,6 +708,24 @@ class EmployeeWorkInformation(models.Model):
         return f"{self.employee_id} - {self.job_position_id}"
 
     def save(self, *args, **kwargs):
+        """
+        Auto-fill company & shift if not set:
+        - company_id: default company (Company.is_default=True) else first company
+        - shift_id: company.default_employee_shift_id (if exists)
+        """
+        # 1) Default company
+        if self.company_id_id is None:
+            default_company = Company.objects.filter(is_default=True).first()
+            if default_company is None:
+                default_company = Company.objects.order_by("id").first()
+            if default_company is not None:
+                self.company_id = default_company
+
+        # 2) Default shift dari company
+        if self.shift_id_id is None and self.company_id_id is not None:
+            default_shift = getattr(self.company_id, "default_employee_shift_id", None)
+            if default_shift is not None:
+                self.shift_id = default_shift        
         self.full_clean()
         super().save(*args, **kwargs)
 
