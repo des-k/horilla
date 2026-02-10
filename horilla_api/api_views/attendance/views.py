@@ -487,34 +487,34 @@ class ClockOutAPIView(APIView):
         attendance_date, day, minimum_hour, start_time_sec, end_time_sec, _, now_sec = (
             _api_resolve_attendance_date_and_day(shift, dt_now)
         )
-            # Enforce check-out cut-off (timezone-safe)
-            cutoff_out_dt = None
-            try:
-                schedule = None
-                if hasattr(cio, "_get_schedule"):
-                    schedule = cio._get_schedule(shift, day)
-                if schedule and getattr(schedule, "end_time", None):
-                    end_date = attendance_date + timedelta(
-                        days=1 if getattr(schedule, "is_night_shift", False) else 0
-                    )
-                    end_dt = _combine_date_time(end_date, schedule.end_time, dt_now)
-                    cutoff_out_dt = end_dt + timedelta(
-                        seconds=int(getattr(schedule, "cutoff_check_out_offset_secs", 0) or 0)
-                    )
-                    cutoff_out_dt = _coerce_datetime_like(cutoff_out_dt, dt_now)
-            except Exception:
-                cutoff_out_dt = None
-
-            if cutoff_out_dt and dt_now > cutoff_out_dt:
-                return Response(
-                    {
-                        "error": "Check-out cut-off has passed.",
-                        "last_allowed": cutoff_out_dt.strftime("%Y-%m-%d %H:%M"),
-                    },
-                    status=400,
+        # Enforce check-out cut-off (timezone-safe)
+        cutoff_out_dt = None
+        try:
+            schedule = None
+            if hasattr(cio, "_get_schedule"):
+                schedule = cio._get_schedule(shift, day)
+            if schedule and getattr(schedule, "end_time", None):
+                end_date = attendance_date + timedelta(
+                    days=1 if getattr(schedule, "is_night_shift", False) else 0
                 )
+                end_dt = _combine_date_time(end_date, schedule.end_time, dt_now)
+                cutoff_out_dt = end_dt + timedelta(
+                    seconds=int(getattr(schedule, "cutoff_check_out_offset_secs", 0) or 0)
+                )
+                cutoff_out_dt = _coerce_datetime_like(cutoff_out_dt, dt_now)
+        except Exception:
+            cutoff_out_dt = None
 
-            image = request.FILES.get("image")
+        if cutoff_out_dt and dt_now > cutoff_out_dt:
+            return Response(
+                {
+                    "error": "Check-out cut-off has passed.",
+                    "last_allowed": cutoff_out_dt.strftime("%Y-%m-%d %H:%M"),
+                },
+                status=400,
+            )
+
+        image = request.FILES.get("image")
 
         # Prefer single-session core helper if available; otherwise fall back to calling clock_out view.
         missing_check_in = False
