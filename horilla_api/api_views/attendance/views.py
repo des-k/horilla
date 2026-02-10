@@ -1389,6 +1389,14 @@ class CheckingStatus(APIView):
                     worked_hours = self._format_seconds(diff)
                 except Exception:
                     worked_hours = '00:00:00'
+        # If the check-in cut-off has passed but the check-out cut-off has NOT,
+        # the employee can still clock-out and later submit an attendance request
+        # for the missing check-in. Mobile uses this to auto-switch the main button.
+        missing_check_in_effective = bool(
+            missing_check_in
+            or ((not has_attendance) and check_in_cutoff_passed and (not check_out_cutoff_passed))
+        )
+
 
         resp = {
             'status': status_flag,
@@ -1398,12 +1406,14 @@ class CheckingStatus(APIView):
             'first_check_in': first_in,
             'last_check_out': last_out,
             'worked_hours': worked_hours,
-            'missing_check_in': missing_check_in,
+            'missing_check_in': missing_check_in_effective,
             'can_clock_in': (not has_attendance) and (not check_in_cutoff_passed),
             'can_clock_out': (not check_out_cutoff_passed),
             'check_in_cutoff_passed': check_in_cutoff_passed,
+            'check_in_cutoff_has_passed': check_in_cutoff_passed,
             'check_in_last_allowed': check_in_last_allowed,
             'check_out_cutoff_passed': check_out_cutoff_passed,
+            'check_out_cutoff_has_passed': check_out_cutoff_passed,
             'check_out_last_allowed': check_out_last_allowed,
             'suggested_action': 'clock_out' if ((not has_attendance) and check_in_cutoff_passed and (not check_out_cutoff_passed)) else ('clock_in' if ((not has_attendance) and (not check_in_cutoff_passed)) else None),
             # Backward compatible keys
