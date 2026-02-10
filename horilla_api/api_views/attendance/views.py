@@ -93,6 +93,40 @@ def _api_today(request, dt_now: datetime) -> date:
     return d_attr if isinstance(d_attr, date) else dt_now.date()
 
 
+def _coerce_datetime_like(dt_value: datetime | None, ref_dt: datetime) -> datetime | None:
+    """Ensure dt_value has the same timezone-awareness as ref_dt.
+
+    - If USE_TZ=True and dt_value is naive, make it aware using ref_dt.tzinfo (or current timezone).
+    - If USE_TZ=True and dt_value is aware, convert to ref_dt's timezone for safe comparison.
+    - If USE_TZ=False and dt_value is aware, make it naive.
+    """
+    if dt_value is None:
+        return None
+
+    use_tz = getattr(settings, "USE_TZ", False)
+
+    if use_tz:
+        # ref tzinfo: prefer ref_dt, fallback to Django current timezone.
+        ref_tz = ref_dt.tzinfo if dj_timezone.is_aware(ref_dt) and ref_dt.tzinfo else dj_timezone.get_current_timezone()
+
+        if dj_timezone.is_naive(dt_value):
+            return dj_timezone.make_aware(dt_value, ref_tz)
+
+        # dt_value aware: normalize to ref_tz for consistent comparisons
+        try:
+            return dj_timezone.localtime(dt_value, ref_tz)
+        except Exception:
+            return dt_value
+
+    # USE_TZ=False
+    if dj_timezone.is_aware(dt_value):
+        try:
+            return dj_timezone.make_naive(dt_value)
+        except Exception:
+            return dt_value
+    return dt_value
+
+
 def _normalize_none(value):
     """Normalize common empty string values to Python None."""
     if value is None:
@@ -305,6 +339,8 @@ class ClockInAPIView(APIView):
             except Exception:
                 cutoff_in_dt = None
 
+            cutoff_in_dt = _coerce_datetime_like(cutoff_in_dt, dt_now)
+
             if cutoff_in_dt and dt_now > cutoff_in_dt:
                 return Response(
                     {
@@ -387,6 +423,8 @@ class ClockOutAPIView(APIView):
                 cutoff_out_dt = cio._calc_cutoff_out_dt(attendance_date, schedule)
         except Exception:
             cutoff_out_dt = None
+
+        cutoff_out_dt = _coerce_datetime_like(cutoff_out_dt, dt_now)
 
         if cutoff_out_dt and dt_now > cutoff_out_dt:
             return Response(
