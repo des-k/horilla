@@ -72,25 +72,79 @@ def query_dict(data):
 # -----------------------------------------------------------------------------
 def _api_now(request) -> datetime:
     """
-    Resolve a request datetime.
+    Resolve a request datetime with consistent timezone-awareness.
 
     Priority:
     1) request.datetime (if injected by a wrapper)
     2) timezone-aware now() if USE_TZ
     3) naive datetime.now()
+
+    IMPORTANT:
+    - When USE_TZ=True, we ALWAYS return an offset-aware datetime.
+    - When USE_TZ=False, we ALWAYS return an offset-naive datetime.
     """
+    use_tz = getattr(settings, "USE_TZ", False)
     dt_attr = getattr(request, "datetime", None)
+
     if dt_attr:
+        if use_tz:
+            if dj_timezone.is_naive(dt_attr):
+                dt_attr = dj_timezone.make_aware(dt_attr, dj_timezone.get_current_timezone())
+            try:
+                return dj_timezone.localtime(dt_attr)
+            except Exception:
+                return dt_attr
+
+        # USE_TZ=False
+        if dj_timezone.is_aware(dt_attr):
+            try:
+                return dj_timezone.make_naive(dt_attr)
+            except Exception:
+                return dt_attr
         return dt_attr
-    if getattr(settings, "USE_TZ", False):
+
+    if use_tz:
         return dj_timezone.localtime(dj_timezone.now())
+
     return datetime.now()
-
-
 def _api_today(request, dt_now: datetime) -> date:
     """Resolve a request date if provided, otherwise use dt_now.date()."""
     d_attr = getattr(request, "date", None)
     return d_attr if isinstance(d_attr, date) else dt_now.date()
+
+
+def _coerce_datetime_like(dt_value: datetime | None, ref_dt: datetime) -> datetime | None:
+    """Ensure dt_value has the same timezone-awareness as ref_dt.
+
+    - If USE_TZ=True and dt_value is naive, make it aware using ref_dt.tzinfo (or current timezone).
+    - If USE_TZ=True and dt_value is aware, convert to ref_dt's timezone for safe comparison.
+    - If USE_TZ=False and dt_value is aware, make it naive.
+    """
+    if dt_value is None:
+        return None
+
+    use_tz = getattr(settings, "USE_TZ", False)
+
+    if use_tz:
+        # ref tzinfo: prefer ref_dt, fallback to Django current timezone.
+        ref_tz = ref_dt.tzinfo if dj_timezone.is_aware(ref_dt) and ref_dt.tzinfo else dj_timezone.get_current_timezone()
+
+        if dj_timezone.is_naive(dt_value):
+            return dj_timezone.make_aware(dt_value, ref_tz)
+
+        # dt_value aware: normalize to ref_tz for consistent comparisons
+        try:
+            return dj_timezone.localtime(dt_value, ref_tz)
+        except Exception:
+            return dt_value
+
+    # USE_TZ=False
+    if dj_timezone.is_aware(dt_value):
+        try:
+            return dj_timezone.make_naive(dt_value)
+        except Exception:
+            return dt_value
+    return dt_value
 
 
 def _normalize_none(value):
@@ -269,10 +323,10 @@ class ClockInAPIView(APIView):
 
     permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser, JSONParser]
-
     def post(self, request):
-        if request.user.employee_get.check_online():
-            return Response({"message": "Already clocked-in"}, status=400)
+        # NOTE: We intentionally avoid using employee.check_online() here because some
+        # deployments may mix tz-aware and tz-naive datetimes inside that helper, which
+        # can cause a server error. We do our own safe single-session checks below.
 
         try:
             if request.user.employee_get.get_company().geo_fencing.start:
@@ -295,6 +349,37 @@ class ClockInAPIView(APIView):
             attendance_date, day, minimum_hour, start_time_sec, end_time_sec, now_hhmm, _ = (
                 _api_resolve_attendance_date_and_day(shift, dt_now)
             )
+            # Single-session: block multiple check-ins
+            try:
+                # If there is an open attendance (no clock-out date) from yesterday/today, treat as already checked-in
+                open_att = Attendance.objects.filter(
+                    employee_id=employee,
+                    attendance_date__gte=attendance_date - timedelta(days=1),
+                    attendance_date__lte=attendance_date,
+                    attendance_clock_out_date__isnull=True,
+                ).order_by("-attendance_date", "-id").first()
+                if open_att and open_att.attendance_clock_in:
+                    return Response({"error": "Already clocked-in"}, status=400)
+
+                # If any attendance already exists for the resolved attendance_date, do not allow another check-in
+                existing = Attendance.objects.filter(
+                    employee_id=employee, attendance_date=attendance_date
+                ).order_by("-id").first()
+                if existing:
+                    return Response(
+                        {
+                            "error": "Attendance already exists for this date.",
+                            "attendance_date": str(attendance_date),
+                            "missing_check_in": bool(
+                                (not existing.attendance_clock_in) and existing.attendance_clock_out
+                            ),
+                        },
+                        status=400,
+                    )
+            except Exception:
+                # Keep check-in flow resilient even if this pre-check fails
+                pass
+
 
             # Enforce check-in cutoff if helper exists
             cutoff_in_dt = None
@@ -305,11 +390,18 @@ class ClockInAPIView(APIView):
             except Exception:
                 cutoff_in_dt = None
 
+            cutoff_in_dt = _coerce_datetime_like(cutoff_in_dt, dt_now)
+
             if cutoff_in_dt and dt_now > cutoff_in_dt:
                 return Response(
                     {
                         "error": "Check-in cut-off has passed.",
+                        "code": "CHECKIN_CUTOFF_PASSED",
+                        "attendance_date": str(attendance_date),
+                        "missing_check_in": True,
                         "last_allowed": cutoff_in_dt.strftime("%Y-%m-%d %H:%M"),
+                        "can_clock_out": True,
+                        "suggested_action": "clock_out",
                     },
                     status=400,
                 )
@@ -387,6 +479,8 @@ class ClockOutAPIView(APIView):
                 cutoff_out_dt = cio._calc_cutoff_out_dt(attendance_date, schedule)
         except Exception:
             cutoff_out_dt = None
+
+        cutoff_out_dt = _coerce_datetime_like(cutoff_out_dt, dt_now)
 
         if cutoff_out_dt and dt_now > cutoff_out_dt:
             return Response(
@@ -1190,10 +1284,22 @@ class CheckingStatus(APIView):
             'first_check_in': None,
             'last_check_out': None,
             'worked_hours': '00:00:00',
+            'missing_check_in': False,
+            'can_clock_in': False,
+            'can_clock_out': False,
+            'check_in_cutoff_passed': False,
+            'check_in_last_allowed': None,
+            'check_out_cutoff_passed': False,
+            'check_out_last_allowed': None,
+            'suggested_action': None,
             # Backward compatible keys
             'duration': '00:00:00',
             'clock_in': None,
             'clock_in_time': None,
+            'check_in_image': None,
+            'check_out_image': None,
+            'clock_in_image': None,
+            'clock_out_image': None,
         }
 
         if not employee or not work_info or not getattr(work_info, 'shift_id', None):
@@ -1202,6 +1308,32 @@ class CheckingStatus(APIView):
         shift = work_info.shift_id
 
         attendance_date, day, _, _, _, _, _ = _api_resolve_attendance_date_and_day(shift, dt_now)
+
+        # Cut-off hints for mobile UI (single-session)
+        schedule = None
+        cutoff_in_dt = None
+        cutoff_out_dt = None
+        try:
+            if hasattr(cio, '_get_schedule'):
+                schedule = cio._get_schedule(shift, day)
+            if schedule and hasattr(cio, '_calc_cutoff_in_dt'):
+                cutoff_in_dt = cio._calc_cutoff_in_dt(attendance_date, schedule)
+            if schedule and hasattr(cio, '_calc_cutoff_out_dt'):
+                cutoff_out_dt = cio._calc_cutoff_out_dt(attendance_date, schedule)
+        except Exception:
+            schedule = None
+            cutoff_in_dt = None
+            cutoff_out_dt = None
+
+        cutoff_in_dt = _coerce_datetime_like(cutoff_in_dt, dt_now)
+        cutoff_out_dt = _coerce_datetime_like(cutoff_out_dt, dt_now)
+
+        check_in_last_allowed = cutoff_in_dt.strftime('%Y-%m-%d %H:%M') if cutoff_in_dt else None
+        check_out_last_allowed = cutoff_out_dt.strftime('%Y-%m-%d %H:%M') if cutoff_out_dt else None
+
+        check_in_cutoff_passed = bool(cutoff_in_dt and dt_now > cutoff_in_dt)
+        check_out_cutoff_passed = bool(cutoff_out_dt and dt_now > cutoff_out_dt)
+
 
         attendance = (
             Attendance.objects.filter(employee_id=employee, attendance_date=attendance_date)
@@ -1212,6 +1344,8 @@ class CheckingStatus(APIView):
         has_attendance = bool(attendance)
         first_in = None
         last_out = None
+        in_img = None
+        out_img = None
         has_checked_in = False
         has_checked_out = False
         missing_check_in = False
@@ -1223,6 +1357,19 @@ class CheckingStatus(APIView):
 
             first_in = self._fmt_ampm(attendance.attendance_clock_in)
             last_out = self._fmt_ampm(attendance.attendance_clock_out)
+
+            # Image URLs (MEDIA URL path)
+            try:
+                if attendance.attendance_clock_in_image:
+                    in_img = attendance.attendance_clock_in_image.url
+            except Exception:
+                in_img = None
+            try:
+                if attendance.attendance_clock_out_image:
+                    out_img = attendance.attendance_clock_out_image.url
+            except Exception:
+                out_img = None
+
 
         # "status" means "currently checked-in" (checked-in but not checked-out)
         status_flag = bool(has_checked_in and not has_checked_out)
@@ -1236,7 +1383,9 @@ class CheckingStatus(APIView):
                 # Live duration while checked-in
                 try:
                     in_dt = datetime.combine(attendance.attendance_clock_in_date, attendance.attendance_clock_in)
-                    diff = max(0, int((dt_now - in_dt).total_seconds()))
+                    in_dt = _coerce_datetime_like(in_dt, dt_now)
+                    dt_now_safe = _coerce_datetime_like(dt_now, in_dt) if in_dt else dt_now
+                    diff = max(0, int((dt_now_safe - in_dt).total_seconds())) if in_dt else 0
                     worked_hours = self._format_seconds(diff)
                 except Exception:
                     worked_hours = '00:00:00'
@@ -1250,10 +1399,21 @@ class CheckingStatus(APIView):
             'last_check_out': last_out,
             'worked_hours': worked_hours,
             'missing_check_in': missing_check_in,
+            'can_clock_in': (not has_attendance) and (not check_in_cutoff_passed),
+            'can_clock_out': (not check_out_cutoff_passed),
+            'check_in_cutoff_passed': check_in_cutoff_passed,
+            'check_in_last_allowed': check_in_last_allowed,
+            'check_out_cutoff_passed': check_out_cutoff_passed,
+            'check_out_last_allowed': check_out_last_allowed,
+            'suggested_action': 'clock_out' if ((not has_attendance) and check_in_cutoff_passed and (not check_out_cutoff_passed)) else ('clock_in' if ((not has_attendance) and (not check_in_cutoff_passed)) else None),
             # Backward compatible keys
             'duration': worked_hours,
             'clock_in': first_in,
             'clock_in_time': first_in,
+            'check_in_image': in_img,
+            'check_out_image': out_img,
+            'clock_in_image': in_img,
+            'clock_out_image': out_img,
         }
 
         return Response(resp, status=200)
