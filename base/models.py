@@ -53,6 +53,32 @@ def validate_hh_mm_ss_format(value):
     except ValueError as e:
         raise ValidationError(_("Invalid format, it should be HH:MM:SS format")) from e
 
+def validate_time_format(value):
+    """
+    Validates duration string in HH:MM format (duration, hours can exceed 23).
+    Examples: 09:00, 40:00, 200:00
+    """
+    try:
+        if value is None:
+            return
+        value = str(value).strip()
+        parts = value.split(":")
+        if len(parts) != 2:
+            raise ValueError("Expected HH:MM")
+
+        hours_str, mins_str = parts[0].strip(), parts[1].strip()
+
+        # minutes must be exactly 2 digits
+        if not hours_str.isdigit() or not mins_str.isdigit() or len(mins_str) != 2:
+            raise ValueError("Expected HH:MM digits")
+
+        mins = int(mins_str)
+        if mins < 0 or mins > 59:
+            raise ValueError("Minutes must be 00-59")
+
+    except Exception as e:
+        raise ValidationError(_("Invalid format, it should be HH:MM format")) from e
+
 
 def _normalize_hh_mm_ss_to_secs(value: str) -> tuple[str, int]:
     """
