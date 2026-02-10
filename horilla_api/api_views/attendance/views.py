@@ -303,10 +303,10 @@ class ClockInAPIView(APIView):
 
     permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser, JSONParser]
-
     def post(self, request):
-        if request.user.employee_get.check_online():
-            return Response({"message": "Already clocked-in"}, status=400)
+        # NOTE: We intentionally avoid using employee.check_online() here because some
+        # deployments may mix tz-aware and tz-naive datetimes inside that helper, which
+        # can cause a server error. We do our own safe single-session checks below.
 
         try:
             if request.user.employee_get.get_company().geo_fencing.start:
@@ -329,6 +329,37 @@ class ClockInAPIView(APIView):
             attendance_date, day, minimum_hour, start_time_sec, end_time_sec, now_hhmm, _ = (
                 _api_resolve_attendance_date_and_day(shift, dt_now)
             )
+            # Single-session: block multiple check-ins
+            try:
+                # If there is an open attendance (no clock-out date) from yesterday/today, treat as already checked-in
+                open_att = Attendance.objects.filter(
+                    employee_id=employee,
+                    attendance_date__gte=attendance_date - timedelta(days=1),
+                    attendance_date__lte=attendance_date,
+                    attendance_clock_out_date__isnull=True,
+                ).order_by("-attendance_date", "-id").first()
+                if open_att and open_att.attendance_clock_in:
+                    return Response({"error": "Already clocked-in"}, status=400)
+
+                # If any attendance already exists for the resolved attendance_date, do not allow another check-in
+                existing = Attendance.objects.filter(
+                    employee_id=employee, attendance_date=attendance_date
+                ).order_by("-id").first()
+                if existing:
+                    return Response(
+                        {
+                            "error": "Attendance already exists for this date.",
+                            "attendance_date": str(attendance_date),
+                            "missing_check_in": bool(
+                                (not existing.attendance_clock_in) and existing.attendance_clock_out
+                            ),
+                        },
+                        status=400,
+                    )
+            except Exception:
+                # Keep check-in flow resilient even if this pre-check fails
+                pass
+
 
             # Enforce check-in cutoff if helper exists
             cutoff_in_dt = None
