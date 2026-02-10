@@ -3,9 +3,11 @@ from datetime import date, datetime, timedelta, timezone
 from django import template
 from django.conf import settings
 from django.core.mail import EmailMessage
+from django.db import transaction
 from django.db.models import Case, CharField, F, Value, When
 from django.http import QueryDict
 from django.shortcuts import get_object_or_404
+from django.utils import timezone as dj_timezone
 from django.utils.decorators import method_decorator
 from rest_framework import status
 from rest_framework.pagination import PageNumberPagination
@@ -14,9 +16,16 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 
-from attendance.models import Attendance, AttendanceActivity, EmployeeShiftDay
+from attendance.models import (
+    Attendance,
+    AttendanceActivity,
+    AttendanceLateComeEarlyOut,
+    EmployeeShiftDay,
+)
 from attendance.views.clock_in_out import *
 from attendance.views.clock_in_out import clock_out
+import attendance.views.clock_in_out as cio  # Access underscore helpers excluded by import *
+
 from attendance.views.dashboard import (
     find_expected_attendances,
     find_late_come,
@@ -58,103 +67,212 @@ def query_dict(data):
     return query_dict
 
 
+# -----------------------------------------------------------------------------
+# Mobile single-session helpers
+# -----------------------------------------------------------------------------
+def _api_now(request) -> datetime:
+    """
+    Resolve a request datetime.
+
+    Priority:
+    1) request.datetime (if injected by a wrapper)
+    2) timezone-aware now() if USE_TZ
+    3) naive datetime.now()
+    """
+    dt_attr = getattr(request, "datetime", None)
+    if dt_attr:
+        return dt_attr
+    if getattr(settings, "USE_TZ", False):
+        return dj_timezone.localtime(dj_timezone.now())
+    return datetime.now()
+
+
+def _api_today(request, dt_now: datetime) -> date:
+    """Resolve a request date if provided, otherwise use dt_now.date()."""
+    d_attr = getattr(request, "date", None)
+    return d_attr if isinstance(d_attr, date) else dt_now.date()
+
+
+def _normalize_none(value):
+    """Normalize common empty string values to Python None."""
+    if value is None:
+        return None
+    if isinstance(value, str) and value.strip() in ("", "None", "null", "NULL"):
+        return None
+    return value
+
+
+def _normalize_requested_data(requested_data: dict) -> dict:
+    """Normalize JSON-requested_data so it can be used safely in queryset.update()."""
+    if not requested_data:
+        return requested_data
+
+    for key in (
+        "attendance_date",
+        "attendance_clock_in_date",
+        "attendance_clock_out_date",
+        "attendance_clock_in",
+        "attendance_clock_out",
+        "attendance_worked_hour",
+        "minimum_hour",
+        "batch_attendance_id",
+        "shift_id",
+        "work_type_id",
+    ):
+        if key in requested_data:
+            requested_data[key] = _normalize_none(requested_data[key])
+
+    return requested_data
+
+
+def _api_resolve_attendance_date_and_day(shift, dt_now: datetime):
+    """
+    Apply Horilla night-shift noon-to-noon rule to resolve attendance_date and day.
+
+    Returns:
+        attendance_date, day_obj, minimum_hour, start_time_sec, end_time_sec, now_hhmm, now_sec
+    """
+    date_today = dt_now.date()
+    now_hhmm = dt_now.strftime("%H:%M")
+    now_sec = strtime_seconds(now_hhmm)
+    mid_day_sec = strtime_seconds("12:00")
+
+    attendance_date = date_today
+    day = EmployeeShiftDay.objects.get(day=date_today.strftime("%A").lower())
+    minimum_hour, start_time_sec, end_time_sec = shift_schedule_today(day=day, shift=shift)
+
+    if start_time_sec > end_time_sec:
+        # Night shift: assign before-noon punches to the previous day.
+        if mid_day_sec > now_sec:
+            date_yesterday = date_today - timedelta(days=1)
+            attendance_date = date_yesterday
+            day = EmployeeShiftDay.objects.get(day=date_yesterday.strftime("%A").lower())
+            minimum_hour, start_time_sec, end_time_sec = shift_schedule_today(day=day, shift=shift)
+
+    return attendance_date, day, minimum_hour, start_time_sec, end_time_sec, now_hhmm, now_sec
+
+
+def _ensure_single_session_activity(attendance: Attendance, prev_attendance_date: date | None = None) -> AttendanceActivity:
+    """
+    Ensure exactly one AttendanceActivity exists for (employee, attendance_date),
+    aligned to the approved Attendance values.
+
+    If attendance_date changed, old-date activities are either moved (if no target exists)
+    or deleted (if a target already exists).
+    """
+    employee = attendance.employee_id
+    target_date = attendance.attendance_date
+
+    if prev_attendance_date and prev_attendance_date != target_date:
+        old_qs = AttendanceActivity.objects.filter(employee_id=employee, attendance_date=prev_attendance_date)
+        if old_qs.exists():
+            if not AttendanceActivity.objects.filter(employee_id=employee, attendance_date=target_date).exists():
+                old_qs.update(attendance_date=target_date)
+            else:
+                old_qs.delete()
+
+    qs = AttendanceActivity.objects.filter(employee_id=employee, attendance_date=target_date).order_by("-id")
+    activity = qs.first()
+    if activity:
+        qs.exclude(id=activity.id).delete()
+    else:
+        activity = AttendanceActivity(employee_id=employee, attendance_date=target_date)
+
+    # Resolve shift day
+    day = attendance.attendance_day
+    if not day:
+        day = EmployeeShiftDay.objects.get(day=target_date.strftime("%A").lower())
+
+    # AttendanceActivity requires a non-null clock_in
+    clock_in_date = attendance.attendance_clock_in_date or attendance.attendance_clock_out_date or target_date
+    clock_in_time = attendance.attendance_clock_in or attendance.attendance_clock_out or datetime.strptime("00:00", "%H:%M").time()
+
+    activity.shift_day = day
+    activity.clock_in_date = clock_in_date
+    activity.clock_in = clock_in_time
+
+    if hasattr(activity, "in_datetime"):
+        activity.in_datetime = datetime.combine(clock_in_date, clock_in_time)
+
+    # Sync OUT fields
+    if attendance.attendance_clock_out and attendance.attendance_clock_out_date:
+        if hasattr(activity, "clock_out_date"):
+            activity.clock_out_date = attendance.attendance_clock_out_date
+        if hasattr(activity, "clock_out"):
+            activity.clock_out = attendance.attendance_clock_out
+        if hasattr(activity, "out_datetime"):
+            activity.out_datetime = datetime.combine(attendance.attendance_clock_out_date, attendance.attendance_clock_out)
+    else:
+        if hasattr(activity, "clock_out_date"):
+            activity.clock_out_date = None
+        if hasattr(activity, "clock_out"):
+            activity.clock_out = None
+        if hasattr(activity, "out_datetime"):
+            activity.out_datetime = None
+
+    activity.save()
+    return activity
+
+
+def _rebuild_late_early(attendance: Attendance):
+    """
+    Recompute late come / early out records after an approval or time edit.
+    """
+    shift = attendance.shift_id
+    if not shift:
+        return
+
+    day = EmployeeShiftDay.objects.get(day=attendance.attendance_date.strftime("%A").lower())
+
+    AttendanceLateComeEarlyOut.objects.filter(
+        attendance_id=attendance, type__in=["late_come", "early_out"]
+    ).delete()
+
+    _, start_time_sec, end_time_sec = shift_schedule_today(day=day, shift=shift)
+
+    schedule = None
+    if hasattr(cio, "_get_schedule"):
+        try:
+            schedule = cio._get_schedule(shift, day)
+        except Exception:
+            schedule = None
+
+    if attendance.attendance_clock_in:
+        late_come(
+            attendance=attendance,
+            start_time=start_time_sec,
+            end_time=end_time_sec,
+            shift=shift,
+            schedule=schedule,
+        )
+
+    if attendance.attendance_clock_out:
+        early_out(
+            attendance=attendance,
+            start_time=start_time_sec,
+            end_time=end_time_sec,
+            shift=shift,
+            schedule=schedule,
+        )
+
+
 class ClockInAPIView(APIView):
     """
-    Allows authenticated employees to clock in, determining the correct shift and attendance date, including handling night shifts.
+    Allows authenticated employees to clock in, determining the correct shift and attendance date,
+    including handling night shifts.
 
-    Methods:
-        post(request): Processes and records the clock-in time.
+    Single-session behavior:
+    - Create one record per (employee, attendance_date)
+    - Do not overwrite the original check-in time if the record already exists
+    - Enforce check-in cutoff if available in clock_in_out helpers
     """
 
     permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def post(self, request):
-        if not request.user.employee_get.check_online():
-            try:
-                if request.user.employee_get.get_company().geo_fencing.start:
-                    from geofencing.views import GeoFencingEmployeeLocationCheckAPIView
-
-                    location_api_view = GeoFencingEmployeeLocationCheckAPIView()
-                    response = location_api_view.post(request)
-                    if response.status_code != 200:
-                        return response
-            except:
-                pass
-            employee, work_info = employee_exists(request)
-            datetime_now = datetime.now()
-            if request.__dict__.get("datetime"):
-                datetime_now = request.datetime
-            if employee and work_info is not None:
-                shift = work_info.shift_id
-                date_today = date.today()
-                if request.__dict__.get("date"):
-                    date_today = request.date
-                attendance_date = date_today
-                day = date_today.strftime("%A").lower()
-                day = EmployeeShiftDay.objects.get(day=day)
-                now = datetime.now().strftime("%H:%M")
-                if request.__dict__.get("time"):
-                    now = request.time.strftime("%H:%M")
-                now_sec = strtime_seconds(now)
-                mid_day_sec = strtime_seconds("12:00")
-                minimum_hour, start_time_sec, end_time_sec = shift_schedule_today(
-                    day=day, shift=shift
-                )
-                if start_time_sec > end_time_sec:
-                    # night shift
-                    # ------------------
-                    # Night shift in Horilla consider a 24 hours from noon to next day noon,
-                    # the shift day taken today if the attendance clocked in after 12 O clock.
-
-                    if mid_day_sec > now_sec:
-                        # Here you need to create attendance for yesterday
-
-                        date_yesterday = date_today - timedelta(days=1)
-                        day_yesterday = date_yesterday.strftime("%A").lower()
-                        day_yesterday = EmployeeShiftDay.objects.get(day=day_yesterday)
-                        minimum_hour, start_time_sec, end_time_sec = (
-                            shift_schedule_today(day=day_yesterday, shift=shift)
-                        )
-                        attendance_date = date_yesterday
-                        day = day_yesterday
-
-                image = request.FILES.get("image")
-                
-                clock_in_attendance_and_activity(
-                    employee=employee,
-                    date_today=date_today,
-                    attendance_date=attendance_date,
-                    day=day,
-                    now=now,
-                    shift=shift,
-                    minimum_hour=minimum_hour,
-                    start_time=start_time_sec,
-                    end_time=end_time_sec,
-                    in_datetime=datetime_now,
-                    clock_in_image=image,
-                )
-                return Response({"message": "Clocked-In"}, status=200)
-            return Response(
-                {
-                    "error": "You Don't have work information filled or your employee detail neither entered "
-                }
-            )
-        return Response({"message": "Already clocked-in"}, status=400)
-
-
-class ClockOutAPIView(APIView):
-    """
-    Allows authenticated employees to clock out, updating the latest attendance record and handling early outs.
-
-    Methods:
-        post(request): Records the clock-out time.
-    """
-
-    permission_classes = [IsAuthenticated]
-    parser_classes = [MultiPartParser, FormParser, JSONParser]
-
-    def post(self, request):
+        if request.user.employee_get.check_online():
+            return Response({"message": "Already clocked-in"}, status=400)
 
         try:
             if request.user.employee_get.get_company().geo_fencing.start:
@@ -164,31 +282,210 @@ class ClockOutAPIView(APIView):
                 response = location_api_view.post(request)
                 if response.status_code != 200:
                     return response
-        except:
+        except Exception:
             pass
-        if request.user.employee_get.check_online():
-            current_date = date.today()
-            current_time = datetime.now().time()
-            current_datetime = datetime.now()
+
+        employee, work_info = employee_exists(request)
+        dt_now = _api_now(request)
+
+        if employee and work_info is not None:
+            shift = work_info.shift_id
+            date_today = _api_today(request, dt_now)
+
+            attendance_date, day, minimum_hour, start_time_sec, end_time_sec, now_hhmm, _ = (
+                _api_resolve_attendance_date_and_day(shift, dt_now)
+            )
+
+            # Enforce check-in cutoff if helper exists
+            cutoff_in_dt = None
+            try:
+                if hasattr(cio, "_get_schedule") and hasattr(cio, "_calc_cutoff_in_dt"):
+                    schedule = cio._get_schedule(shift, day)
+                    cutoff_in_dt = cio._calc_cutoff_in_dt(attendance_date, schedule)
+            except Exception:
+                cutoff_in_dt = None
+
+            if cutoff_in_dt and dt_now > cutoff_in_dt:
+                return Response(
+                    {
+                        "error": "Check-in cut-off has passed.",
+                        "last_allowed": cutoff_in_dt.strftime("%Y-%m-%d %H:%M"),
+                    },
+                    status=400,
+                )
 
             image = request.FILES.get("image")
 
-            try:
+            clock_in_attendance_and_activity(
+                employee=employee,
+                date_today=date_today,
+                attendance_date=attendance_date,
+                day=day,
+                now_hhmm=now_hhmm,
+                shift=shift,
+                minimum_hour=minimum_hour,
+                start_time_sec=start_time_sec,
+                end_time_sec=end_time_sec,
+                in_datetime=dt_now,
+                clock_in_image=image,
+            )
+            return Response(
+                {"message": "Clocked-In", "attendance_date": str(attendance_date)},
+                status=200,
+            )
+
+        return Response(
+            {"error": "Missing work information or employee details."},
+            status=400,
+        )
+
+
+class ClockOutAPIView(APIView):
+    """
+    Allows authenticated employees to clock out, updating the latest attendance record.
+
+    Single-session behavior:
+    - Allow clock-out even if check-in is missing (creates a skeleton)
+    - Allow updating clock-out multiple times (last punch wins)
+    - Enforce check-out cutoff if available in clock_in_out helpers
+    """
+
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
+
+    def post(self, request):
+        try:
+            if request.user.employee_get.get_company().geo_fencing.start:
+                from geofencing.views import GeoFencingEmployeeLocationCheckAPIView
+
+                location_api_view = GeoFencingEmployeeLocationCheckAPIView()
+                response = location_api_view.post(request)
+                if response.status_code != 200:
+                    return response
+        except Exception:
+            pass
+
+        employee, work_info = employee_exists(request)
+        if not employee or work_info is None:
+            return Response(
+                {"error": "Missing work information or employee details."},
+                status=400,
+            )
+
+        shift = work_info.shift_id
+        dt_now = _api_now(request)
+
+        attendance_date, day, minimum_hour, start_time_sec, end_time_sec, _, now_sec = (
+            _api_resolve_attendance_date_and_day(shift, dt_now)
+        )
+
+        # Enforce check-out cutoff if helper exists
+        cutoff_out_dt = None
+        try:
+            if hasattr(cio, "_get_schedule") and hasattr(cio, "_calc_cutoff_out_dt"):
+                schedule = cio._get_schedule(shift, day)
+                cutoff_out_dt = cio._calc_cutoff_out_dt(attendance_date, schedule)
+        except Exception:
+            cutoff_out_dt = None
+
+        if cutoff_out_dt and dt_now > cutoff_out_dt:
+            return Response(
+                {"error": "Check-out cut-off has passed. Please submit an attendance request."},
+                status=400,
+            )
+
+        image = request.FILES.get("image")
+
+        # Prefer single-session core helper if available; otherwise fall back to calling clock_out view.
+        missing_check_in = False
+        attendance = None
+
+        try:
+            if hasattr(cio, "clock_out_attendance_and_activity"):
+                attendance, missing_check_in = cio.clock_out_attendance_and_activity(
+                    employee=employee,
+                    attendance_date=attendance_date,
+                    shift=shift,
+                    minimum_hour=minimum_hour,
+                    out_datetime=dt_now,
+                    day=day,
+                    clock_out_image=image,
+                )
+            else:
                 clock_out(
                     Request(
                         user=request.user,
-                        date=current_date,
-                        time=current_time,
-                        datetime=current_datetime,
+                        date=dt_now.date(),
+                        time=dt_now.time(),
+                        datetime=dt_now,
                         image=image,
                     )
                 )
-                return Response({"message": "Clocked-Out"}, status=200)
-
-            except Exception as error:
+                attendance = Attendance.objects.filter(
+                    employee_id=employee, attendance_date=attendance_date
+                ).order_by("-id").first()
+                missing_check_in = bool(attendance and not attendance.attendance_clock_in)
+        except Exception as error:
+            try:
                 logger.error("Got an error in clock_out", error)
-            # return Response({"message": "Clocked-Out"}, status=200)
-        return Response({"message": "Already clocked-out"}, status=400)
+            except Exception:
+                pass
+            return Response({"error": str(error)}, status=400)
+
+        # Recompute early-out only when check-in exists
+        if attendance and not missing_check_in:
+            try:
+                attendance.late_come_early_out.filter(type="early_out").delete()
+            except Exception:
+                AttendanceLateComeEarlyOut.objects.filter(
+                    attendance_id=attendance, type="early_out"
+                ).delete()
+
+            schedule = None
+            if hasattr(cio, "_get_schedule"):
+                try:
+                    schedule = cio._get_schedule(shift, day)
+                except Exception:
+                    schedule = None
+
+            is_night_shift = False
+            try:
+                is_night_shift = attendance.is_night_shift()
+            except Exception:
+                pass
+
+            date_today = dt_now.date()
+            next_date = attendance.attendance_date + timedelta(days=1)
+
+            if is_night_shift:
+                if (attendance.attendance_date == date_today) or (
+                    strtime_seconds("12:00") >= now_sec and date_today == next_date
+                ):
+                    early_out(
+                        attendance=attendance,
+                        start_time=start_time_sec,
+                        end_time=end_time_sec,
+                        shift=shift,
+                        schedule=schedule,
+                    )
+            else:
+                if attendance.attendance_date == date_today:
+                    early_out(
+                        attendance=attendance,
+                        start_time=start_time_sec,
+                        end_time=end_time_sec,
+                        shift=shift,
+                        schedule=schedule,
+                    )
+
+        return Response(
+            {
+                "message": "Clocked-Out",
+                "attendance_date": str(attendance_date),
+                "missing_check_in": bool(missing_check_in),
+            },
+            status=200,
+        )
 
 
 class AttendanceView(APIView):
@@ -505,66 +802,36 @@ class AttendanceRequestApproveView(APIView):
     """
     Approves and updates an attendance request.
 
-    Method:
-        put(request, pk): Approves the attendance request, updates attendance records, and handles related activities.
+    Single-session behavior:
+    - Apply requested_data to Attendance
+    - Ensure exactly one AttendanceActivity per (employee, attendance_date)
+    - Rebuild late/early markers after approval
     """
 
     permission_classes = [IsAuthenticated]
 
     @manager_permission_required("attendance.change_attendance")
+    @transaction.atomic
     def put(self, request, pk):
         try:
-            attendance = Attendance.objects.get(id=pk)
+            attendance = Attendance.objects.select_for_update().get(id=pk)
             prev_attendance_date = attendance.attendance_date
-            prev_attendance_clock_in_date = attendance.attendance_clock_in_date
-            prev_attendance_clock_in = attendance.attendance_clock_in
+
             attendance.attendance_validated = True
             attendance.is_validate_request_approved = True
             attendance.is_validate_request = False
             attendance.request_description = None
             attendance.save()
-            if attendance.requested_data is not None:
-                requested_data = json.loads(attendance.requested_data)
-                requested_data["attendance_clock_out"] = (
-                    None
-                    if requested_data["attendance_clock_out"] == "None"
-                    else requested_data["attendance_clock_out"]
-                )
-                requested_data["attendance_clock_out_date"] = (
-                    None
-                    if requested_data["attendance_clock_out_date"] == "None"
-                    else requested_data["attendance_clock_out_date"]
-                )
-                Attendance.objects.filter(id=pk).update(**requested_data)
-                # DUE TO AFFECT THE OVERTIME CALCULATION ON SAVE METHOD, SAVE THE INSTANCE ONCE MORE
-                attendance = Attendance.objects.get(id=pk)
-                attendance.save()
-            if (
-                attendance.attendance_clock_out is None
-                or attendance.attendance_clock_out_date is None
-            ):
-                attendance.attendance_validated = True
-                activity = AttendanceActivity.objects.filter(
-                    employee_id=attendance.employee_id,
-                    attendance_date=prev_attendance_date,
-                    clock_in_date=prev_attendance_clock_in_date,
-                    clock_in=prev_attendance_clock_in,
-                )
-                if activity:
-                    activity.update(
-                        employee_id=attendance.employee_id,
-                        attendance_date=attendance.attendance_date,
-                        clock_in_date=attendance.attendance_clock_in_date,
-                        clock_in=attendance.attendance_clock_in,
-                    )
 
-                else:
-                    AttendanceActivity.objects.create(
-                        employee_id=attendance.employee_id,
-                        attendance_date=attendance.attendance_date,
-                        clock_in_date=attendance.attendance_clock_in_date,
-                        clock_in=attendance.attendance_clock_in,
-                    )
+            if attendance.requested_data is not None:
+                requested_data = _normalize_requested_data(json.loads(attendance.requested_data))
+                Attendance.objects.filter(id=pk).update(**requested_data)
+                attendance.refresh_from_db()
+                attendance.save()
+
+            _ensure_single_session_activity(attendance, prev_attendance_date=prev_attendance_date)
+            _rebuild_late_early(attendance)
+
         except Exception as E:
             return Response({"error": str(E)}, status=400)
         return Response({"status": "approved"}, status=200)
@@ -574,28 +841,39 @@ class AttendanceRequestCancelView(APIView):
     """
     Cancels an attendance request.
 
-    Method:
-        put(request, pk): Cancels the attendance request, resetting its status and data, and deletes the request if it was a create request.
+    Fix:
+    - Preserve request_type before clearing it
+    - If it was a create_request, remove attendance + daily activity rows
     """
 
     permission_classes = [IsAuthenticated]
 
+    @transaction.atomic
     def put(self, request, pk):
         try:
-            attendance = Attendance.objects.get(id=pk)
+            attendance = Attendance.objects.select_for_update().get(id=pk)
             if (
                 attendance.employee_id.employee_user_id == request.user
                 or is_reportingmanager(request)
                 or request.user.has_perm("attendance.change_attendance")
             ):
+                req_type = attendance.request_type
+                req_date = attendance.attendance_date
+                req_employee = attendance.employee_id
+
                 attendance.is_validate_request_approved = False
                 attendance.is_validate_request = False
                 attendance.request_description = None
                 attendance.requested_data = None
                 attendance.request_type = None
-
                 attendance.save()
-                if attendance.request_type == "create_request":
+
+                if req_type == "create_request":
+                    AttendanceActivity.objects.filter(
+                        employee_id=req_employee,
+                        attendance_date=req_date,
+                    ).delete()
+                    AttendanceLateComeEarlyOut.objects.filter(attendance_id=attendance).delete()
                     attendance.delete()
         except Exception as E:
             return Response({"error": str(E)}, status=400)
@@ -884,15 +1162,16 @@ class CheckingStatus(APIView):
             .order_by("-id")
             .first()
         )
-        duration = None
+
         work_seconds = request.user.employee_get.get_forecasted_at_work()[
             "forecasted_at_work_seconds"
         ]
         duration = CheckingStatus._format_seconds(int(work_seconds))
-        status = False
+
+        status_flag = False
         clock_in_time = None
 
-        today = datetime.now()
+        today = date.today()
         attendance_activity_first = (
             AttendanceActivity.objects.filter(
                 employee_id=request.user.employee_get, clock_in_date=today
@@ -900,28 +1179,32 @@ class CheckingStatus(APIView):
             .order_by("in_datetime")
             .first()
         )
+
         if attendance_activity:
             try:
-                clock_in_time = attendance_activity_first.clock_in.strftime("%I:%M %p")
-                if attendance_activity.clock_out_date:
-                    status = False
+                if attendance_activity_first and attendance_activity_first.clock_in:
+                    clock_in_time = attendance_activity_first.clock_in.strftime("%I:%M %p")
+
+                if getattr(attendance_activity, "clock_out_date", None):
+                    status_flag = False
                 else:
-                    status = True
+                    status_flag = True
                     return Response(
                         {
-                            "status": status,
+                            "status": status_flag,
                             "duration": duration,
                             "clock_in": clock_in_time,
                         },
                         status=200,
                     )
-            except:
+            except Exception:
                 return Response(
-                    {"status": status, "duration": duration, "clock_in": clock_in_time},
+                    {"status": status_flag, "duration": duration, "clock_in": clock_in_time},
                     status=200,
                 )
+
         return Response(
-            {"status": status, "duration": duration, "clock_in_time": clock_in_time},
+            {"status": status_flag, "duration": duration, "clock_in_time": clock_in_time},
             status=200,
         )
 
@@ -993,7 +1276,7 @@ class OfflineEmployeeMailsend(APIView):
             ).values_list("body", flat=True)
         )
         for html in bodys:
-            # due to not having solid template we first need to pass the context
+            # Due to not having a solid template we first need to pass the context
             template_bdy = template.Template(html)
             context = template.Context(
                 {"instance": employee, "self": request.user.employee_get}
