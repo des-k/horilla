@@ -10,6 +10,7 @@ from datetime import date, datetime, time
 from urllib.parse import parse_qs
 
 from django.contrib import messages
+from django.db import transaction
 from django.db.models import ProtectedError, Q
 from django.http import HttpResponse, HttpResponseRedirect, JsonResponse
 from django.shortcuts import redirect, render
@@ -45,7 +46,7 @@ from base.methods import (
     get_key_instances,
     is_reportingmanager,
 )
-from base.models import EmployeeShift, EmployeeShiftDay
+from base.models import EmployeeShift, EmployeeShiftDay, EmployeeShiftSchedule
 from employee.models import Employee
 from horilla.decorators import (
     hx_request_required,
@@ -54,6 +55,134 @@ from horilla.decorators import (
     permission_required,
 )
 from notifications.signals import notify
+
+
+# -----------------------------------------------------------------------------
+# Single-session helpers
+# -----------------------------------------------------------------------------
+def _normalize_none(value):
+    """Normalize common "empty" representations to Python None."""
+    if value is None:
+        return None
+    if isinstance(value, str) and value.strip() in ("", "None", "null", "NULL"):
+        return None
+    return value
+
+
+def _normalize_requested_data(requested_data: dict) -> dict:
+    """Ensure requested_data from JSON can be safely used in queryset.update()."""
+    if not requested_data:
+        return requested_data
+
+    # AttendanceRequestForm.serialize() returns strings for time/date fields.
+    # Some values may be the literal string "None".
+    for key in (
+        "attendance_date",
+        "attendance_clock_in_date",
+        "attendance_clock_out_date",
+        "attendance_clock_in",
+        "attendance_clock_out",
+        "attendance_worked_hour",
+        "minimum_hour",
+        "batch_attendance_id",
+        "shift_id",
+        "work_type_id",
+    ):
+        if key in requested_data:
+            requested_data[key] = _normalize_none(requested_data[key])
+
+    return requested_data
+
+
+def _get_shift_schedule(shift, day):
+    """Schedule-level lookup for grace time & cutoffs."""
+    return EmployeeShiftSchedule.objects.filter(shift_id=shift, day=day).first()
+
+
+def _ensure_single_session_activity(attendance: Attendance, prev_attendance_date=None) -> AttendanceActivity:
+    """Sync AttendanceActivity to match Attendance for single-session mode.
+
+    Rules:
+    - Keep **exactly one** AttendanceActivity per (employee, attendance_date).
+    - Activity.clock_in is NOT NULL in the model, so if Attendance check-in is missing,
+      we use a placeholder clock-in (clock-out if available, else 00:00).
+    - If the request changes attendance_date, we clean up old-date activities.
+    """
+
+    employee = attendance.employee_id
+    target_date = attendance.attendance_date
+
+    # If the request moved the attendance_date, clean up old-date activities.
+    if prev_attendance_date and prev_attendance_date != target_date:
+        old_qs = AttendanceActivity.objects.filter(employee_id=employee, attendance_date=prev_attendance_date)
+        if old_qs.exists():
+            # If no activity exists on the new date, move the old ones.
+            if not AttendanceActivity.objects.filter(employee_id=employee, attendance_date=target_date).exists():
+                old_qs.update(attendance_date=target_date)
+            else:
+                # Otherwise, delete old ones to avoid duplicates across dates.
+                old_qs.delete()
+
+    # Keep the latest activity as the canonical one, delete duplicates.
+    qs = AttendanceActivity.objects.filter(employee_id=employee, attendance_date=target_date).order_by("-id")
+    activity = qs.first()
+    if activity:
+        qs.exclude(id=activity.id).delete()
+    else:
+        activity = AttendanceActivity(employee_id=employee, attendance_date=target_date)
+
+    # Ensure shift day exists
+    day = attendance.attendance_day
+    if not day:
+        day_name = target_date.strftime("%A").lower()
+        day = EmployeeShiftDay.objects.get(day=day_name)
+
+    # Non-null clock_in placeholder (single-session skeleton support)
+    clock_in_date = attendance.attendance_clock_in_date or attendance.attendance_clock_out_date or target_date
+    clock_in_time = attendance.attendance_clock_in or attendance.attendance_clock_out or time(0, 0)
+
+    activity.shift_day = day
+    activity.clock_in_date = clock_in_date
+    activity.clock_in = clock_in_time
+    activity.in_datetime = datetime.combine(clock_in_date, clock_in_time)
+
+    # Sync OUT fields
+    if attendance.attendance_clock_out and attendance.attendance_clock_out_date:
+        activity.clock_out_date = attendance.attendance_clock_out_date
+        activity.clock_out = attendance.attendance_clock_out
+        activity.out_datetime = datetime.combine(attendance.attendance_clock_out_date, attendance.attendance_clock_out)
+    else:
+        activity.clock_out_date = None
+        activity.clock_out = None
+        activity.out_datetime = None
+
+    activity.save()
+    return activity
+
+
+def _refresh_late_come_early_out(attendance: Attendance):
+    """Recompute Late Come / Early Out records using schedule-level grace time."""
+
+    shift = attendance.shift_id
+    if not shift:
+        return
+
+    day_name = attendance.attendance_date.strftime("%A").lower()
+    day = EmployeeShiftDay.objects.get(day=day_name)
+
+    # Remove existing markers for this attendance (because times may have changed)
+    AttendanceLateComeEarlyOut.objects.filter(
+        attendance_id=attendance, type__in=["late_come", "early_out"]
+    ).delete()
+
+    _, start_time_sec, end_time_sec = shift_schedule_today(day=day, shift=shift)
+    schedule = _get_shift_schedule(shift, day)
+
+    if attendance.attendance_clock_in:
+        late_come(attendance, start_time=start_time_sec, end_time=end_time_sec, shift=shift, schedule=schedule)
+
+    if attendance.attendance_clock_out:
+        early_out(attendance, start_time=start_time_sec, end_time=end_time_sec, shift=shift, schedule=schedule)
 
 
 @login_required
@@ -457,79 +586,43 @@ def validate_attendance_request(request, attendance_id):
 
 @login_required
 @manager_can_enter("attendance.change_attendance")
+@transaction.atomic
 def approve_validate_attendance_request(request, attendance_id):
     """
     This method is used to validate the attendance requests
     """
-    attendance = Attendance.objects.get(id=attendance_id)
+    attendance = Attendance.objects.select_for_update().get(id=attendance_id)
     prev_attendance_date = attendance.attendance_date
-    prev_attendance_clock_in_date = attendance.attendance_clock_in_date
-    prev_attendance_clock_in = attendance.attendance_clock_in
+
+    # Approve request flags (these fields are NOT included in serialize/requested_data)
     attendance.attendance_validated = True
     attendance.is_validate_request_approved = True
     attendance.is_validate_request = False
     attendance.request_description = None
     attendance.save()
-    if attendance.requested_data is not None:
-        requested_data = json.loads(attendance.requested_data)
-        requested_data["attendance_clock_out"] = (
-            None
-            if requested_data["attendance_clock_out"] == "None"
-            else requested_data["attendance_clock_out"]
-        )
-        requested_data["attendance_clock_out_date"] = (
-            None
-            if requested_data["attendance_clock_out_date"] == "None"
-            else requested_data["attendance_clock_out_date"]
-        )
+
+    # Apply requested field changes (if any)
+    if attendance.requested_data:
+        requested_data = _normalize_requested_data(json.loads(attendance.requested_data))
         Attendance.objects.filter(id=attendance_id).update(**requested_data)
-        # DUE TO AFFECT THE OVERTIME CALCULATION ON SAVE METHOD, SAVE THE INSTANCE ONCE MORE
-        attendance = Attendance.objects.get(id=attendance_id)
+
+        # Re-fetch to ensure types are correct (TimeField -> datetime.time, etc.)
+        attendance.refresh_from_db()
+
+        # Save once more to trigger Attendance.save() side effects (e.g., overtime calc)
+        attendance.attendance_validated = True
+        attendance.is_validate_request_approved = True
+        attendance.is_validate_request = False
+        attendance.request_description = None
         attendance.save()
 
-    if (
-        attendance.attendance_clock_out is None
-        or attendance.attendance_clock_out_date is None
-    ):
-        attendance.attendance_validated = True
-        activity = AttendanceActivity.objects.filter(
-            employee_id=attendance.employee_id,
-            attendance_date=prev_attendance_date,
-            clock_in_date=prev_attendance_clock_in_date,
-            clock_in=prev_attendance_clock_in,
-        )
-        if activity:
-            activity.update(
-                employee_id=attendance.employee_id,
-                attendance_date=attendance.attendance_date,
-                clock_in_date=attendance.attendance_clock_in_date,
-                clock_in=attendance.attendance_clock_in,
-            )
-
-        else:
-            AttendanceActivity.objects.create(
-                employee_id=attendance.employee_id,
-                attendance_date=attendance.attendance_date,
-                clock_in_date=attendance.attendance_clock_in_date,
-                clock_in=attendance.attendance_clock_in,
-            )
-
-    # Create late come or early out objects
-    shift = attendance.shift_id
-    day = attendance.attendance_date.strftime("%A").lower()
-    day = EmployeeShiftDay.objects.get(day=day)
-
-    minimum_hour, start_time_sec, end_time_sec = shift_schedule_today(
-        day=day, shift=shift
-    )
-    if attendance.attendance_clock_in:
-        late_come(
-            attendance, start_time=start_time_sec, end_time=end_time_sec, shift=shift
-        )
-    if attendance.attendance_clock_out:
-        early_out(
-            attendance, start_time=start_time_sec, end_time=end_time_sec, shift=shift
-        )
+    # -----------------------------------------------------------------
+    # SINGLE-SESSION SYNC
+    # Ensure there is exactly ONE AttendanceActivity per (employee, attendance_date)
+    # and keep it aligned with the approved Attendance values.
+    # -----------------------------------------------------------------
+    _ensure_single_session_activity(attendance, prev_attendance_date=prev_attendance_date)
+    _refresh_late_come_early_out(attendance)
 
     messages.success(request, _("Attendance request has been approved"))
     employee = attendance.employee_id
@@ -585,6 +678,11 @@ def cancel_attendance_request(request, attendance_id):
             or is_reportingmanager(request)
             or request.user.has_perm("attendance.change_attendance")
         ):
+            # Keep the original request type before clearing fields
+            req_type = attendance.request_type
+            req_date = attendance.attendance_date
+            req_employee = attendance.employee_id
+
             attendance.is_validate_request_approved = False
             attendance.is_validate_request = False
             attendance.request_description = None
@@ -592,7 +690,14 @@ def cancel_attendance_request(request, attendance_id):
             attendance.request_type = None
 
             attendance.save()
-            if attendance.request_type == "create_request":
+
+            if req_type == "create_request":
+                # Single-session cleanup: remove any daily activity linked to that date
+                AttendanceActivity.objects.filter(
+                    employee_id=req_employee,
+                    attendance_date=req_date,
+                ).delete()
+                AttendanceLateComeEarlyOut.objects.filter(attendance_id=attendance).delete()
                 attendance.delete()
                 messages.success(request, _("The requested attendance is removed."))
             else:
@@ -651,106 +756,49 @@ def select_all_filter_attendance_request(request):
 
 @login_required
 @manager_can_enter("attendance.change_attendance")
+@transaction.atomic
 def bulk_approve_attendance_request(request):
-    """
-    This method is used to validate the attendance requests
-    """
-    ids = request.POST["ids"]
-    ids = json.loads(ids)
+    """Approve multiple attendance requests (single-session aware)."""
+
+    ids = json.loads(request.POST["ids"])
     for attendance_id in ids:
-        attendance = Attendance.objects.get(id=attendance_id)
+        # Lock row per id to prevent partial updates in concurrent approvals
+        attendance = Attendance.objects.select_for_update().get(id=attendance_id)
         prev_attendance_date = attendance.attendance_date
-        prev_attendance_clock_in_date = attendance.attendance_clock_in_date
-        prev_attendance_clock_in = attendance.attendance_clock_in
+
+        # Mark approved
         attendance.attendance_validated = True
         attendance.is_validate_request_approved = True
         attendance.is_validate_request = False
         attendance.request_description = None
         attendance.save()
+
+        # Apply requested changes
         if attendance.requested_data is not None:
-            requested_data = json.loads(attendance.requested_data)
-            requested_data["attendance_clock_out"] = (
-                None
-                if requested_data["attendance_clock_out"] == "None"
-                else requested_data["attendance_clock_out"]
-            )
-            requested_data["attendance_clock_out_date"] = (
-                None
-                if requested_data["attendance_clock_out_date"] == "None"
-                else requested_data["attendance_clock_out_date"]
-            )
+            requested_data = _normalize_requested_data(json.loads(attendance.requested_data))
             Attendance.objects.filter(id=attendance_id).update(**requested_data)
-            # DUE TO AFFECT THE OVERTIME CALCULATION ON SAVE METHOD, SAVE THE INSTANCE ONCE MORE
-            attendance = Attendance.objects.get(id=attendance_id)
+            attendance.refresh_from_db()
             attendance.save()
-        if (
-            attendance.attendance_clock_out is None
-            or attendance.attendance_clock_out_date is None
-        ):
-            attendance.attendance_validated = True
-            activity = AttendanceActivity.objects.filter(
-                employee_id=attendance.employee_id,
-                attendance_date=prev_attendance_date,
-                clock_in_date=prev_attendance_clock_in_date,
-                clock_in=prev_attendance_clock_in,
-            )
-            if activity:
-                activity.update(
-                    employee_id=attendance.employee_id,
-                    attendance_date=attendance.attendance_date,
-                    clock_in_date=attendance.attendance_clock_in_date,
-                    clock_in=attendance.attendance_clock_in,
-                )
 
-            else:
-                AttendanceActivity.objects.create(
-                    employee_id=attendance.employee_id,
-                    attendance_date=attendance.attendance_date,
-                    clock_in_date=attendance.attendance_clock_in_date,
-                    clock_in=attendance.attendance_clock_in,
-                )
-
-        # Create late come or early out objects
-        shift = attendance.shift_id
-        day = attendance.attendance_date.strftime("%A").lower()
-        day = EmployeeShiftDay.objects.get(day=day)
-
-        minimum_hour, start_time_sec, end_time_sec = shift_schedule_today(
-            day=day, shift=shift
-        )
-        if attendance.attendance_clock_in:
-            late_come(
-                attendance,
-                start_time=start_time_sec,
-                end_time=end_time_sec,
-                shift=shift,
-            )
-        if attendance.attendance_clock_out:
-            early_out(
-                attendance,
-                start_time=start_time_sec,
-                end_time=end_time_sec,
-                shift=shift,
-            )
+        # Keep single-session activity consistent
+        _ensure_single_session_activity(attendance, prev_attendance_date=prev_attendance_date)
+        _refresh_late_come_early_out(attendance)
 
         messages.success(request, _("Attendance request has been approved"))
+
         employee = attendance.employee_id
         notify.send(
             request.user,
             recipient=employee.employee_user_id,
-            verb=f"Your attendance request for \
-                {attendance.attendance_date} is validated",
-            verb_ar=f"تم التحقق من طلب حضورك في تاريخ \
-                {attendance.attendance_date}",
-            verb_de=f"Ihr Anwesenheitsantrag für das Datum \
-                {attendance.attendance_date} wurde bestätigt",
-            verb_es=f"Se ha validado su solicitud de asistencia \
-                para la fecha {attendance.attendance_date}",
-            verb_fr=f"Votre demande de présence pour la date \
-                {attendance.attendance_date} est validée",
+            verb=f"Your attendance request for {attendance.attendance_date} is validated",
+            verb_ar=f"تم التحقق من طلب حضورك في تاريخ {attendance.attendance_date}",
+            verb_de=f"Ihr Anwesenheitsantrag für das Datum {attendance.attendance_date} wurde bestätigt",
+            verb_es=f"Se ha validado su solicitud de asistencia para la fecha {attendance.attendance_date}",
+            verb_fr=f"Votre demande de présence pour la date {attendance.attendance_date} est validée",
             redirect=reverse("request-attendance-view") + f"?id={attendance.id}",
             icon="checkmark-circle-outline",
         )
+
         if attendance.employee_id.employee_work_info.reporting_manager_id:
             reporting_manager = (
                 attendance.employee_id.employee_work_info.reporting_manager_id.employee_user_id
@@ -759,19 +807,30 @@ def bulk_approve_attendance_request(request):
             notify.send(
                 request.user,
                 recipient=reporting_manager,
-                verb=f"{employee.employee_first_name} {user_last_name}'s\
-                    attendance request for {attendance.attendance_date} is validated",
-                verb_ar=f"تم التحقق من طلب الحضور لـ {employee.employee_first_name} \
-                    {user_last_name} في {attendance.attendance_date}",
-                verb_de=f"Die Anwesenheitsanfrage von {employee.employee_first_name} \
-                    {user_last_name} für den {attendance.attendance_date} wurde validiert",
-                verb_es=f"Se ha validado la solicitud de asistencia de \
-                    {employee.employee_first_name} {user_last_name} para el {attendance.attendance_date}",
-                verb_fr=f"La demande de présence de {employee.employee_first_name} \
-                    {user_last_name} pour le {attendance.attendance_date} a été validée",
+                verb=(
+                    f"{employee.employee_first_name} {user_last_name}'s attendance request for "
+                    f"{attendance.attendance_date} is validated"
+                ),
+                verb_ar=(
+                    f"تم التحقق من طلب الحضور لـ {employee.employee_first_name} {user_last_name} "
+                    f"في {attendance.attendance_date}"
+                ),
+                verb_de=(
+                    f"Die Anwesenheitsanfrage von {employee.employee_first_name} {user_last_name} "
+                    f"für den {attendance.attendance_date} wurde validiert"
+                ),
+                verb_es=(
+                    f"Se ha validado la solicitud de asistencia de {employee.employee_first_name} "
+                    f"{user_last_name} para el {attendance.attendance_date}"
+                ),
+                verb_fr=(
+                    f"La demande de présence de {employee.employee_first_name} {user_last_name} "
+                    f"pour le {attendance.attendance_date} a été validée"
+                ),
                 redirect=reverse("request-attendance-view") + f"?id={attendance.id}",
                 icon="checkmark-circle-outline",
             )
+
     return HttpResponse("success")
 
 
@@ -791,19 +850,26 @@ def bulk_reject_attendance_request(request):
                 or is_reportingmanager(request)
                 or request.user.has_perm("attendance.change_attendance")
             ):
+                req_type = attendance.request_type
+                emp = attendance.employee_id
+                att_date = attendance.attendance_date
+
                 attendance.is_validate_request_approved = False
                 attendance.is_validate_request = False
                 attendance.request_description = None
                 attendance.requested_data = None
                 attendance.request_type = None
                 attendance.save()
-                if attendance.request_type == "create_request":
+
+                if req_type == "create_request":
+                    # If the request was for creating an attendance, remove the record completely.
+                    # Also clean up any activity rows created for that day (single-session).
+                    AttendanceActivity.objects.filter(employee_id=emp, attendance_date=att_date).delete()
+                    AttendanceLateComeEarlyOut.objects.filter(attendance_id=attendance).delete()
                     attendance.delete()
                     messages.success(request, _("The requested attendance is removed."))
                 else:
-                    messages.success(
-                        request, _("The requested attendance is rejected.")
-                    )
+                    messages.success(request, _("The requested attendance is rejected."))
                 employee = attendance.employee_id
                 notify.send(
                     request.user,
