@@ -117,6 +117,113 @@ def biometric_set_time(conn):
     conn.set_time(new_time)
 
 
+
+def ensure_aware_datetime(dt_obj):
+    """Return a timezone-aware datetime using Django's current timezone."""
+    if dt_obj is None:
+        return None
+    if django_timezone.is_naive(dt_obj):
+        return django_timezone.make_aware(dt_obj, django_timezone.get_current_timezone())
+    return dt_obj
+
+
+def _system_direction_decision(machine_type, punch_code):
+    """Return True for IN, False for OUT, or None if punch_code is not recognized."""
+    if punch_code is None:
+        return None
+
+    code = str(punch_code).strip()
+    machine_type = (machine_type or "").lower()
+
+    if machine_type == "zk":
+        if code in {"0", "3", "4"}:
+            return True
+        if code in {"1", "2", "5"}:
+            return False
+        return None
+
+    if machine_type == "cosec":
+        if code in {"1", "3", "5", "7", "9", "0"}:
+            return True
+        if code in {"2", "4", "6", "8", "10"}:
+            return False
+        return None
+
+    if machine_type == "anviz":
+        # CrossChex codes: 0 / 128 are IN, others treated as OUT
+        return code in {"0", "128"}
+
+    # Fallback: common 0/1 scheme
+    if code == "0":
+        return True
+    if code == "1":
+        return False
+    return None
+
+
+def process_biometric_punch(*, device, employee, attendance_dt, punch_code=None):
+    """
+    Process a single biometric event and call Horilla's clock_in/clock_out logic.
+
+    device.device_direction supported values:
+      - system: decide IN/OUT from punch_code (fallback to alternate if unknown)
+      - in: always clock_in
+      - out: always clock_out
+      - alternate: toggle based on open AttendanceActivity (clock_out is NULL)
+    """
+    attendance_dt = ensure_aware_datetime(attendance_dt)
+
+    request_data = Request(
+        user=employee.employee_user_id,
+        date=attendance_dt.date(),
+        time=attendance_dt.time(),
+        datetime=attendance_dt,
+    )
+
+    direction = (getattr(device, "device_direction", None) or "system").lower()
+
+    def _toggle_by_open_activity():
+        # Align with mobile behavior: if there's an open activity, close it; otherwise open a new one.
+        open_activity = (
+            AttendanceActivity.objects.filter(employee_id=employee, clock_out=None)
+            .order_by("-in_datetime")
+            .first()
+        )
+        if open_activity and getattr(open_activity, "in_datetime", None):
+            open_in = ensure_aware_datetime(open_activity.in_datetime)
+            if open_in and open_in > attendance_dt:
+                # Out-of-order event; treat as IN to avoid negative/invalid duration.
+                clock_in(request_data)
+                return
+            clock_out(request_data)
+            return
+        clock_in(request_data)
+
+    if direction == "in":
+        clock_in(request_data)
+        return
+
+    if direction == "out":
+        clock_out(request_data)
+        return
+
+    if direction == "alternate":
+        _toggle_by_open_activity()
+        return
+
+    # system
+    decision = _system_direction_decision(getattr(device, "machine_type", None), punch_code)
+    if decision is True:
+        clock_in(request_data)
+        return
+    if decision is False:
+        clock_out(request_data)
+        return
+
+    # Unknown/missing punch → fallback to alternate
+    _toggle_by_open_activity()
+
+
 class ZKBioAttendance(Thread):
     """
     Represents a thread for capturing live attendance data from a ZKTeco biometric device.
@@ -150,76 +257,77 @@ class ZKBioAttendance(Thread):
                 force_udp=False,
                 ommit_ping=False,
             )
-            patch_direction = {"in": 0, "out": 1}
             conn = zk_device.connect()
             self.conn = conn
-            if conn:
-                device = BiometricDevices.objects.filter(
-                    machine_ip=self.machine_ip, port=self.port_no
-                ).first()
-                if device and device.is_live:
-                    while not self._stop_event.is_set():
-                        attendances = conn.live_capture()
-                        for attendance in attendances:
-                            if attendance:
-                                user_id = attendance.user_id
-                                punch_code = (
-                                    patch_direction[device.device_direction]
-                                    if device.device_direction in patch_direction
-                                    else attendance.punch
-                                )
-                                date_time = django_timezone.make_aware(
-                                    attendance.timestamp
-                                )
-                                # date_time = attendance.timestamp
-                                date = date_time.date()
-                                time = date_time.time()
-                                device.last_fetch_date = date
-                                device.last_fetch_time = time
-                                device.save()
-                                bio_id = BiometricEmployees.objects.filter(
-                                    user_id=user_id, device_id=device
-                                ).first()
-                                if bio_id:
-                                    if punch_code in {0, 3, 4}:
-                                        try:
-                                            clock_in(
-                                                Request(
-                                                    user=bio_id.employee_id.employee_user_id,
-                                                    date=date,
-                                                    time=time,
-                                                    datetime=date_time,
-                                                )
-                                            )
-                                        except Exception as error:
-                                            logger.error(
-                                                "Got an error in clock_in %s", error
-                                            )
+            if not conn:
+                return
 
-                                            continue
-                                    else:
-                                        try:
-                                            clock_out(
-                                                Request(
-                                                    user=bio_id.employee_id.employee_user_id,
-                                                    date=date,
-                                                    time=time,
-                                                    datetime=date_time,
-                                                )
-                                            )
-                                        except Exception as error:
-                                            logger.error(
-                                                "Got an error in clock_out", error
-                                            )
-                                            continue
-                            else:
-                                continue
-        except ConnectionResetError as error:
+            device = BiometricDevices.objects.filter(
+                machine_ip=self.machine_ip, port=self.port_no
+            ).first()
+            if not device or not device.is_live:
+                return
+
+            # live_capture() returns a generator that blocks waiting for events.
+            for attendance in conn.live_capture():
+                if self._stop_event.is_set():
+                    break
+                if not attendance:
+                    continue
+
+                try:
+                    user_id = attendance.user_id
+                    punch_code = getattr(attendance, "punch", None)
+                    date_time = ensure_aware_datetime(attendance.timestamp)
+
+                    # Update last fetch markers
+                    device.last_fetch_date = date_time.date()
+                    device.last_fetch_time = date_time.time()
+                    device.save(update_fields=["last_fetch_date", "last_fetch_time"])
+
+                    bio_id = BiometricEmployees.objects.filter(
+                        user_id=user_id, device_id=device
+                    ).first()
+                    if not bio_id:
+                        continue
+
+                    process_biometric_punch(
+                        device=device,
+                        employee=bio_id.employee_id,
+                        attendance_dt=date_time,
+                        punch_code=punch_code,
+                    )
+                except Exception:
+                    logger.error("Failed to process ZK live capture event", exc_info=True)
+                    continue
+
+        except ConnectionResetError:
+            logger.warning(
+                "ZK live capture connection reset for %s:%s; restarting.",
+                self.machine_ip,
+                self.port_no,
+            )
             ZKBioAttendance(self.machine_ip, self.port_no, self.password).start()
+        except Exception:
+            logger.error("Error in ZKBioAttendance", exc_info=True)
+        finally:
+            try:
+                if self.conn:
+                    self.conn.disconnect()
+            except Exception:
+                pass
+
 
     def stop(self):
-        """To stop the ZK live capture mode"""
-        self.conn.end_live_capture = True
+        """Stop the ZK live capture mode gracefully."""
+        self._stop_event.set()
+        try:
+            if self.conn:
+                # python-zk stops live_capture when this flag is set
+                self.conn.end_live_capture = True
+        except Exception:
+            pass
+
 
 
 class COSECBioAttendanceThread(Thread):
@@ -278,9 +386,7 @@ class COSECBioAttendanceThread(Thread):
 
                 for attendance in attendances:
                     ref_user_id = attendance["detail-1"]
-                    employee = BiometricEmployees.objects.filter(
-                        ref_user_id=ref_user_id
-                    ).first()
+                    employee = BiometricEmployees.objects.filter(ref_user_id=ref_user_id, device_id=device).first()
                     if not employee:
                         continue
 
@@ -293,19 +399,15 @@ class COSECBioAttendanceThread(Thread):
                     )
                     punch_code = attendance["detail-2"]
 
-                    request_data = Request(
-                        user=employee.employee_id.employee_user_id,
-                        date=attendance_date,
-                        time=attendance_time,
-                        datetime=django_timezone.make_aware(attendance_datetime),
-                    )
                     try:
-                        if punch_code in ["1", "3", "5", "7", "9", "0"]:
-                            clock_in(request_data)
-                        elif punch_code in ["2", "4", "6", "8", "10"]:
-                            clock_out(request_data)
+                        process_biometric_punch(
+                        device=device,
+                        employee=employee.employee_id,
+                        attendance_dt=attendance_datetime,
+                        punch_code=punch_code,
+                        )
                     except Exception as error:
-                        logger.error("Error processing attendance: ", error)
+                        logger.error("Error processing attendance: %s", error, exc_info=True)
 
                 if attendances:
                     last_attendance = attendances[-1]
@@ -2168,8 +2270,6 @@ def zk_biometric_attendance_logs(device_or_devices):
 
     errors = []
     combined_attendances = []
-    patch_direction = {"in": 0, "out": 1}
-
     bio_id_map = {
         (bio.device_id_id, bio.user_id): bio
         for bio in BiometricEmployees.objects.filter(device_id__in=devices)
@@ -2216,11 +2316,6 @@ def zk_biometric_attendance_logs(device_or_devices):
             device.save()
             for attendance in filtered:
                 attendance.device = device  # Attach device info
-                attendance.punch = (
-                    patch_direction[device.device_direction]
-                    if device.device_direction in patch_direction
-                    else attendance.punch
-                )  # Update punch code based on device direction
                 combined_attendances.append(attendance)
 
         except zk_exception.ZKErrorResponse as e:
@@ -2237,29 +2332,26 @@ def zk_biometric_attendance_logs(device_or_devices):
 
     for attendance in combined_attendances:
         user_id = attendance.user_id
-        punch_code = attendance.punch
-        date_time = django_timezone.make_aware(attendance.timestamp)
-        date = date_time.date()
-        time = date_time.time()
+        punch_code = getattr(attendance, "punch", None)
+        date_time = ensure_aware_datetime(attendance.timestamp)
+
         device_id = attendance.device.id
         bio_id = bio_id_map.get((device_id, user_id))
-        if bio_id:
-            request_data = Request(
-                user=bio_id.employee_id.employee_user_id,
-                date=date,
-                time=time,
-                datetime=date_time,
+        if not bio_id:
+            continue
+
+        try:
+            process_biometric_punch(
+                device=attendance.device,
+                employee=bio_id.employee_id,
+                attendance_dt=date_time,
+                punch_code=punch_code,
             )
-            try:
-                if punch_code in {0, 3, 4}:
-                    clock_in(request_data)
-                elif punch_code in {1, 2, 5}:
-                    clock_out(request_data)
-            except Exception:
-                logger.error(
-                    f"[Device: {attendance.device.name}] Punch processing error",
-                    exc_info=True,
-                )
+        except Exception:
+            logger.error(
+                f"[Device: {attendance.device.name}] Punch processing error",
+                exc_info=True,
+            )
 
     return len(combined_attendances), "; ".join(errors) if errors else None
 
@@ -2319,60 +2411,20 @@ def anviz_biometric_attendance_logs(device):
         if not employee:
             continue
 
-        request_data = Request(
-            user=employee.employee_user_id,
-            date=date_time_obj.date(),
-            time=date_time_obj.time(),
-            datetime=date_time_obj,
-        )
-
         try:
-            # --------------------------------------------------
-            # SYSTEM DIRECTION (auto based on punch code)
-            # --------------------------------------------------
-            if device.device_direction == "system":
-                if punch_code in {0, 128}:
-                    clock_in(request_data)
-                else:
-                    clock_out(request_data)
-
-            # --------------------------------------------------
-            # FORCE IN DEVICE
-            # --------------------------------------------------
-            elif device.device_direction == "in":
-                clock_in(request_data)
-
-            # --------------------------------------------------
-            # FORCE OUT DEVICE
-            # --------------------------------------------------
-            elif device.device_direction == "out":
-                clock_out(request_data)
-
-            # --------------------------------------------------
-            # ALTERNATE IN / OUT DEVICE
-            # --------------------------------------------------
-            elif device.device_direction == "alternate":
-                last_activity = (
-                    AttendanceActivity.objects.filter(
-                        employee_id=employee,
-                        attendance_date=date_time_obj.date(),
-                    )
-                    .order_by("-in_datetime", "-out_datetime")
-                    .first()
-                )
-
-                # If no record or last record has clock_out → IN
-                if not last_activity or last_activity.clock_out:
-                    clock_in(request_data)
-                else:
-                    clock_out(request_data)
-
+            process_biometric_punch(
+            device=device,
+            employee=employee,
+            attendance_dt=date_time_obj,
+            punch_code=punch_code,
+            )
             processed_count += 1
+
 
         except Exception as error:
             logger.error(
                 f"Attendance sync failed for employee {employee.id}",
-                exc_info=error,
+                exc_info=True,
             )
 
     return processed_count
@@ -2413,7 +2465,7 @@ def cosec_biometric_attendance_logs(device):
 
     for attendance in attendances:
         ref_user_id = attendance["detail-1"]
-        employee = BiometricEmployees.objects.filter(ref_user_id=ref_user_id).first()
+        employee = BiometricEmployees.objects.filter(ref_user_id=ref_user_id, device_id=device).first()
         if not employee:
             continue
 
@@ -2424,22 +2476,15 @@ def cosec_biometric_attendance_logs(device):
         attendance_datetime = datetime.combine(attendance_date, attendance_time)
         punch_code = attendance["detail-2"]
 
-        request_data = Request(
-            user=employee.employee_id.employee_user_id,
-            date=attendance_date,
-            time=attendance_time,
-            datetime=django_timezone.make_aware(attendance_datetime),
-        )
-
         try:
-            if punch_code in ["1", "3", "5", "7", "9", "0"]:
-                clock_in(request_data)
-            elif punch_code in ["2", "4", "6", "8", "10"]:
-                clock_out(request_data)
-            else:
-                pass
+            process_biometric_punch(
+            device=device,
+            employee=employee.employee_id,
+            attendance_dt=attendance_datetime,
+            punch_code=punch_code,
+            )
         except Exception as error:
-            logger.error("Error processing attendance: ", error)
+            logger.error("Error processing attendance: %s", error, exc_info=True)
 
     if attendances:
         last_attendance = attendances[-1]
@@ -2510,26 +2555,16 @@ def dahua_biometric_attendance_logs(device):
             user_tz = pytz.timezone(TIME_ZONE)
             attendance_datetime = attendance_datetime.astimezone(user_tz)
 
-            last_none_activity = (
-                AttendanceActivity.objects.filter(
-                    employee_id=employee.employee_id,
-                    clock_out=None,
+            try:
+                process_biometric_punch(
+                device=device,
+                employee=employee.employee_id,
+                attendance_dt=attendance_datetime,
+                punch_code=None,
                 )
-                .order_by("in_datetime")
-                .last()
-            )
+            except Exception as error:
+                logger.error("Error processing Dahua punch: %s", error, exc_info=True)
 
-            request_data = Request(
-                user=employee.employee_id.employee_user_id,
-                date=attendance_datetime.date(),
-                time=attendance_datetime.time(),
-                datetime=attendance_datetime,
-            )
-
-            if last_none_activity:
-                clock_out(request_data)
-            else:
-                clock_in(request_data)
 
         if logs.get("records"):
             last_log = logs["records"][-1]
@@ -2596,19 +2631,16 @@ def etimeoffice_biometric_attendance_logs(device):
             datetime=attendance_datetime,
         )
 
-        last_none_activity = (
-            AttendanceActivity.objects.filter(
-                employee_id=employee.employee_id,
-                clock_out=None,
+        try:
+            process_biometric_punch(
+            device=device,
+            employee=employee.employee_id,
+            attendance_dt=attendance_datetime,
+            punch_code=None,
             )
-            .order_by("in_datetime")
-            .last()
-        )
+        except Exception as error:
+            logger.error("Error processing eTimeOffice punch: %s", error, exc_info=True)
 
-        if last_none_activity:
-            clock_out(request_data)
-        else:
-            clock_in(request_data)
 
     last_log = punch_data[0]
     device.last_fetch_date, device.last_fetch_time = (
