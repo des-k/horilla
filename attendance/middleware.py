@@ -1,79 +1,131 @@
 """
-Middleware to automatically trigger employee clock-out based on shift schedules
+Middleware to automatically trigger employee clock-out based on shift schedules.
 """
 
+import logging
 from datetime import datetime, timedelta
 
 from django.utils import timezone
 from django.utils.deprecation import MiddlewareMixin
 
-from attendance.methods.utils import Request
+from attendance.methods.utils import Request, strtime_seconds
+
+logger = logging.getLogger(__name__)
 
 
 class AttendanceMiddleware(MiddlewareMixin):
     """
-    This middleware checks for employees who haven't clocked out by the end of their
-    scheduled shift and automatically performs the clock-out action if the auto punch-out
-    is enabled for their shift. It processes this during each request.
+    Auto punch-out middleware.
+
+    On each request, it checks for open attendances (no clock-out yet) where the employee's
+    shift schedule has auto punch-out enabled. If the configured auto punch-out time has
+    already passed, it triggers `clock_out(...)` using the same Request wrapper used by
+    API/mobile and biometric sync.
     """
 
     def process_request(self, request):
-        """
-        Triggers the `trigger_function` on each request.
-        """
         self.trigger_function()
 
     def trigger_function(self):
-        """
-        Retrieves shift schedules with auto punch-out enabled and checks if there are
-        any attendance activities that haven't been clocked out. If the scheduled
-        auto punch-out time has passed, the function attempts to clock out the employee
-        automatically by invoking the `clock_out` function.
-        """
         from attendance.models import Attendance, AttendanceActivity
-        from attendance.views.clock_in_out import clock_out
+        from attendance.views.clock_in_out import clock_out, shift_schedule_today
         from base.models import EmployeeShiftSchedule
 
-        automatic_check_out_shifts = EmployeeShiftSchedule.objects.filter(
-            is_auto_punch_out_enabled=True
+        schedules = (
+            EmployeeShiftSchedule.objects.filter(
+                is_auto_punch_out_enabled=True,
+                auto_punch_out_time__isnull=False,
+            )
+            .select_related("shift_id", "day")
+        )
+        if not schedules.exists():
+            return
+
+        schedule_map = {(s.shift_id_id, s.day_id): s for s in schedules}
+
+        shift_ids = {s.shift_id_id for s in schedules}
+        day_ids = {s.day_id for s in schedules}
+
+        open_attendances = (
+            Attendance.objects.filter(
+                attendance_clock_out__isnull=True,
+                attendance_clock_out_date__isnull=True,
+                shift_id_id__in=shift_ids,
+                attendance_day_id__in=day_ids,
+            )
+            .select_related("employee_id", "employee_id__employee_user_id", "shift_id", "attendance_day")
+            .order_by("-attendance_date", "-id")
         )
 
-        for shift_schedule in automatic_check_out_shifts:
-            activities = AttendanceActivity.objects.filter(
-                shift_day=shift_schedule.day,
-                clock_out_date=None,
-                clock_out=None,
-            ).order_by("-created_at")
+        now_dt = timezone.now()
+        current_tz = timezone.get_current_timezone()
 
-            for activity in activities:
-                attendance = Attendance.objects.filter(
-                    employee_id=activity.employee_id,
-                    attendance_clock_out=None,
-                    attendance_clock_out_date=None,
-                    shift_id=shift_schedule.shift_id,
-                    attendance_day=shift_schedule.day,
-                    attendance_date=activity.attendance_date,
-                ).first()
+        for attendance in open_attendances:
+            schedule = schedule_map.get((attendance.shift_id_id, attendance.attendance_day_id))
+            if not schedule:
+                continue
 
-                if attendance:
-                    date = activity.attendance_date
-                    if shift_schedule.is_night_shift:
-                        date += timedelta(days=1)
+            # IMPORTANT: match activity to the same attendance day/date to avoid clocking out the wrong record
+            activity = (
+                AttendanceActivity.objects.filter(
+                    employee_id=attendance.employee_id,
+                    attendance_date=attendance.attendance_date,
+                    shift_day=attendance.attendance_day,
+                    clock_out__isnull=True,
+                    clock_out_date__isnull=True,
+                )
+                .order_by("-in_datetime", "-id")
+                .first()
+            )
+            if not activity:
+                continue
 
-                    combined_datetime = timezone.make_aware(
-                        datetime.combine(date, shift_schedule.auto_punch_out_time)
+            target_date = attendance.attendance_date
+            try:
+                _, start_sec, end_sec = shift_schedule_today(day=schedule.day, shift=schedule.shift_id)
+                auto_sec = strtime_seconds(schedule.auto_punch_out_time.strftime("%H:%M"))
+
+                # Night shift detection: if shift crosses midnight and auto time is after midnight,
+                # then auto punch-out should happen on the next calendar day.
+                if start_sec > end_sec and auto_sec < start_sec:
+                    target_date = target_date + timedelta(days=1)
+            except Exception:
+                # Fallback to attendance_date if schedule resolution fails.
+                pass
+
+            target_dt = timezone.make_aware(
+                datetime.combine(target_date, schedule.auto_punch_out_time),
+                current_tz,
+            )
+
+            if target_dt > now_dt:
+                continue
+
+            # Guard: don't clock-out before clock-in
+            if activity.in_datetime and activity.in_datetime > target_dt:
+                logger.warning(
+                    "Skipping auto punch-out (auto time before clock-in). "
+                    "employee_id=%s attendance_id=%s in_datetime=%s auto_datetime=%s",
+                    attendance.employee_id_id,
+                    attendance.id,
+                    activity.in_datetime,
+                    target_dt,
+                )
+                continue
+
+            try:
+                clock_out(
+                    Request(
+                        user=attendance.employee_id.employee_user_id,
+                        date=target_date,
+                        time=schedule.auto_punch_out_time,
+                        datetime=target_dt,
                     )
-                    current_time = timezone.now()
-
-                    if combined_datetime < current_time:
-                        try:
-                            clock_out(
-                                Request(
-                                    user=attendance.employee_id.employee_user_id,
-                                    date=date,
-                                    time=shift_schedule.auto_punch_out_time,
-                                    datetime=combined_datetime,
-                                )
-                            )
-                        except Exception as e:
-                            print(f"{e}")
+                )
+            except Exception:
+                logger.exception(
+                    "Auto punch-out failed. employee_id=%s attendance_id=%s schedule_id=%s",
+                    attendance.employee_id_id,
+                    attendance.id,
+                    schedule.id,
+                )
