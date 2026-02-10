@@ -48,14 +48,18 @@ def validate_hh_mm_ss_format(value):
     Validates duration string in HH:MM:SS format.
     """
     timeformat = "%H:%M:%S"
+        
+    if value is None:
+        return
     try:
         datetime.strptime(value, timeformat)
     except ValueError as e:
         raise ValidationError(_("Invalid format, it should be HH:MM:SS format")) from e
 
+
 def validate_time_format(value):
     """
-    Validates duration string in HH:MM format (duration, hours can exceed 23).
+    Validates duration string in HH:MM format (duration; hours may exceed 23).
     Examples: 09:00, 40:00, 200:00
     """
     try:
@@ -69,7 +73,7 @@ def validate_time_format(value):
         hours_str, mins_str = parts[0].strip(), parts[1].strip()
 
         # minutes must be exactly 2 digits
-        if not hours_str.isdigit() or not mins_str.isdigit() or len(mins_str) != 2:
+        if (not hours_str.isdigit()) or (not mins_str.isdigit()) or (len(mins_str) != 2):
             raise ValueError("Expected HH:MM digits")
 
         mins = int(mins_str)
@@ -78,6 +82,7 @@ def validate_time_format(value):
 
     except Exception as e:
         raise ValidationError(_("Invalid format, it should be HH:MM format")) from e
+
 
 
 def _normalize_hh_mm_ss_to_secs(value: str) -> tuple[str, int]:
@@ -177,8 +182,8 @@ class Department(HorillaModel):
         verbose_name = _("Department")
         verbose_name_plural = _("Departments")
 
-    def clean(self, *args, **kwargs):
-        super().clean(*args, **kwargs)
+    def clean(self):
+        super().clean()
         request = getattr(_thread_locals, "request", None)
         if request and request.POST:
             company = request.POST.getlist("company_id", None)
@@ -194,8 +199,8 @@ class Department(HorillaModel):
         return
 
     def save(self, *args, **kwargs):
+        self.full_clean()
         super().save(*args, **kwargs)
-        self.clean(*args, **kwargs)
         return self
 
     def __str__(self):
@@ -279,8 +284,8 @@ class WorkType(HorillaModel):
     def __str__(self) -> str:
         return str(self.work_type)
 
-    def clean(self, *args, **kwargs):
-        super().clean(*args, **kwargs)
+    def clean(self):
+        super().clean()
         request = getattr(_thread_locals, "request", None)
         if request and request.POST:
             company = request.POST.getlist("company_id", None)
@@ -294,8 +299,8 @@ class WorkType(HorillaModel):
         return
 
     def save(self, *args, **kwargs):
+        self.full_clean()
         super().save(*args, **kwargs)
-        self.clean(*args, **kwargs)
         return self
 
 
@@ -512,8 +517,8 @@ class EmployeeType(HorillaModel):
     def __str__(self) -> str:
         return str(self.employee_type)
 
-    def clean(self, *args, **kwargs):
-        super().clean(*args, **kwargs)
+    def clean(self):
+        super().clean()
         request = getattr(_thread_locals, "request", None)
         if request and request.POST:
             company = request.POST.getlist("company_id", None)
@@ -531,8 +536,8 @@ class EmployeeType(HorillaModel):
         return
 
     def save(self, *args, **kwargs):
+        self.full_clean()
         super().save(*args, **kwargs)
-        self.clean(*args, **kwargs)
         return self
 
 
@@ -603,8 +608,8 @@ class EmployeeShift(HorillaModel):
     def __str__(self) -> str:
         return str(self.employee_shift)
 
-    def clean(self, *args, **kwargs):
-        super().clean(*args, **kwargs)
+    def clean(self):
+        super().clean()
         request = getattr(_thread_locals, "request", None)
         if request and request.POST:
             company = request.POST.getlist("company_id", None)
@@ -622,8 +627,8 @@ class EmployeeShift(HorillaModel):
         return
 
     def save(self, *args, **kwargs):
+        self.full_clean()
         super().save(*args, **kwargs)
-        self.clean(*args, **kwargs)
         return self
 
 
@@ -1477,7 +1482,7 @@ class MultipleApprovalCondition(HorillaModel):
     def __str__(self) -> str:
         return f"{self.condition_field} {self.condition_operator}"
 
-    def clean(self, *args, **kwargs):
+    def clean(self):
         if self.condition_value:
             instance = MultipleApprovalCondition.objects.filter(
                 department=self.department,
@@ -1556,7 +1561,7 @@ class MultipleApprovalCondition(HorillaModel):
                             )
                         }
                     )
-        super().clean(*args, **kwargs)
+        super().clean()
 
     def save(self, *args, **kwargs):
         if self.condition_operator != "range":
