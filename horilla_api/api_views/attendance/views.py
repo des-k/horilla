@@ -1140,74 +1140,146 @@ class OfflineEmployeesListView(APIView):
 
 
 class CheckingStatus(APIView):
-    """
-    Checks and provides the current attendance status for the authenticated user.
+    """Mobile-friendly attendance status for the authenticated user (single-session).
 
-    Method:
-        get(request): Returns the attendance status, duration at work, and clock-in time if available.
+    This endpoint is used by the mobile app to render:
+    - First check-in time (for the resolved attendance_date)
+    - Last check-out time (can be updated multiple times)
+    - Worked hours (live when currently checked-in)
+
+    Backward compatibility:
+    - Keeps existing keys: status, duration, clock_in / clock_in_time
     """
 
     permission_classes = [IsAuthenticated]
 
-    @classmethod
-    def _format_seconds(cls, seconds):
+    @staticmethod
+    def _fmt_ampm(t):
+        return t.strftime('%I:%M %p') if t else None
+
+    @staticmethod
+    def _fmt_hms_from_hhmm(hhmm) -> str:
+        if not hhmm:
+            return '00:00:00'
+        hhmm = str(hhmm).strip()
+        if not hhmm:
+            return '00:00:00'
+        if hhmm.count(':') == 1:
+            return f'{hhmm}:00'
+        if hhmm.count(':') >= 2:
+            return hhmm.split('.')[0]
+        return '00:00:00'
+
+    @staticmethod
+    def _format_seconds(seconds: int) -> str:
         hours = seconds // 3600
         minutes = (seconds % 3600) // 60
         seconds = seconds % 60
         return f"{hours:02}:{minutes:02}:{seconds:02}"
 
     def get(self, request):
-        attendance_activity = (
-            AttendanceActivity.objects.filter(employee_id=request.user.employee_get)
-            .order_by("-id")
+        employee, work_info = employee_exists(request)
+        dt_now = _api_now(request)
+
+        # Default response when we cannot resolve shift/work info.
+        base_resp = {
+            'status': False,
+            'has_attendance': False,
+            'has_checked_in': False,
+            'attendance_date': str(dt_now.date()),
+            'first_check_in': None,
+            'last_check_out': None,
+            'worked_hours': '00:00:00',
+            # Backward compatible keys
+            'duration': '00:00:00',
+            'clock_in': None,
+            'clock_in_time': None,
+            'check_in_image': None,
+            'check_out_image': None,
+            'clock_in_image': None,
+            'clock_out_image': None,
+        }
+
+        if not employee or not work_info or not getattr(work_info, 'shift_id', None):
+            return Response(base_resp, status=200)
+
+        shift = work_info.shift_id
+
+        attendance_date, day, _, _, _, _, _ = _api_resolve_attendance_date_and_day(shift, dt_now)
+
+        attendance = (
+            Attendance.objects.filter(employee_id=employee, attendance_date=attendance_date)
+            .order_by('-id')
             .first()
         )
 
-        work_seconds = request.user.employee_get.get_forecasted_at_work()[
-            "forecasted_at_work_seconds"
-        ]
-        duration = CheckingStatus._format_seconds(int(work_seconds))
+        has_attendance = bool(attendance)
+        first_in = None
+        last_out = None
+        in_img = None
+        out_img = None
+        has_checked_in = False
+        has_checked_out = False
+        missing_check_in = False
 
-        status_flag = False
-        clock_in_time = None
+        if attendance:
+            has_checked_in = bool(attendance.attendance_clock_in)
+            has_checked_out = bool(attendance.attendance_clock_out)
+            missing_check_in = bool((not attendance.attendance_clock_in) and attendance.attendance_clock_out)
 
-        today = date.today()
-        attendance_activity_first = (
-            AttendanceActivity.objects.filter(
-                employee_id=request.user.employee_get, clock_in_date=today
-            )
-            .order_by("in_datetime")
-            .first()
-        )
+            first_in = self._fmt_ampm(attendance.attendance_clock_in)
+            last_out = self._fmt_ampm(attendance.attendance_clock_out)
 
-        if attendance_activity:
+            # Image URLs (MEDIA URL path)
             try:
-                if attendance_activity_first and attendance_activity_first.clock_in:
-                    clock_in_time = attendance_activity_first.clock_in.strftime("%I:%M %p")
-
-                if getattr(attendance_activity, "clock_out_date", None):
-                    status_flag = False
-                else:
-                    status_flag = True
-                    return Response(
-                        {
-                            "status": status_flag,
-                            "duration": duration,
-                            "clock_in": clock_in_time,
-                        },
-                        status=200,
-                    )
+                if attendance.attendance_clock_in_image:
+                    in_img = attendance.attendance_clock_in_image.url
             except Exception:
-                return Response(
-                    {"status": status_flag, "duration": duration, "clock_in": clock_in_time},
-                    status=200,
-                )
+                in_img = None
+            try:
+                if attendance.attendance_clock_out_image:
+                    out_img = attendance.attendance_clock_out_image.url
+            except Exception:
+                out_img = None
 
-        return Response(
-            {"status": status_flag, "duration": duration, "clock_in_time": clock_in_time},
-            status=200,
-        )
 
+        # "status" means "currently checked-in" (checked-in but not checked-out)
+        status_flag = bool(has_checked_in and not has_checked_out)
+
+        # Compute worked hours
+        worked_hours = '00:00:00'
+        if attendance and attendance.attendance_clock_in and attendance.attendance_clock_in_date:
+            if attendance.attendance_clock_out and attendance.attendance_worked_hour:
+                worked_hours = self._fmt_hms_from_hhmm(attendance.attendance_worked_hour)
+            else:
+                # Live duration while checked-in
+                try:
+                    in_dt = datetime.combine(attendance.attendance_clock_in_date, attendance.attendance_clock_in)
+                    diff = max(0, int((dt_now - in_dt).total_seconds()))
+                    worked_hours = self._format_seconds(diff)
+                except Exception:
+                    worked_hours = '00:00:00'
+
+        resp = {
+            'status': status_flag,
+            'has_attendance': has_attendance,
+            'has_checked_in': has_checked_in,
+            'attendance_date': str(attendance_date),
+            'first_check_in': first_in,
+            'last_check_out': last_out,
+            'worked_hours': worked_hours,
+            'missing_check_in': missing_check_in,
+            # Backward compatible keys
+            'duration': worked_hours,
+            'clock_in': first_in,
+            'clock_in_time': first_in,
+            'check_in_image': in_img,
+            'check_out_image': out_img,
+            'clock_in_image': in_img,
+            'clock_out_image': out_img,
+        }
+
+        return Response(resp, status=200)
 
 class MailTemplateView(APIView):
     """
