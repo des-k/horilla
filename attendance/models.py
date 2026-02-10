@@ -82,7 +82,12 @@ class AttendanceActivity(HorillaModel):
         """
 
         ordering = ["-attendance_date", "employee_id__employee_first_name", "clock_in"]
-
+        constraints = [
+            models.UniqueConstraint(
+                fields=["employee_id", "attendance_date"],
+                name="uniq_activity_employee_date",
+            )
+        ]
     def duration(self):
         """
         Duration calc b/w in-out method
