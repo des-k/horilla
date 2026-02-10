@@ -69,6 +69,7 @@ def query_dict(data):
 
 # -----------------------------------------------------------------------------
 # Mobile single-session helpers
+API_ATTENDANCE_TZ_FIX_VERSION = "2026-02-10-01"
 # -----------------------------------------------------------------------------
 def _api_now(request) -> datetime:
     """
@@ -78,11 +79,28 @@ def _api_now(request) -> datetime:
     1) request.datetime (if injected by a wrapper)
     2) timezone-aware now() if USE_TZ
     3) naive datetime.now()
+
+    Always normalize the returned value to match settings.USE_TZ:
+    - USE_TZ=True  -> return an aware datetime in the current timezone
+    - USE_TZ=False -> return a naive datetime
     """
     dt_attr = getattr(request, "datetime", None)
+    use_tz = getattr(settings, "USE_TZ", False)
+
     if dt_attr:
+        # Normalize injected datetime to match USE_TZ
+        if use_tz:
+            tz = dj_timezone.get_current_timezone()
+            if dj_timezone.is_naive(dt_attr):
+                dt_attr = dj_timezone.make_aware(dt_attr, tz)
+            else:
+                dt_attr = dj_timezone.localtime(dt_attr, tz)
+        else:
+            if dj_timezone.is_aware(dt_attr):
+                dt_attr = dj_timezone.make_naive(dt_attr)
         return dt_attr
-    if getattr(settings, "USE_TZ", False):
+
+    if use_tz:
         return dj_timezone.localtime(dj_timezone.now())
     return datetime.now()
 
@@ -91,6 +109,28 @@ def _api_today(request, dt_now: datetime) -> date:
     """Resolve a request date if provided, otherwise use dt_now.date()."""
     d_attr = getattr(request, "date", None)
     return d_attr if isinstance(d_attr, date) else dt_now.date()
+
+def _combine_date_time(d: date, t, ref_dt: datetime | None = None) -> datetime:
+    """Combine date + time into a datetime matching settings.USE_TZ.
+
+    - USE_TZ=True  -> returns an aware datetime in the current timezone (or ref_dt's tz if provided).
+    - USE_TZ=False -> returns a naive datetime.
+    """
+    dt_val = datetime.combine(d, t)
+
+    if getattr(settings, "USE_TZ", False):
+        tz = None
+        if ref_dt and dj_timezone.is_aware(ref_dt) and ref_dt.tzinfo:
+            tz = ref_dt.tzinfo
+        if tz is None:
+            tz = dj_timezone.get_current_timezone()
+
+        if dj_timezone.is_naive(dt_val):
+            return dj_timezone.make_aware(dt_val, tz)
+        return dj_timezone.localtime(dt_val, tz)
+
+    return dt_val
+
 
 
 def _coerce_datetime_like(dt_value: datetime | None, ref_dt: datetime) -> datetime | None:
@@ -359,18 +399,20 @@ class ClockInAPIView(APIView):
             except Exception:
                 # Keep check-in flow resilient even if this pre-check fails
                 pass
-
-
-            # Enforce check-in cutoff if helper exists
+            # Enforce check-in cut-off (timezone-safe)
             cutoff_in_dt = None
             try:
-                if hasattr(cio, "_get_schedule") and hasattr(cio, "_calc_cutoff_in_dt"):
+                schedule = None
+                if hasattr(cio, "_get_schedule"):
                     schedule = cio._get_schedule(shift, day)
-                    cutoff_in_dt = cio._calc_cutoff_in_dt(attendance_date, schedule)
+                if schedule and getattr(schedule, "start_time", None):
+                    start_dt = _combine_date_time(attendance_date, schedule.start_time, dt_now)
+                    cutoff_in_dt = start_dt + timedelta(
+                        seconds=int(getattr(schedule, "cutoff_check_in_offset_secs", 0) or 0)
+                    )
+                    cutoff_in_dt = _coerce_datetime_like(cutoff_in_dt, dt_now)
             except Exception:
                 cutoff_in_dt = None
-
-            cutoff_in_dt = _coerce_datetime_like(cutoff_in_dt, dt_now)
 
             if cutoff_in_dt and dt_now > cutoff_in_dt:
                 return Response(
@@ -445,25 +487,34 @@ class ClockOutAPIView(APIView):
         attendance_date, day, minimum_hour, start_time_sec, end_time_sec, _, now_sec = (
             _api_resolve_attendance_date_and_day(shift, dt_now)
         )
-
-        # Enforce check-out cutoff if helper exists
-        cutoff_out_dt = None
-        try:
-            if hasattr(cio, "_get_schedule") and hasattr(cio, "_calc_cutoff_out_dt"):
-                schedule = cio._get_schedule(shift, day)
-                cutoff_out_dt = cio._calc_cutoff_out_dt(attendance_date, schedule)
-        except Exception:
+            # Enforce check-out cut-off (timezone-safe)
             cutoff_out_dt = None
+            try:
+                schedule = None
+                if hasattr(cio, "_get_schedule"):
+                    schedule = cio._get_schedule(shift, day)
+                if schedule and getattr(schedule, "end_time", None):
+                    end_date = attendance_date + timedelta(
+                        days=1 if getattr(schedule, "is_night_shift", False) else 0
+                    )
+                    end_dt = _combine_date_time(end_date, schedule.end_time, dt_now)
+                    cutoff_out_dt = end_dt + timedelta(
+                        seconds=int(getattr(schedule, "cutoff_check_out_offset_secs", 0) or 0)
+                    )
+                    cutoff_out_dt = _coerce_datetime_like(cutoff_out_dt, dt_now)
+            except Exception:
+                cutoff_out_dt = None
 
-        cutoff_out_dt = _coerce_datetime_like(cutoff_out_dt, dt_now)
+            if cutoff_out_dt and dt_now > cutoff_out_dt:
+                return Response(
+                    {
+                        "error": "Check-out cut-off has passed.",
+                        "last_allowed": cutoff_out_dt.strftime("%Y-%m-%d %H:%M"),
+                    },
+                    status=400,
+                )
 
-        if cutoff_out_dt and dt_now > cutoff_out_dt:
-            return Response(
-                {"error": "Check-out cut-off has passed. Please submit an attendance request."},
-                status=400,
-            )
-
-        image = request.FILES.get("image")
+            image = request.FILES.get("image")
 
         # Prefer single-session core helper if available; otherwise fall back to calling clock_out view.
         missing_check_in = False
@@ -1323,7 +1374,7 @@ class CheckingStatus(APIView):
             else:
                 # Live duration while checked-in
                 try:
-                    in_dt = datetime.combine(attendance.attendance_clock_in_date, attendance.attendance_clock_in)
+                    in_dt = _combine_date_time(attendance.attendance_clock_in_date, attendance.attendance_clock_in, dt_now)
                     diff = max(0, int((dt_now - in_dt).total_seconds()))
                     worked_hours = self._format_seconds(diff)
                 except Exception:
