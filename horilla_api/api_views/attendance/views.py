@@ -1494,6 +1494,42 @@ class CheckingStatus(APIView):
         return Response(payload, status=status.HTTP_200_OK)
 
 
+class MailTemplateView(APIView):
+    """
+    Retrieves a list of recruitment mail templates.
+
+    Method:
+        get(request): Returns all recruitment mail templates.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        instances = HorillaMailTemplate.objects.all()
+        serializer = MailTemplateSerializer(instances, many=True)
+        return Response(serializer.data, status=200)
+
+class ConvertedMailTemplateConvert(APIView):
+    """
+    Renders a recruitment mail template with data from a specified employee.
+
+    Method:
+        put(request): Renders the mail template body with employee and user data and returns the result.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def put(self, request):
+        template_id = request.data.get("template_id", None)
+        employee_id = request.data.get("employee_id", None)
+        employee = Employee.objects.filter(id=employee_id).first()
+        bdy = HorillaMailTemplate.objects.filter(id=template_id).first()
+        template_bdy = template.Template(bdy.body)
+        context = template.Context(
+            {"instance": employee, "self": request.user.employee_get}
+        )
+        render_bdy = template_bdy.render(context)
+        return Response(render_bdy)
 class OfflineEmployeeMailsend(APIView):
     """
     Sends an email with attachments and rendered templates to a specified employee.
@@ -1602,7 +1638,6 @@ class AttendanceTypeAccessCheck(APIView):
         return Response(
             {"error": "Permission denied"}, status=status.HTTP_403_FORBIDDEN
         )
-
 
 class UserAttendanceDetailedView(APIView):
     permission_classes = [IsAuthenticated]
