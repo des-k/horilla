@@ -18,6 +18,9 @@ from django.contrib import messages
 from django.http import HttpResponse
 from django.utils.translation import gettext_lazy as _
 from django.db import transaction
+from django.conf import settings
+from django.utils import timezone as dj_timezone
+
 
 from attendance.methods.utils import (
     employee_exists,
@@ -48,25 +51,36 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------
 # Helpers: request time, schedule, cutoff, grace time
 # ---------------------------------------------------------------------
-def _get_request_datetime(request) -> datetime:
-    """
-    Determine the source-of-truth datetime for this request.
-
-    Priority:
-    1) request.datetime (biometric integrations)
-    2) combine request.date + request.time (if provided)
-    3) server datetime.now()
-    """
-    if request.__dict__.get("datetime"):
-        return request.datetime
-
-    req_date = request.__dict__.get("date")
-    req_time = request.__dict__.get("time")
-    if req_date and req_time:
-        return datetime.combine(req_date, req_time)
-
+def _now_local() -> datetime:
+    """Return current time for business-rule comparisons (local time when USE_TZ=True)."""
+    if getattr(settings, "USE_TZ", False):
+        return dj_timezone.localtime(dj_timezone.now())
     return datetime.now()
 
+
+def _get_request_datetime(request=None) -> datetime:
+    """Return a datetime to use for attendance rules.
+
+    Important: keep timezone-consistent with shift schedule datetimes.
+    - When USE_TZ=True: always return tz-aware local time.
+    - When USE_TZ=False: always return tz-naive local time.
+    """
+    dt = None
+    if request is not None:
+        dt = getattr(request, "datetime", None)
+
+    if dt:
+        if getattr(settings, "USE_TZ", False):
+            if dj_timezone.is_naive(dt):
+                dt = dj_timezone.make_aware(dt, dj_timezone.get_current_timezone())
+            return dj_timezone.localtime(dt)
+
+        # USE_TZ=False
+        if dj_timezone.is_aware(dt):
+            dt = dj_timezone.make_naive(dt, dj_timezone.get_current_timezone())
+        return dt
+
+    return _now_local()
 
 def _get_schedule(shift, day):
     """
@@ -76,32 +90,53 @@ def _get_schedule(shift, day):
     return EmployeeShiftSchedule.objects.filter(shift_id=shift, day=day).first()
 
 
-def _calc_cutoff_in_dt(attendance_date, schedule):
+def _combine_shift_datetime(attendance_date: date, t: time) -> datetime:
+    """Combine date + time into a datetime consistent with Django timezone settings."""
+    dt = datetime.combine(attendance_date, t)
+    if getattr(settings, "USE_TZ", False):
+        return dj_timezone.make_aware(dt, dj_timezone.get_current_timezone())
+    return dt
+
+def _calc_cutoff_in_dt(
+    attendance_date: date,
+    start_time: time | None,
+    grace_time_min: int | None,
+    cutoff_in_time: time | None,
+) -> datetime | None:
+    """Return the last allowed datetime for clock-in.
+
+    Returns tz-aware local datetime when USE_TZ=True, otherwise tz-naive datetime.
     """
-    Compute last allowed check-in datetime:
-    cutoff_in_dt = start_dt + cutoff_check_in_offset_secs
-    """
-    if not schedule or not schedule.start_time:
+    if cutoff_in_time:
+        return _combine_shift_datetime(attendance_date, cutoff_in_time)
+
+    if not start_time:
         return None
-    start_dt = datetime.combine(attendance_date, schedule.start_time)
-    return start_dt + timedelta(seconds=int(schedule.cutoff_check_in_offset_secs or 0))
 
+    base = _combine_shift_datetime(attendance_date, start_time)
+    return base + timedelta(minutes=int(grace_time_min or 0))
 
-def _calc_cutoff_out_dt(attendance_date, schedule):
+def _calc_cutoff_out_dt(
+    attendance_date: date,
+    end_time: time | None,
+    cutoff_out_time: time | None,
+    is_night_shift: bool = False,
+) -> datetime | None:
+    """Return the last allowed datetime for clock-out.
+
+    Returns tz-aware local datetime when USE_TZ=True, otherwise tz-naive datetime.
     """
-    Compute last allowed check-out datetime:
-    cutoff_out_dt = end_dt + cutoff_check_out_offset_secs
-
-    Note:
-    - For night shifts, end_dt is on the next day.
-    """
-    if not schedule or not schedule.end_time:
+    if cutoff_out_time:
+        out_dt = _combine_shift_datetime(attendance_date, cutoff_out_time)
+    elif end_time:
+        out_dt = _combine_shift_datetime(attendance_date, end_time)
+    else:
         return None
 
-    end_date = attendance_date + timedelta(days=1 if schedule.is_night_shift else 0)
-    end_dt = datetime.combine(end_date, schedule.end_time)
-    return end_dt + timedelta(seconds=int(schedule.cutoff_check_out_offset_secs or 0))
+    if is_night_shift:
+        out_dt = out_dt + timedelta(days=1)
 
+    return out_dt
 
 def _resolve_grace_time(schedule, shift):
     """
