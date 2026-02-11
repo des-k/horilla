@@ -12,7 +12,7 @@ Endpoints for check-in / check-out in single-session mode:
 
 import ipaddress
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 
 from django.contrib import messages
 from django.http import HttpResponse
