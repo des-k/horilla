@@ -72,41 +72,21 @@ def query_dict(data):
 # -----------------------------------------------------------------------------
 def _api_now(request) -> datetime:
     """
-    Resolve a request datetime with consistent timezone-awareness.
+    Resolve a request datetime.
 
     Priority:
     1) request.datetime (if injected by a wrapper)
     2) timezone-aware now() if USE_TZ
     3) naive datetime.now()
-
-    IMPORTANT:
-    - When USE_TZ=True, we ALWAYS return an offset-aware datetime.
-    - When USE_TZ=False, we ALWAYS return an offset-naive datetime.
     """
-    use_tz = getattr(settings, "USE_TZ", False)
     dt_attr = getattr(request, "datetime", None)
-
     if dt_attr:
-        if use_tz:
-            if dj_timezone.is_naive(dt_attr):
-                dt_attr = dj_timezone.make_aware(dt_attr, dj_timezone.get_current_timezone())
-            try:
-                return dj_timezone.localtime(dt_attr)
-            except Exception:
-                return dt_attr
-
-        # USE_TZ=False
-        if dj_timezone.is_aware(dt_attr):
-            try:
-                return dj_timezone.make_naive(dt_attr)
-            except Exception:
-                return dt_attr
         return dt_attr
-
-    if use_tz:
+    if getattr(settings, "USE_TZ", False):
         return dj_timezone.localtime(dj_timezone.now())
-
     return datetime.now()
+
+
 def _api_today(request, dt_now: datetime) -> date:
     """Resolve a request date if provided, otherwise use dt_now.date()."""
     d_attr = getattr(request, "date", None)
@@ -323,10 +303,10 @@ class ClockInAPIView(APIView):
 
     permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser, JSONParser]
+
     def post(self, request):
-        # NOTE: We intentionally avoid using employee.check_online() here because some
-        # deployments may mix tz-aware and tz-naive datetimes inside that helper, which
-        # can cause a server error. We do our own safe single-session checks below.
+        if request.user.employee_get.check_online():
+            return Response({"message": "Already clocked-in"}, status=400)
 
         try:
             if request.user.employee_get.get_company().geo_fencing.start:
@@ -349,37 +329,6 @@ class ClockInAPIView(APIView):
             attendance_date, day, minimum_hour, start_time_sec, end_time_sec, now_hhmm, _ = (
                 _api_resolve_attendance_date_and_day(shift, dt_now)
             )
-            # Single-session: block multiple check-ins
-            try:
-                # If there is an open attendance (no clock-out date) from yesterday/today, treat as already checked-in
-                open_att = Attendance.objects.filter(
-                    employee_id=employee,
-                    attendance_date__gte=attendance_date - timedelta(days=1),
-                    attendance_date__lte=attendance_date,
-                    attendance_clock_out_date__isnull=True,
-                ).order_by("-attendance_date", "-id").first()
-                if open_att and open_att.attendance_clock_in:
-                    return Response({"error": "Already clocked-in"}, status=400)
-
-                # If any attendance already exists for the resolved attendance_date, do not allow another check-in
-                existing = Attendance.objects.filter(
-                    employee_id=employee, attendance_date=attendance_date
-                ).order_by("-id").first()
-                if existing:
-                    return Response(
-                        {
-                            "error": "Attendance already exists for this date.",
-                            "attendance_date": str(attendance_date),
-                            "missing_check_in": bool(
-                                (not existing.attendance_clock_in) and existing.attendance_clock_out
-                            ),
-                        },
-                        status=400,
-                    )
-            except Exception:
-                # Keep check-in flow resilient even if this pre-check fails
-                pass
-
 
             # Enforce check-in cutoff if helper exists
             cutoff_in_dt = None
@@ -396,12 +345,7 @@ class ClockInAPIView(APIView):
                 return Response(
                     {
                         "error": "Check-in cut-off has passed.",
-                        "code": "CHECKIN_CUTOFF_PASSED",
-                        "attendance_date": str(attendance_date),
-                        "missing_check_in": True,
                         "last_allowed": cutoff_in_dt.strftime("%Y-%m-%d %H:%M"),
-                        "can_clock_out": True,
-                        "suggested_action": "clock_out",
                     },
                     status=400,
                 )
@@ -1241,193 +1185,250 @@ class CheckingStatus(APIView):
     - Last check-out time (can be updated multiple times)
     - Worked hours (live when currently checked-in)
 
-    Backward compatibility:
-    - Keeps existing keys: status, duration, clock_in / clock_in_time
+    It also returns additional flags so the mobile UI can show short guidance text:
+    - missing_check_in / check_in_cutoff_has_passed / suggested_action / can_clock_out
+    - checked_out_early / work_hours_below_minimum / work_hours_shortfall / minimum_working_hour
+    - late_check_in / late_by
     """
 
     permission_classes = [IsAuthenticated]
 
-    @staticmethod
-    def _fmt_ampm(t):
-        return t.strftime('%I:%M %p') if t else None
-
-    @staticmethod
-    def _fmt_hms_from_hhmm(hhmm) -> str:
-        if not hhmm:
-            return '00:00:00'
-        hhmm = str(hhmm).strip()
-        if not hhmm:
-            return '00:00:00'
-        if hhmm.count(':') == 1:
-            return f'{hhmm}:00'
-        if hhmm.count(':') >= 2:
-            return hhmm.split('.')[0]
-        return '00:00:00'
-
-    @staticmethod
-    def _format_seconds(seconds: int) -> str:
-        hours = seconds // 3600
-        minutes = (seconds % 3600) // 60
-        seconds = seconds % 60
-        return f"{hours:02}:{minutes:02}:{seconds:02}"
-
     def get(self, request):
-        employee, work_info = employee_exists(request)
+        employee = request.user.employee_get
         dt_now = _api_now(request)
 
-        # Default response when we cannot resolve shift/work info.
-        base_resp = {
-            'status': False,
-            'has_attendance': False,
-            'has_checked_in': False,
-            'attendance_date': str(dt_now.date()),
-            'first_check_in': None,
-            'last_check_out': None,
-            'worked_hours': '00:00:00',
-            'missing_check_in': False,
-            'can_clock_in': False,
-            'can_clock_out': False,
-            'check_in_cutoff_passed': False,
-            'check_in_last_allowed': None,
-            'check_out_cutoff_passed': False,
-            'check_out_last_allowed': None,
-            'suggested_action': None,
-            # Backward compatible keys
-            'duration': '00:00:00',
-            'clock_in': None,
-            'clock_in_time': None,
-            'check_in_image': None,
-            'check_out_image': None,
-            'clock_in_image': None,
-            'clock_out_image': None,
-        }
+        # Resolve attendance date + schedule context (handles night shift correctly)
+        attendance_date, day, min_hour, start_time_sec, end_time_sec, shift = _api_resolve_attendance_date_and_day(
+            employee=employee,
+            dt_now=dt_now,
+        )
 
-        if not employee or not work_info or not getattr(work_info, 'shift_id', None):
-            return Response(base_resp, status=200)
+        # Helper: parse "HH:MM" or "HH:MM:SS" -> minutes
+        def _hhmm_to_minutes(val) -> int:
+            if not val:
+                return 0
+            s = str(val).strip()
+            if not s:
+                return 0
+            parts = s.split(":")
+            try:
+                h = int(parts[0])
+            except Exception:
+                return 0
+            m = 0
+            if len(parts) > 1:
+                try:
+                    m = int(parts[1])
+                except Exception:
+                    m = 0
+            return max(0, h) * 60 + max(0, m)
 
-        shift = work_info.shift_id
+        # Helper: minutes -> "HH:MM"
+        def _minutes_to_hhmm(total_minutes: int) -> str:
+            total_minutes = max(0, int(total_minutes))
+            h = total_minutes // 60
+            m = total_minutes % 60
+            return f"{h:02d}:{m:02d}"
 
-        attendance_date, day, _, _, _, _, _ = _api_resolve_attendance_date_and_day(shift, dt_now)
+        def _sec_to_hhmm(sec_val) -> str:
+            try:
+                s = int(sec_val)
+            except Exception:
+                return None
+            if s < 0:
+                return None
+            h = (s // 3600) % 24
+            m = (s % 3600) // 60
+            return f"{h:02d}:{m:02d}"
 
-        # Cut-off hints for mobile UI (single-session)
+        # Helper: combine date + time into aware/naive datetime consistent with dt_now
+        def _combine(dt_date, t):
+            d = datetime.combine(dt_date, t)
+            if dj_timezone.is_aware(dt_now):
+                return dj_timezone.make_aware(d, dj_timezone.get_current_timezone())
+            return d
+
+        attendance = Attendance.objects.filter(
+            employee_id=employee,
+            attendance_date=attendance_date
+        ).first()
+
+        # Pull raw "first in" and "last out" from AttendanceActivity
+        first_check_in = None
+        last_check_out = None
+        in_activity = None
+        out_activity = None
+
+        if attendance:
+            in_activity = AttendanceActivity.objects.filter(
+                employee_id=employee,
+                attendance_date=attendance_date,
+                attendance_clock_in__isnull=False,
+            ).order_by("attendance_clock_in_date").first()
+
+            out_activity = AttendanceActivity.objects.filter(
+                employee_id=employee,
+                attendance_date=attendance_date,
+                attendance_clock_out__isnull=False,
+            ).order_by("-attendance_clock_out_date").first()
+
+            if in_activity:
+                first_check_in = in_activity.attendance_clock_in
+            if out_activity:
+                last_check_out = out_activity.attendance_clock_out
+
+        # --- Worked hours (HH:MM) ---
+        worked_minutes = 0
+        worked_hours_str = "00:00"
+
+        if attendance:
+            # Prefer stored value once checked out; otherwise compute live duration
+            if attendance.attendance_worked_hour:
+                worked_minutes = _hhmm_to_minutes(attendance.attendance_worked_hour)
+                worked_hours_str = _minutes_to_hhmm(worked_minutes)
+            elif first_check_in:
+                try:
+                    in_dt = _combine(attendance_date, first_check_in)
+                    delta = dt_now - in_dt
+                    worked_minutes = max(0, int(delta.total_seconds() // 60))
+                    worked_hours_str = _minutes_to_hhmm(worked_minutes)
+                except Exception:
+                    worked_minutes = 0
+                    worked_hours_str = "00:00"
+
+        # --- Minimum working hour + shortfall ---
+        minimum_working_hour = str(min_hour or "00:00")
+        min_minutes = _hhmm_to_minutes(minimum_working_hour)
+
+        work_hours_below_minimum = False
+        work_hours_shortfall = "00:00"
+        if min_minutes > 0 and worked_minutes >= 0:
+            work_hours_below_minimum = worked_minutes < min_minutes
+            if work_hours_below_minimum:
+                work_hours_shortfall = _minutes_to_hhmm(min_minutes - worked_minutes)
+
+        # --- Cutoff logic (reuse same helpers as web clock_in_out.py) ---
         schedule = None
         cutoff_in_dt = None
         cutoff_out_dt = None
+        check_in_cutoff_has_passed = False
+        check_out_cutoff_has_passed = False
+
         try:
-            if hasattr(cio, '_get_schedule'):
+            if shift and day:
                 schedule = cio._get_schedule(shift, day)
-            if schedule and hasattr(cio, '_calc_cutoff_in_dt'):
-                cutoff_in_dt = cio._calc_cutoff_in_dt(attendance_date, schedule)
-            if schedule and hasattr(cio, '_calc_cutoff_out_dt'):
-                cutoff_out_dt = cio._calc_cutoff_out_dt(attendance_date, schedule)
+                if schedule:
+                    cutoff_in_dt = cio._calc_cutoff_in_dt(attendance_date, schedule)
+                    cutoff_out_dt = cio._calc_cutoff_out_dt(attendance_date, schedule)
+                    if cutoff_in_dt and dt_now > cutoff_in_dt:
+                        check_in_cutoff_has_passed = True
+                    if cutoff_out_dt and dt_now > cutoff_out_dt:
+                        check_out_cutoff_has_passed = True
         except Exception:
+            # Keep safe defaults
             schedule = None
-            cutoff_in_dt = None
-            cutoff_out_dt = None
 
-        cutoff_in_dt = _coerce_datetime_like(cutoff_in_dt, dt_now)
-        cutoff_out_dt = _coerce_datetime_like(cutoff_out_dt, dt_now)
+        # missing_check_in:
+        # - No first punch yet AND check-in cutoff passed AND (still allowed to clock-out)
+        missing_check_in = (not first_check_in) and bool(check_in_cutoff_has_passed) and (not check_out_cutoff_has_passed)
 
-        check_in_last_allowed = cutoff_in_dt.strftime('%Y-%m-%d %H:%M') if cutoff_in_dt else None
-        check_out_last_allowed = cutoff_out_dt.strftime('%Y-%m-%d %H:%M') if cutoff_out_dt else None
+        # can_clock_out: if cutoff_out not passed (or not configured)
+        can_clock_out = not check_out_cutoff_has_passed
 
-        check_in_cutoff_passed = bool(cutoff_in_dt and dt_now > cutoff_in_dt)
-        check_out_cutoff_passed = bool(cutoff_out_dt and dt_now > cutoff_out_dt)
+        # suggested_action:
+        # - If already checked in (hasIn) and not checked out -> clock_out
+        # - If missing_check_in -> clock_out (to allow user to record out; check-in can be requested later)
+        # - Else -> clock_in
+        if first_check_in and not last_check_out:
+            suggested_action = "clock_out"
+        elif missing_check_in:
+            suggested_action = "clock_out"
+        else:
+            suggested_action = "clock_in"
 
-
-        attendance = (
-            Attendance.objects.filter(employee_id=employee, attendance_date=attendance_date)
-            .order_by('-id')
-            .first()
-        )
-
-        has_attendance = bool(attendance)
-        first_in = None
-        last_out = None
-        in_img = None
-        out_img = None
-        has_checked_in = False
-        has_checked_out = False
-        missing_check_in = False
-
-        if attendance:
-            has_checked_in = bool(attendance.attendance_clock_in)
-            has_checked_out = bool(attendance.attendance_clock_out)
-            missing_check_in = bool((not attendance.attendance_clock_in) and attendance.attendance_clock_out)
-
-            first_in = self._fmt_ampm(attendance.attendance_clock_in)
-            last_out = self._fmt_ampm(attendance.attendance_clock_out)
-
-            # Image URLs (MEDIA URL path)
+        # --- Late check-in ---
+        late_check_in = False
+        late_by = "00:00"
+        if first_check_in and start_time_sec is not None:
             try:
-                if attendance.attendance_clock_in_image:
-                    in_img = attendance.attendance_clock_in_image.url
+                grace_sec = 0
+                if schedule and getattr(schedule, "grace_time", None):
+                    grace_td = schedule.grace_time
+                    grace_sec = int(grace_td.total_seconds()) if grace_td else 0
+
+                first_in_sec = first_check_in.hour * 3600 + first_check_in.minute * 60 + first_check_in.second
+                allowed_in_sec = int(start_time_sec) + max(0, grace_sec)
+
+                if first_in_sec > allowed_in_sec:
+                    late_check_in = True
+                    late_minutes = int((first_in_sec - allowed_in_sec) // 60)
+                    late_by = _minutes_to_hhmm(late_minutes)
             except Exception:
-                in_img = None
+                late_check_in = False
+                late_by = "00:00"
+
+        # --- Early check-out ---
+        checked_out_early = False
+        early_out_by = "00:00"
+        if last_check_out and start_time_sec is not None and end_time_sec is not None:
             try:
-                if attendance.attendance_clock_out_image:
-                    out_img = attendance.attendance_clock_out_image.url
+                is_night = int(start_time_sec) > int(end_time_sec)
+                out_sec = last_check_out.hour * 3600 + last_check_out.minute * 60 + last_check_out.second
+
+                # Determine which date the out punch belongs to (important for night shifts)
+                out_date = attendance_date
+                if is_night and out_sec < int(start_time_sec):
+                    out_date = attendance_date + timedelta(days=1)
+
+                out_dt = _combine(out_date, last_check_out)
+
+                end_date = attendance_date + timedelta(days=1) if is_night else attendance_date
+                end_dt = _combine(end_date, (datetime.min + timedelta(seconds=int(end_time_sec))).time())
+
+                if out_dt < end_dt:
+                    checked_out_early = True
+                    early_minutes = max(0, int((end_dt - out_dt).total_seconds() // 60))
+                    early_out_by = _minutes_to_hhmm(early_minutes)
             except Exception:
-                out_img = None
+                checked_out_early = False
+                early_out_by = "00:00"
 
+        payload = {
+            # existing keys (keep for backward compatibility)
+            "status": bool(attendance),
+            "attendance_date": attendance_date.strftime("%Y-%m-%d"),
+            "first_check_in": first_check_in.strftime("%H:%M") if first_check_in else None,
+            "last_check_out": last_check_out.strftime("%H:%M") if last_check_out else None,
+            "worked_hours": worked_hours_str,
 
-        # "status" means "currently checked-in" (checked-in but not checked-out)
-        status_flag = bool(has_checked_in and not has_checked_out)
+            # shift context (for debugging / optional UI)
+            "shift_start": _sec_to_hhmm(start_time_sec),
+            "shift_end": _sec_to_hhmm(end_time_sec),
+            # cutoff + action hints
+            "missing_check_in": bool(missing_check_in),
+            "check_in_cutoff_has_passed": bool(check_in_cutoff_has_passed),
+            "check_out_cutoff_has_passed": bool(check_out_cutoff_has_passed),
+            "suggested_action": suggested_action,
+            "can_clock_out": bool(can_clock_out),
 
-        # Compute worked hours
-        worked_hours = '00:00:00'
-        if attendance and attendance.attendance_clock_in and attendance.attendance_clock_in_date:
-            if attendance.attendance_clock_out and attendance.attendance_worked_hour:
-                worked_hours = self._fmt_hms_from_hhmm(attendance.attendance_worked_hour)
-            else:
-                # Live duration while checked-in
-                try:
-                    in_dt = datetime.combine(attendance.attendance_clock_in_date, attendance.attendance_clock_in)
-                    in_dt = _coerce_datetime_like(in_dt, dt_now)
-                    dt_now_safe = _coerce_datetime_like(dt_now, in_dt) if in_dt else dt_now
-                    diff = max(0, int((dt_now_safe - in_dt).total_seconds())) if in_dt else 0
-                    worked_hours = self._format_seconds(diff)
-                except Exception:
-                    worked_hours = '00:00:00'
-        # If the check-in cut-off has passed but the check-out cut-off has NOT,
-        # the employee can still clock-out and later submit an attendance request
-        # for the missing check-in. Mobile uses this to auto-switch the main button.
-        missing_check_in_effective = bool(
-            missing_check_in
-            or ((not has_attendance) and check_in_cutoff_passed and (not check_out_cutoff_passed))
-        )
-
-
-        resp = {
-            'status': status_flag,
-            'has_attendance': has_attendance,
-            'has_checked_in': has_checked_in,
-            'attendance_date': str(attendance_date),
-            'first_check_in': first_in,
-            'last_check_out': last_out,
-            'worked_hours': worked_hours,
-            'missing_check_in': missing_check_in_effective,
-            'can_clock_in': (not has_attendance) and (not check_in_cutoff_passed),
-            'can_clock_out': (not check_out_cutoff_passed),
-            'check_in_cutoff_passed': check_in_cutoff_passed,
-            'check_in_cutoff_has_passed': check_in_cutoff_passed,
-            'check_in_last_allowed': check_in_last_allowed,
-            'check_out_cutoff_passed': check_out_cutoff_passed,
-            'check_out_cutoff_has_passed': check_out_cutoff_passed,
-            'check_out_last_allowed': check_out_last_allowed,
-            'suggested_action': 'clock_out' if ((not has_attendance) and check_in_cutoff_passed and (not check_out_cutoff_passed)) else ('clock_in' if ((not has_attendance) and (not check_in_cutoff_passed)) else None),
-            # Backward compatible keys
-            'duration': worked_hours,
-            'clock_in': first_in,
-            'clock_in_time': first_in,
-            'check_in_image': in_img,
-            'check_out_image': out_img,
-            'clock_in_image': in_img,
-            'clock_out_image': out_img,
+            # additional flags used by the mobile UI note
+            "minimum_working_hour": minimum_working_hour,
+            "work_hours_below_minimum": bool(work_hours_below_minimum),
+            "work_hours_shortfall": work_hours_shortfall,
+            "checked_out_early": bool(checked_out_early),
+            "early_out_by": early_out_by,
+            "late_check_in": bool(late_check_in),
+            "late_by": late_by,
         }
 
-        return Response(resp, status=200)
+        # Images (optional)
+        if attendance:
+            if attendance.attendance_clock_in_image:
+                payload["clock_in_image"] = attendance.attendance_clock_in_image.url
+            if attendance.attendance_clock_out_image:
+                payload["clock_out_image"] = attendance.attendance_clock_out_image.url
 
+        return Response(payload, status=status.HTTP_200_OK)
 class MailTemplateView(APIView):
     """
     Retrieves a list of recruitment mail templates.
