@@ -366,7 +366,12 @@ class ClockInAPIView(APIView):
                 clock_in_image=image,
             )
             return Response(
-                {"message": "Clocked-In", "attendance_date": str(attendance_date)},
+                {
+                    "message": "Clocked-In",
+                    "attendance_date": str(attendance_date),
+                    "server_now": dt_now.isoformat(),
+                    "server_time": dt_now.strftime("%H:%M"),
+                },
                 status=200,
             )
 
@@ -521,6 +526,8 @@ class ClockOutAPIView(APIView):
                 "message": "Clocked-Out",
                 "attendance_date": str(attendance_date),
                 "missing_check_in": bool(missing_check_in),
+                "server_now": dt_now.isoformat(),
+                "server_time": dt_now.strftime("%H:%M"),
             },
             status=200,
         )
@@ -1208,6 +1215,8 @@ class CheckingStatus(APIView):
     def get(self, request):
         employee = request.user.employee_get
         dt_now = _api_now(request)
+        server_now_iso = dt_now.isoformat()
+        server_time_hhmm = dt_now.strftime("%H:%M")
 
         # Resolve shift
         shift = None
@@ -1240,6 +1249,8 @@ class CheckingStatus(APIView):
                 "early_out_by": "00:00",
                 "late_check_in": False,
                 "late_by": "00:00",
+                "server_now": server_now_iso,
+                "server_time": server_time_hhmm,
             }
             return Response(payload, status=status.HTTP_200_OK)
 
@@ -1476,6 +1487,8 @@ class CheckingStatus(APIView):
             "early_out_by": early_out_by,
             "late_check_in": bool(late_check_in),
             "late_by": late_by,
+            "server_now": server_now_iso,
+            "server_time": server_time_hhmm,
         }
 
         # Images (optional)
