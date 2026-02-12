@@ -1321,22 +1321,75 @@ class CheckingStatus(APIView):
         clock_in_t = getattr(attendance, "attendance_clock_in", None) if attendance else None
         clock_out_t = getattr(attendance, "attendance_clock_out", None) if attendance else None
 
-        # Worked hours (HH:MM) – prefer stored, otherwise live when checked in
+        # Worked hours (HH:MM)
+        # Rules:
+        # - If checked-in and NOT checked-out: keep running using server time.
+        # - If checked-out: freeze to the diff between check-in and last check-out.
+        # - Missing check-in:
+        #     * 1st check-out => 00:00
+        #     * 2nd+ check-out => diff between FIRST and LAST check-out
+        worked_seconds = 0
         worked_minutes = 0
         worked_hours = "00:00"
+        is_working = False
+        
+        activity = None
         if attendance:
-            stored = getattr(attendance, "attendance_worked_hour", None)
-            if stored:
-                worked_minutes = _to_minutes_hhmm(stored)
-                worked_hours = _minutes_to_hhmm(worked_minutes)
-            elif clock_in_t and not clock_out_t:
+            try:
+                activity = AttendanceActivity.objects.filter(
+                    employee_id=employee,
+                    attendance_date=attendance_date,
+                ).first()
+            except Exception:
+                activity = None
+        
+        def _safe_diff_seconds(in_dt, out_dt) -> int:
+            if not in_dt or not out_dt:
+                return 0
+            try:
+                sec = int((out_dt - in_dt).total_seconds())
+                return max(0, sec)
+            except Exception:
+                return 0
+        
+        if attendance:
+            # Normal flow: check-in exists
+            if clock_in_t:
+                in_date = getattr(attendance, "attendance_clock_in_date", None) or attendance_date
+                in_dt = _combine(in_date, clock_in_t)
+        
+                if not clock_out_t:
+                    # Running timer (IGNORE attendance_worked_hour even if it's "00:00")
+                    is_working = True
+                    worked_seconds = _safe_diff_seconds(in_dt, dt_now)
+                else:
+                    # Freeze after check-out
+                    out_date = getattr(attendance, "attendance_clock_out_date", None) or attendance_date
+                    out_dt = _combine(out_date, clock_out_t)
+                    worked_seconds = _safe_diff_seconds(in_dt, out_dt)
+        
+            # Missing check-in flow: compute from activity placeholder (first out) to last out
+            elif clock_out_t:
                 try:
-                    in_dt = _combine(attendance_date, clock_in_t)
-                    worked_minutes = max(0, int((dt_now - in_dt).total_seconds() // 60))
-                    worked_hours = _minutes_to_hhmm(worked_minutes)
+                    if (
+                        activity
+                        and activity.clock_in_date and activity.clock_in
+                        and activity.clock_out_date and activity.clock_out
+                    ):
+                        in_dt = _combine(activity.clock_in_date, activity.clock_in)
+                        out_dt = _combine(activity.clock_out_date, activity.clock_out)
+                        worked_seconds = _safe_diff_seconds(in_dt, out_dt)
+                    else:
+                        # Fallback to stored (in case helper already updated it)
+                        stored = getattr(attendance, "attendance_worked_hour", None)
+                        worked_seconds = _to_minutes_hhmm(stored) * 60 if stored else 0
                 except Exception:
-                    worked_minutes = 0
-                    worked_hours = "00:00"
+                    worked_seconds = 0
+            else:
+                worked_seconds = 0
+        
+        worked_minutes = max(0, int(worked_seconds // 60))
+        worked_hours = _minutes_to_hhmm(worked_minutes)
 
         # Cutoffs (coerced to dt_now tz-awareness)
         cutoff_in_dt = None
@@ -1357,11 +1410,19 @@ class CheckingStatus(APIView):
                 cutoff_in_dt = None
                 cutoff_out_dt = None
 
-        # Missing check-in case: no check-in recorded + cutoff passed + still allowed to clock out
-        missing_check_in = (not clock_in_t) and bool(check_in_cutoff_has_passed) and (not bool(check_out_cutoff_has_passed))
-
+        # Missing check-in cases:
+        # - After check-in cutoff passes (user still allowed to clock out)
+        # - OR when a clock-out already exists without a clock-in (recorded missing check-in)
+        missing_check_in = (
+            (not clock_in_t)
+            and (
+                bool(clock_out_t)
+                or (bool(check_in_cutoff_has_passed) and (not bool(check_out_cutoff_has_passed)))
+            )
+        )
+        
         # Can perform actions
-        can_clock_in = (not clock_in_t) and (not bool(check_in_cutoff_has_passed))
+        can_clock_in = (not clock_in_t) and (not bool(clock_out_t)) and (not bool(check_in_cutoff_has_passed))
         can_clock_out = not bool(check_out_cutoff_has_passed)
 
         # Update check-out is allowed when a check-out already exists and cutoff-out has not passed
@@ -1460,9 +1521,12 @@ class CheckingStatus(APIView):
 
             "first_check_in": _fmt_ampm(clock_in_t) if clock_in_t else None,
             "last_check_out": _fmt_ampm(clock_out_t) if clock_out_t else None,
-
+            
             "worked_hours": worked_hours,
-            "worked_hour": worked_hours,  # keep old key
+            "worked_hour": worked_hours,   # legacy
+            "duration": worked_hours,      # legacy (kalau ada yang masih pakai)
+            "worked_seconds": int(worked_seconds),
+            "is_working": bool(is_working),
 
             # shift context (optional)
             "shift_start": _sec_to_hhmm(start_time_sec),
