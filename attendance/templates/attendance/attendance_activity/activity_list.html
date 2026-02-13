@@ -77,17 +77,33 @@
                             {% trans "In Date" %}
                         </div>
                         <div data-cell-index="3" data-cell-title="{% trans 'Check In' %}" class='oh-sticky-table__th'>{% trans "Check In" %}</div>
-                        
+
+                        <div data-cell-index="8" data-cell-title="{% trans 'In Mode' %}" class="oh-sticky-table__th">
+                          {% trans "In Mode" %}
+                        </div>
+
+                        <div data-cell-index="10" data-cell-title="{% trans 'In Location' %}" class="oh-sticky-table__th">
+                          {% trans "In Location" %}
+                        </div>
+
                         <div data-cell-index="6" data-cell-title="{% trans 'In Photo' %}" class="oh-sticky-table__th">
                           {% trans "In Photo" %}
                         </div>
-                        
+
                         <div data-cell-index="4" data-cell-title="{% trans 'Check Out' %}" class='oh-sticky-table__th'>{% trans "Check Out" %}</div>
-                        
+
+                        <div data-cell-index="9" data-cell-title="{% trans 'Out Mode' %}" class="oh-sticky-table__th">
+                          {% trans "Out Mode" %}
+                        </div>
+
+                        <div data-cell-index="11" data-cell-title="{% trans 'Out Location' %}" class="oh-sticky-table__th">
+                          {% trans "Out Location" %}
+                        </div>
+
                         <div data-cell-index="7" data-cell-title="{% trans 'Out Photo' %}" class="oh-sticky-table__th">
                           {% trans "Out Photo" %}
                         </div>
-                        
+
                         <div data-cell-index="5" data-cell-title="{% trans 'Out Date' %}"
                             class="oh-sticky-table__th
                             {% if request.sort_option.order == '-clock_out_date' %}
@@ -99,8 +115,7 @@
                             {% endif %}"
                             hx-target='#activity-table' hx-get="{% url 'attendance-activity-search' %}?{{pd}}&orderby=clock_out_date">
                             {% trans "Out Date" %}
-                        </div>
-                        {% if perms.attendance.delete_attendanceactivity %}
+                        </div>{% if perms.attendance.delete_attendanceactivity %}
                             <div class='oh-sticky-table__th oh-sticky-table__right' scope="col" style="width: 86px;">{% trans "Actions" %}</div>
                         {% endif %}
                     </div>
@@ -127,7 +142,39 @@
                             <div data-cell-index="1" class="oh-sticky-table__td dateformat_changer">{{activity.attendance_date}}</div>
                             <div data-cell-index="2" class="oh-sticky-table__td dateformat_changer">{{activity.clock_in_date}}</div>
                             <div data-cell-index="3" class="oh-sticky-table__td timeformat_changer">{{activity.clock_in}}</div>
-                            
+
+                            <div data-cell-index="8" class="oh-sticky-table__td">
+                              {{ activity.get_clock_in_mode_display|default:"-" }}
+                            </div>
+
+                            <div data-cell-index="10" class="oh-sticky-table__td" onclick="event.stopPropagation();">
+                              {% if activity.clock_in_location %}
+                                {% if activity.clock_in_location.lat and activity.clock_in_location.lng %}
+                                  <div class="oh-text--sm">
+                                    {{ activity.clock_in_location.lat }}, {{ activity.clock_in_location.lng }}
+                                    {% if activity.clock_in_location.accuracy %}
+                                      <span class="oh-text--muted">({{ activity.clock_in_location.accuracy }}m)</span>
+                                    {% endif %}
+                                  </div>
+                                  <a href="https://www.google.com/maps?q={{ activity.clock_in_location.lat }},{{ activity.clock_in_location.lng }}"
+                                     target="_blank" onclick="event.stopPropagation();">{% trans "Map" %}</a>
+                                {% elif activity.clock_in_location.latitude and activity.clock_in_location.longitude %}
+                                  <div class="oh-text--sm">
+                                    {{ activity.clock_in_location.latitude }}, {{ activity.clock_in_location.longitude }}
+                                    {% if activity.clock_in_location.accuracy %}
+                                      <span class="oh-text--muted">({{ activity.clock_in_location.accuracy }}m)</span>
+                                    {% endif %}
+                                  </div>
+                                  <a href="https://www.google.com/maps?q={{ activity.clock_in_location.latitude }},{{ activity.clock_in_location.longitude }}"
+                                     target="_blank" onclick="event.stopPropagation();">{% trans "Map" %}</a>
+                                {% else %}
+                                  {{ activity.clock_in_location }}
+                                {% endif %}
+                              {% else %}
+                                -
+                              {% endif %}
+                            </div>
+
                             <div data-cell-index="6" class="oh-sticky-table__td" onclick="event.stopPropagation();">
                               {% if activity.clock_in_image %}
                                 <a href="{{ activity.clock_in_image.url }}" target="_blank" onclick="event.stopPropagation();">
@@ -141,6 +188,38 @@
 
                             <div data-cell-index="4" class="oh-sticky-table__td timeformat_changer">{{activity.clock_out}}</div>
 
+                            <div data-cell-index="9" class="oh-sticky-table__td">
+                              {{ activity.get_clock_out_mode_display|default:"-" }}
+                            </div>
+
+                            <div data-cell-index="11" class="oh-sticky-table__td" onclick="event.stopPropagation();">
+                              {% if activity.clock_out_location %}
+                                {% if activity.clock_out_location.lat and activity.clock_out_location.lng %}
+                                  <div class="oh-text--sm">
+                                    {{ activity.clock_out_location.lat }}, {{ activity.clock_out_location.lng }}
+                                    {% if activity.clock_out_location.accuracy %}
+                                      <span class="oh-text--muted">({{ activity.clock_out_location.accuracy }}m)</span>
+                                    {% endif %}
+                                  </div>
+                                  <a href="https://www.google.com/maps?q={{ activity.clock_out_location.lat }},{{ activity.clock_out_location.lng }}"
+                                     target="_blank" onclick="event.stopPropagation();">{% trans "Map" %}</a>
+                                {% elif activity.clock_out_location.latitude and activity.clock_out_location.longitude %}
+                                  <div class="oh-text--sm">
+                                    {{ activity.clock_out_location.latitude }}, {{ activity.clock_out_location.longitude }}
+                                    {% if activity.clock_out_location.accuracy %}
+                                      <span class="oh-text--muted">({{ activity.clock_out_location.accuracy }}m)</span>
+                                    {% endif %}
+                                  </div>
+                                  <a href="https://www.google.com/maps?q={{ activity.clock_out_location.latitude }},{{ activity.clock_out_location.longitude }}"
+                                     target="_blank" onclick="event.stopPropagation();">{% trans "Map" %}</a>
+                                {% else %}
+                                  {{ activity.clock_out_location }}
+                                {% endif %}
+                              {% else %}
+                                -
+                              {% endif %}
+                            </div>
+
                             <div data-cell-index="7" class="oh-sticky-table__td" onclick="event.stopPropagation();">
                               {% if activity.clock_out_image %}
                                 <a href="{{ activity.clock_out_image.url }}" target="_blank" onclick="event.stopPropagation();">
@@ -151,8 +230,7 @@
                                 -
                               {% endif %}
                             </div>
-                            
-                            <div data-cell-index="5" class="oh-sticky-table__td dateformat_changer">{{activity.clock_out_date}}</div>
+<div data-cell-index="5" class="oh-sticky-table__td dateformat_changer">{{activity.clock_out_date}}</div>
                             {% if perms.attendance.delete_attendanceactivity %}
                                 <div class="oh-sticky-table__td oh-sticky-table__right">
                                     <form hx-confirm="{% trans 'Are you sure want to delete this attendance?' %}"
