@@ -41,7 +41,7 @@
             href="{% url 'employee-view-individual' activity.employee_id.id %}">
             <div class="oh-profile mb-2">
                 <div class="oh-profile__avatar">
-                    <img src="{{activity.employee_id.get_avatar}}" class="oh-profile__image me-2" alt="Mary Magdalene" />
+                    <img src="{{activity.employee_id.get_avatar}}" class="oh-profile__image me-2" alt="{{activity.employee_id}}" />
                 </div>
                 <div class="oh-timeoff-modal__profile-info">
                     <span class="oh-timeoff-modal__user fw-bold">{{activity.employee_id}}</span>
@@ -86,11 +86,39 @@
                 </div>
             </div>
 
+            <!-- NEW: Hybrid Mode -->
+            <div class="oh-timeoff-modal__stats-container mt-3 mb-3">
+                <div class="oh-timeoff-modal__stat">
+                    <span class="oh-timeoff-modal__stat-title">{% trans "In Mode" %}</span>
+                    <span class="oh-timeoff-modal__stat-count">
+                        {% if activity.get_clock_in_mode_display %}
+                            {{ activity.get_clock_in_mode_display }}
+                        {% elif activity.clock_in_mode %}
+                            {{ activity.clock_in_mode }}
+                        {% else %}
+                            -
+                        {% endif %}
+                    </span>
+                </div>
+                <div class="oh-timeoff-modal__stat" style="margin-left: 20px">
+                    <span class="oh-timeoff-modal__stat-title">{% trans "Out Mode" %}</span>
+                    <span class="oh-timeoff-modal__stat-count">
+                        {% if activity.get_clock_out_mode_display %}
+                            {{ activity.get_clock_out_mode_display }}
+                        {% elif activity.clock_out_mode %}
+                            {{ activity.clock_out_mode }}
+                        {% else %}
+                            -
+                        {% endif %}
+                    </span>
+                </div>
+            </div>
+
             <div class="oh-timeoff-modal__stats-container mt-3 mb-3">
               <div class="oh-timeoff-modal__stat">
                 <span class="oh-timeoff-modal__stat-title">{% trans "In Photo" %}</span>
                 {% if activity.clock_in_image %}
-                  <a href="{{ activity.clock_in_image.url }}" target="_blank">
+                  <a href="{{ activity.clock_in_image.url }}" target="_blank" onclick="event.stopPropagation();">
                     <img src="{{ activity.clock_in_image.url }}"
                          style="width:180px;height:180px;max-width:100%;border-radius:10px;object-fit:cover;display:block;">
                   </a>
@@ -98,11 +126,11 @@
                   <span class="oh-timeoff-modal__stat-count">-</span>
                 {% endif %}
               </div>
-            
+
               <div class="oh-timeoff-modal__stat" style="margin-left: 20px;">
                 <span class="oh-timeoff-modal__stat-title">{% trans "Out Photo" %}</span>
                 {% if activity.clock_out_image %}
-                  <a href="{{ activity.clock_out_image.url }}"  target="_blank">
+                  <a href="{{ activity.clock_out_image.url }}"  target="_blank" onclick="event.stopPropagation();">
                     <img src="{{ activity.clock_out_image.url }}"
                          style="width:180px;height:180px;max-width:100%;border-radius:10px;object-fit:cover;display:block;">
                   </a>
@@ -111,7 +139,55 @@
                 {% endif %}
               </div>
             </div>
-           
+
+            <!-- NEW: Location (Audit) -->
+            <div class="oh-timeoff-modal__stats-container mt-3 mb-3">
+                <div class="oh-timeoff-modal__stat">
+                    <span class="oh-timeoff-modal__stat-title">{% trans "In Location" %}</span>
+                    <span class="oh-timeoff-modal__stat-count" style="display:block;">
+                        {% if activity.clock_in_location %}
+                            {% with lat=activity.clock_in_location.lat lng=activity.clock_in_location.lng acc=activity.clock_in_location.accuracy %}
+                                {% if lat and lng %}
+                                    {{lat}}, {{lng}}{% if acc %} (±{{acc}}m){% endif %}
+                                    <a href="https://www.google.com/maps?q={{lat}},{{lng}}"
+                                       target="_blank"
+                                       style="margin-left:10px;"
+                                       onclick="event.stopPropagation();">
+                                       {% trans "Map" %}
+                                    </a>
+                                {% else %}
+                                    {{activity.clock_in_location}}
+                                {% endif %}
+                            {% endwith %}
+                        {% else %}
+                            -
+                        {% endif %}
+                    </span>
+                </div>
+                <div class="oh-timeoff-modal__stat" style="margin-left: 20px">
+                    <span class="oh-timeoff-modal__stat-title">{% trans "Out Location" %}</span>
+                    <span class="oh-timeoff-modal__stat-count" style="display:block;">
+                        {% if activity.clock_out_location %}
+                            {% with lat=activity.clock_out_location.lat lng=activity.clock_out_location.lng acc=activity.clock_out_location.accuracy %}
+                                {% if lat and lng %}
+                                    {{lat}}, {{lng}}{% if acc %} (±{{acc}}m){% endif %}
+                                    <a href="https://www.google.com/maps?q={{lat}},{{lng}}"
+                                       target="_blank"
+                                       style="margin-left:10px;"
+                                       onclick="event.stopPropagation();">
+                                       {% trans "Map" %}
+                                    </a>
+                                {% else %}
+                                    {{activity.clock_out_location}}
+                                {% endif %}
+                            {% endwith %}
+                        {% else %}
+                            -
+                        {% endif %}
+                    </span>
+                </div>
+            </div>
+
             <div class="oh-timeoff-modal__stats-container mt-3 mb-3">
                 <div class="oh-timeoff-modal__stat">
                     <span class="oh-timeoff-modal__stat-title">{% trans "Shift" %}</span>
