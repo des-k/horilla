@@ -465,18 +465,47 @@ class ClockInAPIView(APIView):
             return Response({"message": "Already clocked-in"}, status=status.HTTP_400_BAD_REQUEST)
 
         # Cutoff check-in
-        cutoff_in_dt = None
-        schedule = None
-        try:
-            schedule = cio._get_schedule(shift, day) if day else None
-        except Exception:
-            schedule = None
+
+
+
+        # Cutoff check-in
+
+
+        rules = {}
+
 
         try:
-            if schedule and hasattr(cio, "_calc_cutoff_in_dt"):
-                cutoff_in_dt = cio._calc_cutoff_in_dt(attendance_date, schedule)
+
+
+            rules = cio.get_shift_rules(
+
+
+                attendance_date,
+
+
+                shift,
+
+
+                day,
+
+
+                start_time_sec=start_time_sec,
+
+
+                end_time_sec=end_time_sec,
+
+
+            )
+
+
         except Exception:
-            cutoff_in_dt = None
+
+
+            rules = {"cutoff_in_dt": None}
+
+
+
+        cutoff_in_dt = rules.get("cutoff_in_dt")
 
         cutoff_in_dt = _coerce_datetime_like(cutoff_in_dt, dt_now)
         if cutoff_in_dt and dt_now > cutoff_in_dt:
@@ -578,41 +607,92 @@ class ClockOutAPIView(APIView):
             return Response({"error": msg}, status=status.HTTP_403_FORBIDDEN)
 
         # Schedule for cutoffs
-        schedule = None
-        try:
-            schedule = cio._get_schedule(shift, day) if day else None
-        except Exception:
-            schedule = None
 
-        # Enforce check-out cutoff if exists
-        cutoff_out_dt = None
-        try:
-            if schedule and hasattr(cio, "_calc_cutoff_out_dt"):
-                cutoff_out_dt = cio._calc_cutoff_out_dt(attendance_date, schedule)
-        except Exception:
-            cutoff_out_dt = None
 
-        cutoff_out_dt = _coerce_datetime_like(cutoff_out_dt, dt_now)
-        if cutoff_out_dt and dt_now > cutoff_out_dt:
-            return Response(
-                {"error": "Check-out cut-off has passed. Please submit an attendance request."},
-                status=status.HTTP_400_BAD_REQUEST,
+
+        # Shift rules (cutoffs)
+
+
+        rules = {}
+
+
+        try:
+
+
+            rules = cio.get_shift_rules(
+
+
+                attendance_date,
+
+
+                shift,
+
+
+                day,
+
+
+                start_time_sec=start_time_sec,
+
+
+                end_time_sec=end_time_sec,
+
+
             )
 
-        # OUT-only rule: show/allow only after check-in cutoff has passed
-        if out_req and out_req.scope == WorkModeRequestScope.OUT:
-            cutoff_in_dt = None
-            try:
-                if schedule and hasattr(cio, "_calc_cutoff_in_dt"):
-                    cutoff_in_dt = cio._calc_cutoff_in_dt(attendance_date, schedule)
-            except Exception:
-                cutoff_in_dt = None
 
-            cutoff_in_dt = _coerce_datetime_like(cutoff_in_dt, dt_now)
+        except Exception:
+
+
+            rules = {"cutoff_in_dt": None, "cutoff_out_dt": None}
+
+
+
+        cutoff_out_dt = rules.get("cutoff_out_dt")
+
+
+        cutoff_out_dt = _coerce_datetime_like(cutoff_out_dt, dt_now) if cutoff_out_dt else None
+
+
+        if cutoff_out_dt and dt_now > cutoff_out_dt:
+
+
+            return Response(
+
+
+                {"error": "Check-out cut-off has passed. Please submit an attendance request."},
+
+
+                status=status.HTTP_400_BAD_REQUEST,
+
+
+            )
+
+
+
+        # OUT-only rule: allow only after check-in cutoff has passed
+
+
+        if out_req and out_req.scope == WorkModeRequestScope.OUT:
+
+
+            cutoff_in_dt = rules.get("cutoff_in_dt")
+
+
+            cutoff_in_dt = _coerce_datetime_like(cutoff_in_dt, dt_now) if cutoff_in_dt else None
+
+
             if cutoff_in_dt and dt_now <= cutoff_in_dt:
+
+
                 return Response(
+
+
                     {"error": "Clock-out is available only after check-in cut-off time."},
+
+
                     status=status.HTTP_400_BAD_REQUEST,
+
+
                 )
 
         # Proof
@@ -1394,6 +1474,11 @@ class CheckingStatus(APIView):
                     "can_update_clock_out": False,
                     "in_mode": AttendanceWorkMode.WFO,
                     "out_mode": AttendanceWorkMode.WFO,
+                    "shift_start": None,
+                    "shift_end": None,
+                    "grace_time": 0,
+                    "check_in_cutoff_time": None,
+                    "check_out_cutoff_time": None,
                     "requires_photo_in": False,
                     "requires_location_in": False,
                     "requires_photo_out": False,
@@ -1416,25 +1501,74 @@ class CheckingStatus(APIView):
         ) = _api_resolve_attendance_date_and_day(shift, dt_now)
 
         # Schedule & cutoffs
-        schedule = None
-        try:
-            schedule = cio._get_schedule(shift, day) if day else None
-        except Exception:
-            schedule = None
 
-        cutoff_in_dt = None
-        cutoff_out_dt = None
+
+
+        rules = {}
+
+
+        try:
+
+
+            rules = cio.get_shift_rules(
+
+
+                attendance_date,
+
+
+                shift,
+
+
+                day,
+
+
+                start_time_sec=start_time_sec,
+
+
+                end_time_sec=end_time_sec,
+
+
+            )
+
+
+        except Exception:
+
+
+            rules = {
+
+
+                "schedule": None,
+
+
+                "grace_seconds": 0,
+
+
+                "cutoff_in_dt": None,
+
+
+                "cutoff_out_dt": None,
+
+
+            }
+
+
+
+        schedule = rules.get("schedule")
+
+
+        grace_seconds = int(rules.get("grace_seconds") or 0)
+
+
+        cutoff_in_dt = rules.get("cutoff_in_dt")
+
+
+        cutoff_out_dt = rules.get("cutoff_out_dt")
+
+
         check_in_cutoff_has_passed = False
+
+
         check_out_cutoff_has_passed = False
-        if schedule:
-            try:
-                if hasattr(cio, "_calc_cutoff_in_dt"):
-                    cutoff_in_dt = cio._calc_cutoff_in_dt(attendance_date, schedule)
-                if hasattr(cio, "_calc_cutoff_out_dt"):
-                    cutoff_out_dt = cio._calc_cutoff_out_dt(attendance_date, schedule)
-            except Exception:
-                cutoff_in_dt = None
-                cutoff_out_dt = None
 
         cutoff_in_dt = _coerce_datetime_like(cutoff_in_dt, dt_now) if cutoff_in_dt else None
         cutoff_out_dt = _coerce_datetime_like(cutoff_out_dt, dt_now) if cutoff_out_dt else None
@@ -1577,6 +1711,7 @@ class CheckingStatus(APIView):
 
             "shift_start": _sec_to_hhmm(start_time_sec),
             "shift_end": _sec_to_hhmm(end_time_sec),
+            "grace_time": int(grace_seconds),
 
             "check_in_cutoff_time": cutoff_in_dt.strftime("%H:%M") if cutoff_in_dt else None,
             "check_out_cutoff_time": cutoff_out_dt.strftime("%H:%M") if cutoff_out_dt else None,
