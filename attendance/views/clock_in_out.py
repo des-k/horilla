@@ -347,6 +347,83 @@ def early_out(attendance, start_time, end_time, shift, schedule=None):
     return
 
 
+
+def get_shift_rules(
+    attendance_date: date,
+    shift,
+    day=None,
+    *,
+    start_time_sec: Optional[int] = None,
+    end_time_sec: Optional[int] = None,
+) -> dict:
+    """
+    Public helper to compute shift-related rules for a given attendance date.
+
+    Returns a dict with:
+      - schedule: EmployeeShiftSchedule | None
+      - start_time: datetime.time | None
+      - end_time: datetime.time | None
+      - grace_seconds: int  (check-in grace in seconds; 0 if not applicable)
+      - cutoff_in_dt: datetime | None (last allowed check-in time)
+      - cutoff_out_dt: datetime | None (last allowed check-out time)
+      - is_night_shift: bool
+    """
+    schedule = None
+    try:
+        schedule = _get_schedule(shift, day) if (shift and day) else None
+    except Exception:
+        schedule = None
+
+    # Resolve start/end times for display (best-effort).
+    start_time = _get_schedule_time(schedule, "start_time", "clock_in", "check_in", "start")
+    if not start_time:
+        start_time = _seconds_to_time(start_time_sec)
+
+    end_time = _get_schedule_time(schedule, "end_time", "clock_out", "check_out", "end")
+    if not end_time:
+        end_time = _seconds_to_time(end_time_sec)
+
+    # Grace time (for check-in)
+    grace = _resolve_grace_time(schedule, shift)
+    grace_seconds = int(grace.allowed_time_in_secs) if (grace and getattr(grace, "allowed_clock_in", False)) else 0
+
+    is_night_shift = bool(getattr(schedule, "is_night_shift", False)) if schedule else False
+
+    cutoff_in_dt = None
+    cutoff_out_dt = None
+    try:
+        cutoff_in_dt = _calc_cutoff_in_dt(
+            attendance_date,
+            schedule,
+            shift,
+            start_time_sec=start_time_sec,
+        )
+    except Exception:
+        cutoff_in_dt = None
+
+    try:
+        cutoff_out_dt = _calc_cutoff_out_dt(
+            attendance_date,
+            schedule,
+            shift,
+            end_time_sec=end_time_sec,
+            is_night_shift=is_night_shift,
+        )
+    except Exception:
+        cutoff_out_dt = None
+
+    return {
+        "schedule": schedule,
+        "start_time": start_time,
+        "end_time": end_time,
+        "grace_seconds": grace_seconds,
+        "cutoff_in_dt": cutoff_in_dt,
+        "cutoff_out_dt": cutoff_out_dt,
+        "is_night_shift": is_night_shift,
+    }
+
+
+
 # ---------------------------------------------------------------------
 # Core DB writers (used by API + web)
 # ---------------------------------------------------------------------
