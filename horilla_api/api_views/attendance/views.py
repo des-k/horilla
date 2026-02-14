@@ -256,6 +256,37 @@ def _normalize_none(value):
     return value
 
 
+def _format_minimum_hour(value):
+    """Return minimum working hour in HH:MM (string) or None."""
+    if value is None:
+        return None
+    # Already HH:MM / HH:MM:SS string
+    if isinstance(value, str):
+        s = value.strip()
+        if not s or s.lower() in ("none", "null"):
+            return None
+        # Keep only HH:MM if seconds present
+        if len(s) >= 5 and s[2] == ":":
+            return s[:5]
+        return s
+    # datetime.time
+    try:
+        return value.strftime("%H:%M")
+    except Exception:
+        pass
+    # timedelta (best effort)
+    try:
+        total_seconds = int(value.total_seconds())
+        if total_seconds < 0:
+            return None
+        h = (total_seconds // 3600) % 24
+        m = (total_seconds % 3600) // 60
+        return f"{h:02d}:{m:02d}"
+    except Exception:
+        return str(value)
+
+
+
 def _normalize_requested_data(requested_data: dict) -> dict:
     """Normalize JSON-requested_data so it can be used safely in queryset.update()."""
     if not requested_data:
@@ -581,6 +612,7 @@ class ClockInAPIView(APIView):
                 "attendance_date": str(attendance_date),
                 "in_mode": in_mode,
                 "work_mode_request_id": getattr(in_req, "id", None),
+                "minimum_working_hour": _format_minimum_hour(minimum_hour),
                 "server_now": dt_now.isoformat(),
                 "server_time": dt_now.strftime("%H:%M"),
             },
@@ -810,6 +842,7 @@ class ClockOutAPIView(APIView):
                 "work_mode_request_id": getattr(out_req, "id", None),
                 "missing_check_in": bool(missing_check_in),
                 "updated": bool(allow_update),
+                "minimum_working_hour": _format_minimum_hour(minimum_hour),
                 "server_now": dt_now.isoformat(),
                 "server_time": dt_now.strftime("%H:%M"),
             },
@@ -1506,6 +1539,7 @@ class CheckingStatus(APIView):
                     "shift_start": None,
                     "shift_end": None,
                     "grace_time": 0,
+                    "minimum_working_hour": None,
                     "check_in_cutoff_time": None,
                     "check_out_cutoff_time": None,
                     "requires_photo_in": False,
@@ -1741,6 +1775,7 @@ class CheckingStatus(APIView):
             "shift_start": _sec_to_hhmm(start_time_sec),
             "shift_end": _sec_to_hhmm(end_time_sec),
             "grace_time": int(grace_seconds),
+            "minimum_working_hour": _format_minimum_hour(min_hour),
 
             "check_in_cutoff_time": cutoff_in_dt.strftime("%H:%M") if cutoff_in_dt else None,
             "check_out_cutoff_time": cutoff_out_dt.strftime("%H:%M") if cutoff_out_dt else None,
