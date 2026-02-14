@@ -283,6 +283,10 @@ def _api_resolve_attendance_date_and_day(shift, dt_now: datetime):
     """
     Apply Horilla night-shift noon-to-noon rule to resolve attendance_date and day.
 
+    Strategy:
+    - Prefer resolving the day via EmployeeShiftSchedule for the employee's shift.
+    - Fall back to any EmployeeShiftDay row if no schedule row exists.
+
     Returns:
         attendance_date, day_obj, minimum_hour, start_time_sec, end_time_sec, now_hhmm, now_sec
     """
@@ -291,20 +295,45 @@ def _api_resolve_attendance_date_and_day(shift, dt_now: datetime):
     now_sec = strtime_seconds(now_hhmm)
     mid_day_sec = strtime_seconds("12:00")
 
-    attendance_date = date_today
-    day = EmployeeShiftDay.objects.get(day=date_today.strftime("%A").lower())
-    minimum_hour, start_time_sec, end_time_sec = shift_schedule_today(day=day, shift=shift)
+    def _resolve_for_date(d: date):
+        weekday = d.strftime("%A").lower()
 
-    if start_time_sec > end_time_sec:
-        # Night shift: assign before-noon punches to the previous day.
-        if mid_day_sec > now_sec:
-            date_yesterday = date_today - timedelta(days=1)
-            attendance_date = date_yesterday
-            day = EmployeeShiftDay.objects.get(day=date_yesterday.strftime("%A").lower())
-            minimum_hour, start_time_sec, end_time_sec = shift_schedule_today(day=day, shift=shift)
+        schedule = None
+        try:
+            schedule = cio.EmployeeShiftSchedule.objects.filter(
+                shift_id=shift, day__day=weekday
+            ).select_related("day").first()
+        except Exception:
+            schedule = None
+
+        if schedule:
+            day_obj = schedule.day
+            minimum_hour = schedule.minimum_working_hour or "00:00"
+            try:
+                start_time_sec = strtime_seconds(schedule.start_time.strftime("%H:%M")) if schedule.start_time else 0
+                end_time_sec = strtime_seconds(schedule.end_time.strftime("%H:%M")) if schedule.end_time else 0
+            except Exception:
+                start_time_sec, end_time_sec = 0, 0
+            return day_obj, minimum_hour, start_time_sec, end_time_sec
+
+        # Fallback (best-effort)
+        day_obj = EmployeeShiftDay.objects.filter(day=weekday).first()
+        if not day_obj:
+            return None, "00:00", 0, 0
+        minimum_hour, start_time_sec, end_time_sec = shift_schedule_today(day=day_obj, shift=shift)
+        return day_obj, minimum_hour, start_time_sec, end_time_sec
+
+    attendance_date = date_today
+    day, minimum_hour, start_time_sec, end_time_sec = _resolve_for_date(date_today)
+
+    is_night_shift = start_time_sec > end_time_sec and start_time_sec != end_time_sec
+
+    if is_night_shift and mid_day_sec > now_sec:
+        date_yesterday = date_today - timedelta(days=1)
+        attendance_date = date_yesterday
+        day, minimum_hour, start_time_sec, end_time_sec = _resolve_for_date(date_yesterday)
 
     return attendance_date, day, minimum_hour, start_time_sec, end_time_sec, now_hhmm, now_sec
-
 
 def _ensure_single_session_activity(attendance: Attendance, prev_attendance_date: date | None = None) -> AttendanceActivity:
     """
