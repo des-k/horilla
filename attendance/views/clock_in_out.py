@@ -208,24 +208,55 @@ def _calc_cutoff_in_dt(
     Return the last allowed datetime for clock-in.
 
     Priority:
-    1) schedule.cutoff_in_time / schedule.check_in_cutoff_time (if exists)
-    2) schedule.start_time + grace_time (schedule->shift->default)
-    3) fallback to start_time_sec + grace_time (if schedule.start_time not available)
+    1) Absolute cutoff time fields on schedule (if present):
+         - schedule.cutoff_in_time / schedule.check_in_cutoff_time / schedule.cutoff_in
+    2) Offset fields on schedule (Horilla v2 style):
+         - schedule.cutoff_check_in_offset_secs (preferred)
+         - schedule.cutoff_check_in_offset (HH:MM:SS)
+       Cutoff = start_time + offset
+    3) Fallback: start_time + grace_time (schedule->shift->default)
+    4) Fallback: start_time_sec + grace_time (if schedule.start_time not available)
+
+    Notes:
+    - Offset-based cutoff is independent of grace time.
     """
+    # 1) Absolute cutoff (time-of-day)
     cutoff_in_time = _get_schedule_time(schedule, "cutoff_in_time", "check_in_cutoff_time", "cutoff_in")
     if cutoff_in_time:
         return _combine_local_datetime(attendance_date, cutoff_in_time)
 
+    # Resolve start_time (needed for offset/grace)
     start_time = _get_schedule_time(schedule, "start_time", "clock_in", "check_in")
     if not start_time:
         start_time = _seconds_to_time(start_time_sec)
     if not start_time:
         return None
 
+    base_dt = _combine_local_datetime(attendance_date, start_time)
+
+    # 2) Offset fields (duration from start_time)
+    offset_secs = None
+    if schedule is not None:
+        offset_secs = getattr(schedule, "cutoff_check_in_offset_secs", None)
+        if offset_secs is None:
+            off_str = getattr(schedule, "cutoff_check_in_offset", None)
+            if off_str:
+                try:
+                    hh, mm, ss = [int(x) for x in str(off_str).strip().split(":")]
+                    offset_secs = hh * 3600 + mm * 60 + ss
+                except Exception:
+                    offset_secs = None
+
+    if offset_secs is not None:
+        try:
+            return base_dt + timedelta(seconds=int(offset_secs))
+        except Exception:
+            pass
+
+    # 3) Fallback: grace time
     grace = _resolve_grace_time(schedule, shift)
     grace_secs = int(grace.allowed_time_in_secs) if (grace and grace.allowed_clock_in) else 0
-    return _combine_local_datetime(attendance_date, start_time) + timedelta(seconds=grace_secs)
-
+    return base_dt + timedelta(seconds=grace_secs)
 
 def _calc_cutoff_out_dt(
     attendance_date: date,
@@ -238,10 +269,15 @@ def _calc_cutoff_out_dt(
     Return the last allowed datetime for clock-out.
 
     Priority:
-    1) schedule.cutoff_out_time / schedule.check_out_cutoff_time (if exists)
-    2) schedule.end_time (or fallback end_time_sec)
-    If night shift, add +1 day.
+    1) Absolute cutoff time fields on schedule (if present):
+         - schedule.cutoff_out_time / schedule.check_out_cutoff_time / schedule.cutoff_out
+    2) Offset fields on schedule (Horilla v2 style):
+         - schedule.cutoff_check_out_offset_secs (preferred)
+         - schedule.cutoff_check_out_offset (HH:MM:SS)
+       Cutoff = end_time(+1 day if night shift) + offset
+    3) Fallback: end_time (or fallback end_time_sec) (+1 day if night shift)
     """
+    # 1) Absolute cutoff (time-of-day)
     cutoff_out_time = _get_schedule_time(schedule, "cutoff_out_time", "check_out_cutoff_time", "cutoff_out")
     if cutoff_out_time:
         out_dt = _combine_local_datetime(attendance_date, cutoff_out_time)
@@ -255,8 +291,27 @@ def _calc_cutoff_out_dt(
 
     if is_night_shift:
         out_dt = out_dt + timedelta(days=1)
-    return out_dt
 
+    # 2) Offset fields (duration from end_time)
+    offset_secs = None
+    if schedule is not None:
+        offset_secs = getattr(schedule, "cutoff_check_out_offset_secs", None)
+        if offset_secs is None:
+            off_str = getattr(schedule, "cutoff_check_out_offset", None)
+            if off_str:
+                try:
+                    hh, mm, ss = [int(x) for x in str(off_str).strip().split(":")]
+                    offset_secs = hh * 3600 + mm * 60 + ss
+                except Exception:
+                    offset_secs = None
+
+    if offset_secs is not None:
+        try:
+            out_dt = out_dt + timedelta(seconds=int(offset_secs))
+        except Exception:
+            pass
+
+    return out_dt
 
 # ---------------------------------------------------------------------
 # Late come / Early out tracking (grace time schedule-level)
