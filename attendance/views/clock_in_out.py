@@ -442,7 +442,25 @@ def get_shift_rules(
     grace = _resolve_grace_time(schedule, shift)
     grace_seconds = int(grace.allowed_time_in_secs) if (grace and getattr(grace, "allowed_clock_in", False)) else 0
 
-    is_night_shift = bool(getattr(schedule, "is_night_shift", False)) if schedule else False
+    # Night shift detection:
+    # - Prefer explicit schedule flag when available.
+    # - Fallback to start/end comparison (supports legacy schedules without `is_night_shift`).
+    is_night_shift = False
+    try:
+        if start_time and end_time and start_time != end_time and start_time > end_time:
+            is_night_shift = True
+        elif (
+            start_time_sec is not None
+            and end_time_sec is not None
+            and start_time_sec != end_time_sec
+            and start_time_sec > end_time_sec
+        ):
+            is_night_shift = True
+    except Exception:
+        is_night_shift = False
+
+    if schedule and bool(getattr(schedule, "is_night_shift", False)):
+        is_night_shift = True
 
     cutoff_in_dt = None
     cutoff_out_dt = None
