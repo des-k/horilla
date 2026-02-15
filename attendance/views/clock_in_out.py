@@ -268,31 +268,31 @@ def _calc_cutoff_out_dt(
     """
     Return the last allowed datetime for clock-out.
 
-    Priority:
-    1) Absolute cutoff time fields on schedule (if present):
-         - schedule.cutoff_out_time / schedule.check_out_cutoff_time / schedule.cutoff_out
-    2) Offset fields on schedule (Horilla v2 style):
-         - schedule.cutoff_check_out_offset_secs (preferred)
-         - schedule.cutoff_check_out_offset (HH:MM:SS)
-       Cutoff = end_time(+1 day if night shift) + offset
-    3) Fallback: end_time (or fallback end_time_sec) (+1 day if night shift)
-    """
-    # 1) Absolute cutoff (time-of-day)
-    cutoff_out_time = _get_schedule_time(schedule, "cutoff_out_time", "check_out_cutoff_time", "cutoff_out")
-    if cutoff_out_time:
-        out_dt = _combine_local_datetime(attendance_date, cutoff_out_time)
-    else:
-        end_time = _get_schedule_time(schedule, "end_time", "clock_out", "check_out")
-        if not end_time:
-            end_time = _seconds_to_time(end_time_sec)
-        if not end_time:
-            return None
-        out_dt = _combine_local_datetime(attendance_date, end_time)
+    This project uses offset-based cutoff rules only:
+        Cutoff = end_time (+1 day if night shift) + offset
 
+    Supported offset fields on schedule (Horilla v2 style):
+        - schedule.cutoff_check_out_offset_secs (preferred, int seconds)
+        - schedule.cutoff_check_out_offset (HH:MM:SS)
+
+    Fallback:
+        - If no offset is configured, cutoff defaults to end_time (+1 day if night shift).
+        - If end_time is not available on schedule, `end_time_sec` is used.
+    """
+    # Base time: end_time (time-of-day)
+    end_time = _get_schedule_time(schedule, "end_time", "clock_out", "check_out")
+    if not end_time:
+        end_time = _seconds_to_time(end_time_sec)
+    if not end_time:
+        return None
+
+    out_dt = _combine_local_datetime(attendance_date, end_time)
+
+    # Night shifts end on the next calendar day.
     if is_night_shift:
         out_dt = out_dt + timedelta(days=1)
 
-    # 2) Offset fields (duration from end_time)
+    # Offset fields (duration from end_time)
     offset_secs = None
     if schedule is not None:
         offset_secs = getattr(schedule, "cutoff_check_out_offset_secs", None)
