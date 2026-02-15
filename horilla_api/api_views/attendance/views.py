@@ -834,6 +834,82 @@ class ClockOutAPIView(APIView):
                         schedule=schedule,
                     )
 
+        # Mobile UI hints (optional)
+        def _sec_to_hhmm(sec_val):
+            try:
+                s = int(sec_val)
+            except Exception:
+                return None
+            if s < 0:
+                return None
+            h = (s // 3600) % 24
+            m = (s % 3600) // 60
+            return f"{h:02d}:{m:02d}"
+
+        planned_check_out_hhmm = _sec_to_hhmm(end_time_sec)
+        late_by_hhmm = None
+        work_hours_below_minimum = False
+        work_hours_shortfall_hhmm = None
+        checked_out_early = False
+
+        # Best-effort compute hints from the persisted attendance row
+        try:
+            if attendance and not getattr(attendance, "is_presensi_only", False) and not missing_check_in:
+                clock_in_t = getattr(attendance, "attendance_clock_in", None)
+                clock_out_t = getattr(attendance, "attendance_clock_out", None)
+                if clock_in_t and clock_out_t:
+                    in_date = getattr(attendance, "attendance_clock_in_date", None) or attendance_date
+                    out_date = getattr(attendance, "attendance_clock_out_date", None) or attendance_date
+                    in_dt = _coerce_datetime_like(datetime.combine(in_date, clock_in_t), dt_now)
+                    out_dt = _coerce_datetime_like(datetime.combine(out_date, clock_out_t), dt_now)
+
+                    worked_seconds = 0
+                    if in_dt and out_dt:
+                        worked_seconds = max(0, int((out_dt - in_dt).total_seconds()))
+
+                    # Below-minimum + shortfall
+                    min_hhmm = _format_minimum_hour(minimum_hour)
+                    if min_hhmm:
+                        try:
+                            min_s = strtime_seconds(min_hhmm)
+                            if min_s and int(worked_seconds) < int(min_s):
+                                work_hours_below_minimum = True
+                                short_s = int(min_s) - int(worked_seconds)
+                                work_hours_shortfall_hhmm = f"{short_s // 3600:02d}:{(short_s % 3600) // 60:02d}"
+                        except Exception:
+                            pass
+
+                    # Late-by (scheduled start + grace)
+                    grace_seconds = int((rules or {}).get("grace_seconds") or 0)
+                    planned_in_hhmm = _sec_to_hhmm(start_time_sec)
+                    if planned_in_hhmm and in_dt:
+                        planned_in_time = datetime.strptime(planned_in_hhmm, "%H:%M").time()
+                        planned_in_dt = _coerce_datetime_like(datetime.combine(attendance_date, planned_in_time), dt_now)
+                        grace_dt = planned_in_dt + timedelta(seconds=grace_seconds)
+                        if in_dt > grace_dt:
+                            late_s = int((in_dt - grace_dt).total_seconds())
+                            if late_s > 0:
+                                late_by_hhmm = f"{late_s // 3600:02d}:{(late_s % 3600) // 60:02d}"
+
+                    # Early check-out (scheduled end)
+                    is_night_shift = False
+                    try:
+                        is_night_shift = start_time_sec > end_time_sec and start_time_sec != end_time_sec
+                    except Exception:
+                        is_night_shift = False
+
+                    if planned_check_out_hhmm and out_dt:
+                        planned_out_date = attendance_date + timedelta(days=1) if is_night_shift else attendance_date
+                        planned_out_time = datetime.strptime(planned_check_out_hhmm, "%H:%M").time()
+                        planned_out_dt = _coerce_datetime_like(datetime.combine(planned_out_date, planned_out_time), dt_now)
+                        if planned_out_dt and out_dt < planned_out_dt:
+                            checked_out_early = True
+        except Exception:
+            # Do not fail clock-out response if hint computation fails.
+            pass
+
+
+
         return Response(
             {
                 "message": "Clocked-Out",
@@ -1891,6 +1967,19 @@ class CheckingStatus(APIView):
             "server_now": server_now_iso,
             "server_time": server_time_hhmm,
         }
+
+        # Optional helper fields used by mobile UI for status notes.
+        # Keep these stable for backward compatibility.
+        payload.update(
+            {
+                "late_check_in": bool(late_by_hhmm),
+                "late_by": late_by_hhmm,
+                "planned_check_out": planned_check_out_hhmm,
+                "work_hours_below_minimum": bool(work_hours_below_minimum),
+                "work_hours_shortfall": work_hours_shortfall_hhmm,
+                "checked_out_early": bool(checked_out_early),
+            }
+        )
 
         # Attach proof URLs & locations (audit)
         if attendance:
