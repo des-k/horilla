@@ -4,7 +4,11 @@ horilla_api/urls/attendance/urls.py
 
 from django.urls import path
 
-from horilla_api.api_views.attendance.permission_views import AttendancePermissionCheck
+from horilla_api.api_views.attendance.permission_views import (
+    AttendancePermissionCheck,
+    AttendanceRequestApprovePermissionCheck,
+    WorkModeRequestApprovePermissionCheck,
+)
 from horilla_api.api_views.attendance.views import *
 
 urlpatterns = [
@@ -38,6 +42,11 @@ urlpatterns = [
         AttendanceRequestCancelView.as_view(),
         name="api-",
     ),
+    path(
+        "attendance-request-reject/<int:pk>",
+        AttendanceRequestRejectView.as_view(),
+        name="api-",
+    ),
     path("overtime-approve/<int:pk>", OvertimeApproveView.as_view(), name="api-"),
     path(
         "attendance-hour-account/<int:pk>/",
@@ -51,6 +60,56 @@ urlpatterns = [
     path("offline-employees/count/", OfflineEmployeesCountView.as_view(), name="api-"),
     path("offline-employees/list/", OfflineEmployeesListView.as_view(), name="api-"),
     path("permission-check/attendance", AttendancePermissionCheck.as_view()),
+    path(
+        "permission-check/attendance-request-approve",
+        AttendanceRequestApprovePermissionCheck.as_view(),
+    ),
+    path(
+        "permission-check/work-mode-request-approve",
+        WorkModeRequestApprovePermissionCheck.as_view(),
+    ),
+
+    # Work mode requests (WFA / On Duty)
+    path(
+        "work-mode-request/",
+        WorkModeRequestView.as_view(),
+        name="api-work-mode-request",
+    ),
+    path(
+        "work-mode-request",
+        WorkModeRequestView.as_view(),
+        name="api-work-mode-request-noslash",
+    ),
+    path(
+        "work-mode-request/<int:pk>",
+        WorkModeRequestView.as_view(),
+        name="api-work-mode-request-detail",
+    ),
+    path(
+        "work-mode-request-approvals/",
+        WorkModeRequestApprovalsView.as_view(),
+        name="api-work-mode-request-approvals",
+    ),
+    path(
+        "work-mode-request-approvals",
+        WorkModeRequestApprovalsView.as_view(),
+        name="api-work-mode-request-approvals-noslash",
+    ),
+    path(
+        "work-mode-request-approve/<int:pk>",
+        WorkModeRequestApproveView.as_view(),
+        name="api-work-mode-request-approve",
+    ),
+    path(
+        "work-mode-request-reject/<int:pk>",
+        WorkModeRequestRejectView.as_view(),
+        name="api-work-mode-request-reject",
+    ),
+    path(
+        "work-mode-request-cancel/<int:pk>",
+        WorkModeRequestCancelView.as_view(),
+        name="api-work-mode-request-cancel",
+    ),
     path("checking-in", CheckingStatus.as_view()),
     path("offline-employee-mail-send", OfflineEmployeeMailsend.as_view()),
     path("converted-mail-template", ConvertedMailTemplateConvert.as_view()),
