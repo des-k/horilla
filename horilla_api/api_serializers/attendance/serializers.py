@@ -206,6 +206,48 @@ class AttendanceActivitySerializer(serializers.ModelSerializer):
         fields = "__all__"
 
 
+class WorkModeRequestSerializer(serializers.ModelSerializer):
+    employee_first_name = serializers.CharField(
+        source="employee_id.employee_first_name", read_only=True
+    )
+    employee_last_name = serializers.CharField(
+        source="employee_id.employee_last_name", read_only=True
+    )
+    badge_id = serializers.CharField(source="employee_id.badge_id", read_only=True)
+    employee_profile_url = serializers.SerializerMethodField(read_only=True)
+    file_urls = serializers.SerializerMethodField(read_only=True)
+    approved_by_name = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model = WorkModeRequest
+        fields = "__all__"
+
+    def get_employee_profile_url(self, obj):
+        try:
+            employee_profile = obj.employee_id.employee_profile
+            return employee_profile.url
+        except Exception:
+            return None
+
+    def get_file_urls(self, obj):
+        try:
+            urls = []
+            for f in obj.files.all():
+                if getattr(f, "file", None) and getattr(f.file, "url", None):
+                    urls.append(f.file.url)
+            return urls
+        except Exception:
+            return []
+
+    def get_approved_by_name(self, obj):
+        try:
+            if obj.approved_by:
+                return f"{obj.approved_by.employee_first_name} {obj.approved_by.employee_last_name}".strip()
+        except Exception:
+            pass
+        return None
+
+
 class MailTemplateSerializer(serializers.ModelSerializer):
     class Meta:
         model = HorillaMailTemplate
