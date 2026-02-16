@@ -42,7 +42,7 @@ from attendance.views.dashboard import (
 )
 from attendance.views.views import *
 from base.backends import ConfiguredEmailBackend
-from base.methods import generate_pdf, is_reportingmanager
+from base.methods import generate_pdf, is_reportingmanager, filtersubordinates, get_subordinate_employee_ids
 from base.models import HorillaMailTemplate
 from employee.filters import EmployeeFilter
 
@@ -60,7 +60,9 @@ from ...api_serializers.attendance.serializers import (
     MailTemplateSerializer,
     UserAttendanceDetailedSerializer,
     UserAttendanceListSerializer,
+    WorkModeRequestSerializer,
 )
+
 
 # Create your views here.
 
@@ -187,6 +189,37 @@ def _parse_location_payload(request) -> dict | None:
         payload["captured_at"] = str(captured_at)
 
     return payload
+
+
+def _is_admin_with_perm(request, perm_codename: str) -> bool:
+    try:
+        return bool(request.user and request.user.has_perm(perm_codename))
+    except Exception:
+        return False
+
+
+def _is_supervisor_of(request, employee_id: int) -> bool:
+    """True if request.user is in the reporting chain above `employee_id`."""
+    try:
+        sub_ids = get_subordinate_employee_ids(request, nested=True)
+        return int(employee_id) in set(map(int, sub_ids or []))
+    except Exception:
+        return False
+
+
+def _can_act_on_employee(request, employee_id: int, perm_codename: str, allow_owner: bool = False) -> bool:
+    """Admin (has perm) OR supervisor of employee. Optionally allow owner."""
+    if _is_admin_with_perm(request, perm_codename):
+        return True
+
+    try:
+        my_emp = request.user.employee_get
+        if allow_owner and my_emp and int(my_emp.id) == int(employee_id):
+            return True
+    except Exception:
+        pass
+
+    return _is_supervisor_of(request, employee_id)
 
 
 # -----------------------------------------------------------------------------
@@ -1258,6 +1291,19 @@ class AttendanceRequestApproveView(APIView):
     def put(self, request, pk):
         try:
             attendance = Attendance.objects.select_for_update().get(id=pk)
+
+            # Admin (permission) OR supervisor in reporting chain can approve.
+            if not _can_act_on_employee(
+                request,
+                getattr(attendance, "employee_id_id", None) or attendance.employee_id.id,
+                "attendance.change_attendance",
+                allow_owner=False,
+            ):
+                return Response(
+                    {"error": "You do not have permission to perform this action."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
             prev_attendance_date = attendance.attendance_date
 
             attendance.attendance_validated = True
@@ -1295,10 +1341,11 @@ class AttendanceRequestCancelView(APIView):
     def put(self, request, pk):
         try:
             attendance = Attendance.objects.select_for_update().get(id=pk)
-            if (
-                attendance.employee_id.employee_user_id == request.user
-                or is_reportingmanager(request)
-                or request.user.has_perm("attendance.change_attendance")
+            if _can_act_on_employee(
+                request,
+                getattr(attendance, "employee_id_id", None) or attendance.employee_id.id,
+                "attendance.change_attendance",
+                allow_owner=True,
             ):
                 req_type = attendance.request_type
                 req_date = attendance.attendance_date
@@ -1321,6 +1368,388 @@ class AttendanceRequestCancelView(APIView):
         except Exception as E:
             return Response({"error": str(E)}, status=400)
         return Response({"status": "success"}, status=200)
+
+
+class AttendanceRequestRejectView(APIView):
+    """Reject an attendance request (admin/supervisor action).
+
+    Note: This differs from *cancel* (owner action). Reject clears the pending request.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    @transaction.atomic
+    def put(self, request, pk):
+        try:
+            attendance = Attendance.objects.select_for_update().get(id=pk)
+
+            employee_id = getattr(attendance, "employee_id_id", None) or attendance.employee_id.id
+
+            # Owner cannot reject (use cancel) unless admin.
+            try:
+                if (
+                    attendance.employee_id.employee_user_id == request.user
+                    and not request.user.has_perm("attendance.change_attendance")
+                ):
+                    return Response(
+                        {"error": "Use cancel for your own request."},
+                        status=status.HTTP_403_FORBIDDEN,
+                    )
+            except Exception:
+                pass
+
+            if not _can_act_on_employee(
+                request,
+                employee_id,
+                "attendance.change_attendance",
+                allow_owner=False,
+            ):
+                return Response(
+                    {"error": "You do not have permission to perform this action."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+            # Optional rejection comment (saved as AttendanceRequestComment)
+            comment_text = (
+                (request.data.get("comment") if hasattr(request, "data") else None)
+                or (request.data.get("reason") if hasattr(request, "data") else None)
+                or None
+            )
+            if comment_text:
+                try:
+                    from attendance.models import AttendanceRequestComment
+
+                    AttendanceRequestComment.objects.create(
+                        request_id=attendance,
+                        employee_id=request.user.employee_get,
+                        comment=str(comment_text)[:255],
+                    )
+                except Exception:
+                    pass
+
+            req_type = attendance.request_type
+            req_date = attendance.attendance_date
+            req_employee = attendance.employee_id
+
+            attendance.is_validate_request_approved = False
+            attendance.is_validate_request = False
+            attendance.request_description = None
+            attendance.requested_data = None
+            attendance.request_type = None
+            attendance.save()
+
+            if req_type == "create_request":
+                AttendanceActivity.objects.filter(
+                    employee_id=req_employee,
+                    attendance_date=req_date,
+                ).delete()
+                AttendanceLateComeEarlyOut.objects.filter(attendance_id=attendance).delete()
+                attendance.delete()
+
+        except Exception as E:
+            return Response({"error": str(E)}, status=400)
+
+        return Response({"status": "rejected"}, status=200)
+
+
+class WorkModeRequestView(APIView):
+    """CRUD for WorkModeRequest (WFA / On Duty) used by mobile."""
+
+    permission_classes = [IsAuthenticated]
+    serializer_class = WorkModeRequestSerializer
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
+
+    def get(self, request, pk=None):
+        if pk:
+            obj = get_object_or_404(WorkModeRequest, pk=pk)
+            # Owner, admin, or supervisor in chain can view
+            emp_id = getattr(obj, "employee_id_id", None) or obj.employee_id.id
+            if not _can_act_on_employee(
+                request,
+                emp_id,
+                "attendance.view_workmoderequest",
+                allow_owner=True,
+            ) and not _can_act_on_employee(
+                request,
+                emp_id,
+                "attendance.change_workmoderequest",
+                allow_owner=True,
+            ):
+                return Response(
+                    {"error": "You do not have permission to view this request."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+            serializer = self.serializer_class(obj)
+            return Response(serializer.data, status=200)
+
+        qs = WorkModeRequest.objects.all()
+        # Filter to own + subordinates unless user has global view permission.
+        qs = filtersubordinates(request, qs, perm="attendance.view_workmoderequest")
+
+        # Filters
+        status_q = request.GET.get("status")
+        if status_q:
+            qs = qs.filter(status=status_q)
+
+        mode_q = request.GET.get("mode")
+        if mode_q:
+            qs = qs.filter(mode=mode_q)
+
+        scope_q = request.GET.get("scope")
+        if scope_q:
+            qs = qs.filter(scope=scope_q)
+
+        # mine=1 => only my requests
+        if request.GET.get("mine") in ("1", "true", "True"):
+            try:
+                qs = qs.filter(employee_id=request.user.employee_get)
+            except Exception:
+                qs = qs.none()
+
+        pagenation = PageNumberPagination()
+        page = pagenation.paginate_queryset(qs.order_by("-id"), request)
+        serializer = self.serializer_class(page, many=True)
+        return pagenation.get_paginated_response(serializer.data)
+
+    @transaction.atomic
+    def post(self, request):
+        data = request.data.copy() if hasattr(request.data, "copy") else dict(request.data)
+
+        # Default employee_id to current user.
+        try:
+            my_emp = request.user.employee_get
+        except Exception:
+            my_emp = None
+
+        if not data.get("employee_id") and my_emp:
+            data["employee_id"] = my_emp.id
+
+        # Non-admin cannot create for another employee.
+        if my_emp and str(data.get("employee_id")) != str(my_emp.id):
+            if not request.user.has_perm("attendance.add_workmoderequest"):
+                return Response(
+                    {"error": "You do not have permission to create requests for other employees."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+        # Disallow WFO
+        if str(data.get("mode")) == AttendanceWorkMode.WFO:
+            return Response(
+                {"error": "WFO should not be requested. Use WFA or On Duty."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        serializer = self.serializer_class(data=data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=400)
+
+        obj: WorkModeRequest = serializer.save(status=WorkModeRequestStatus.PENDING)
+
+        # Attach files (optional)
+        try:
+            from attendance.models import AttendanceRequestFile
+
+            uploaded = []
+            if hasattr(request, "FILES"):
+                uploaded = request.FILES.getlist("files") or []
+                if not uploaded:
+                    f_single = request.FILES.get("file")
+                    if f_single:
+                        uploaded = [f_single]
+
+            for up in uploaded:
+                arf = AttendanceRequestFile.objects.create(file=up)
+                obj.files.add(arf)
+
+        except Exception:
+            pass
+
+        return Response(self.serializer_class(obj).data, status=200)
+
+    @transaction.atomic
+    def put(self, request, pk):
+        obj = get_object_or_404(WorkModeRequest, pk=pk)
+        # Owner can edit only while pending. Admin can edit always.
+        is_admin = request.user.has_perm("attendance.change_workmoderequest")
+        is_owner = False
+        try:
+            is_owner = obj.employee_id.employee_user_id == request.user
+        except Exception:
+            is_owner = False
+
+        if not (is_admin or (is_owner and obj.status == WorkModeRequestStatus.PENDING)):
+            return Response(
+                {"error": "You do not have permission to update this request."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        data = request.data.copy() if hasattr(request.data, "copy") else dict(request.data)
+
+        # Do not allow switching to WFO
+        if str(data.get("mode", obj.mode)) == AttendanceWorkMode.WFO:
+            return Response(
+                {"error": "WFO should not be requested. Use WFA or On Duty."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        serializer = self.serializer_class(obj, data=data, partial=True)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=400)
+        obj = serializer.save()
+        return Response(self.serializer_class(obj).data, status=200)
+
+
+class WorkModeRequestApprovalsView(APIView):
+    """List pending work-mode requests that the current user can approve."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        qs = WorkModeRequest.objects.filter(status=WorkModeRequestStatus.PENDING)
+
+        if request.user.has_perm("attendance.change_workmoderequest"):
+            # Admin: see all
+            pass
+        else:
+            # Supervisor: only subordinates
+            sub_ids = get_subordinate_employee_ids(request, nested=True)
+            if not sub_ids:
+                qs = qs.none()
+            else:
+                qs = qs.filter(employee_id__id__in=sub_ids)
+
+        pagenation = PageNumberPagination()
+        page = pagenation.paginate_queryset(qs.order_by("-id"), request)
+        serializer = WorkModeRequestSerializer(page, many=True)
+        return pagenation.get_paginated_response(serializer.data)
+
+
+class WorkModeRequestApproveView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @transaction.atomic
+    def put(self, request, pk):
+        obj = get_object_or_404(WorkModeRequest.objects.select_for_update(), pk=pk)
+        emp_id = getattr(obj, "employee_id_id", None) or obj.employee_id.id
+
+        # Owner cannot approve unless admin.
+        try:
+            if (
+                obj.employee_id.employee_user_id == request.user
+                and not request.user.has_perm("attendance.change_workmoderequest")
+            ):
+                return Response(
+                    {"error": "You cannot approve your own request."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+        except Exception:
+            pass
+
+        if not _can_act_on_employee(
+            request,
+            emp_id,
+            "attendance.change_workmoderequest",
+            allow_owner=False,
+        ):
+            return Response(
+                {"error": "You do not have permission to perform this action."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        if obj.status != WorkModeRequestStatus.PENDING:
+            return Response({"error": "Request is not pending."}, status=400)
+
+        obj.status = WorkModeRequestStatus.APPROVED
+        try:
+            obj.approved_by = request.user.employee_get
+        except Exception:
+            obj.approved_by = None
+        obj.approved_at = dj_timezone.now()
+        obj.save()
+        return Response({"status": "approved"}, status=200)
+
+
+class WorkModeRequestRejectView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @transaction.atomic
+    def put(self, request, pk):
+        obj = get_object_or_404(WorkModeRequest.objects.select_for_update(), pk=pk)
+        emp_id = getattr(obj, "employee_id_id", None) or obj.employee_id.id
+
+        # Owner cannot reject unless admin.
+        try:
+            if (
+                obj.employee_id.employee_user_id == request.user
+                and not request.user.has_perm("attendance.change_workmoderequest")
+            ):
+                return Response(
+                    {"error": "Use cancel for your own request."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+        except Exception:
+            pass
+
+        if not _can_act_on_employee(
+            request,
+            emp_id,
+            "attendance.change_workmoderequest",
+            allow_owner=False,
+        ):
+            return Response(
+                {"error": "You do not have permission to perform this action."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        if obj.status != WorkModeRequestStatus.PENDING:
+            return Response({"error": "Request is not pending."}, status=400)
+
+        # Optional comment
+        comment_text = (
+            (request.data.get("comment") if hasattr(request, "data") else None)
+            or (request.data.get("reason") if hasattr(request, "data") else None)
+            or None
+        )
+        if comment_text and not obj.reason:
+            obj.reason = str(comment_text)
+
+        obj.status = WorkModeRequestStatus.REJECTED
+        try:
+            obj.approved_by = request.user.employee_get
+        except Exception:
+            obj.approved_by = None
+        obj.approved_at = dj_timezone.now()
+        obj.save()
+        return Response({"status": "rejected"}, status=200)
+
+
+class WorkModeRequestCancelView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @transaction.atomic
+    def put(self, request, pk):
+        obj = get_object_or_404(WorkModeRequest.objects.select_for_update(), pk=pk)
+
+        is_admin = request.user.has_perm("attendance.change_workmoderequest")
+        is_owner = False
+        try:
+            is_owner = obj.employee_id.employee_user_id == request.user
+        except Exception:
+            is_owner = False
+
+        if not (is_admin or is_owner):
+            return Response(
+                {"error": "You do not have permission to cancel this request."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        if obj.status != WorkModeRequestStatus.PENDING:
+            return Response({"error": "Only pending requests can be canceled."}, status=400)
+
+        obj.status = WorkModeRequestStatus.CANCELED
+        obj.save()
+        return Response({"status": "canceled"}, status=200)
 
 
 class AttendanceOverTimeView(APIView):
