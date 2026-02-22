@@ -3,6 +3,11 @@ from rest_framework import serializers
 from attendance.models import *
 from base.models import HorillaMailTemplate
 
+from attendance.services.work_type_request_rules import (
+    coerce_work_type_payload,
+    validate_work_type_request,
+)
+
 
 class AttendanceSerializer(serializers.ModelSerializer):
     employee_first_name = serializers.CharField(
@@ -218,6 +223,45 @@ class WorkModeRequestSerializer(serializers.ModelSerializer):
     file_urls = serializers.SerializerMethodField(read_only=True)
     approved_by_name = serializers.SerializerMethodField(read_only=True)
 
+    # UI/UX alias (read-only). Input alias is handled in to_internal_value().
+    work_type = serializers.CharField(source="mode", read_only=True)
+
+    def to_internal_value(self, data):
+        # Allow clients to send `work_type` instead of legacy `mode`.
+        try:
+            _mode, new_data = coerce_work_type_payload(dict(data))
+            data = new_data
+        except Exception:
+            pass
+        return super().to_internal_value(data)
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+
+        employee = attrs.get("employee_id") or getattr(self.instance, "employee_id", None)
+        mode = attrs.get("mode") or getattr(self.instance, "mode", None)
+        scope = attrs.get("scope") or getattr(self.instance, "scope", None)
+        start_date = attrs.get("start_date") or getattr(self.instance, "start_date", None)
+        end_date = attrs.get("end_date") or getattr(self.instance, "end_date", None)
+
+        if employee and mode and scope and start_date and end_date:
+            validate_work_type_request(
+                employee=employee,
+                mode=mode,
+                scope=scope,
+                start_date=start_date,
+                end_date=end_date,
+                instance_id=getattr(self.instance, "id", None),
+            )
+
+        # If rejected, reason_code must exist (spec)
+        status_val = attrs.get("status") or getattr(self.instance, "status", None)
+        reason_code = attrs.get("reason_code") or getattr(self.instance, "reason_code", None)
+        if status_val == WorkModeRequestStatus.REJECTED and not reason_code:
+            raise serializers.ValidationError({"reason_code": "reason_code is required when status is REJECTED"})
+
+        return attrs
+
     class Meta:
         model = WorkModeRequest
         fields = "__all__"
@@ -246,7 +290,6 @@ class WorkModeRequestSerializer(serializers.ModelSerializer):
         except Exception:
             pass
         return None
-
 
 class MailTemplateSerializer(serializers.ModelSerializer):
     class Meta:
