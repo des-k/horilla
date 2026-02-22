@@ -18,7 +18,7 @@
     </small>
   </div>
 
-  <form id="workTypeRequestUpdateForm" hx-post="{% url 'work-type-request-update' req.id %}" hx-target="#objectUpdateModalTarget" hx-swap="innerHTML" enctype="multipart/form-data">
+  <form id="workTypeRequestUpdateForm" hx-post="{% url 'attendance-work-type-request-update' req.id %}" hx-target="#objectUpdateModalTarget" hx-swap="innerHTML" enctype="multipart/form-data">
 
     <div class="oh-input-group">
       <label class="oh-label">{{ form.reason.label }}</label>
