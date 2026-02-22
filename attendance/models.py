@@ -59,10 +59,25 @@ class WorkModeRequestScope(models.TextChoices):
 class WorkModeRequestStatus(models.TextChoices):
     """Approval status for a work-mode request."""
     PENDING = "pending", _("Pending")
+    WAITING_FOR_APPROVAL = "waiting_for_approval", _("Waiting For Approval")
     APPROVED = "approved", _("Approved")
     REJECTED = "rejected", _("Rejected")
     CANCELED = "canceled", _("Canceled")
 
+
+
+class WorkModeRequestRejectReasonCode(models.TextChoices):
+    """Reason code for REJECTED WorkModeRequest."""
+    MANUAL_REJECT = "MANUAL_REJECT", _("Manual Reject")
+    AUTO_REJECT_CUTOFF_IN_PASSED = "AUTO_REJECT_CUTOFF_IN_PASSED", _("Auto Reject: Cutoff IN Passed")
+    AUTO_REJECT_CUTOFF_OUT_PASSED = "AUTO_REJECT_CUTOFF_OUT_PASSED", _("Auto Reject: Cutoff OUT Passed")
+    AUTO_REJECT_CUTOFF_FULL_PASSED = "AUTO_REJECT_CUTOFF_FULL_PASSED", _("Auto Reject: Cutoff FULL Passed")
+
+
+class AttendancePunchStatus(models.TextChoices):
+    """Audit status for a punch (IN/OUT) after request decision."""
+    VALID = "VALID", _("Valid")
+    REJECTED = "REJECTED", _("Rejected")
 
 class AttendanceActivity(HorillaModel):
     """
@@ -209,10 +224,18 @@ class WorkModeRequest(HorillaModel):
     end_date = models.DateField(verbose_name=_("End Date"))
 
     status = models.CharField(
-        max_length=12,
+        max_length=32,
         choices=WorkModeRequestStatus.choices,
         default=WorkModeRequestStatus.PENDING,
         verbose_name=_("Status"),
+    )
+
+    reason_code = models.CharField(
+        max_length=64,
+        null=True,
+        blank=True,
+        choices=WorkModeRequestRejectReasonCode.choices,
+        verbose_name=_("Reject Reason Code"),
     )
 
     reason = models.TextField(null=True, blank=True, verbose_name=_("Reason"))
@@ -416,6 +439,41 @@ class Attendance(HorillaModel):
         default=AttendanceWorkMode.WFO,
         verbose_name=_("Check-Out Mode"),
     )
+
+    # Audit status per punch (Option B)
+    in_attendance_status = models.CharField(
+        max_length=16,
+        null=True,
+        blank=True,
+        choices=AttendancePunchStatus.choices,
+        verbose_name=_("IN Attendance Status"),
+    )
+    out_attendance_status = models.CharField(
+        max_length=16,
+        null=True,
+        blank=True,
+        choices=AttendancePunchStatus.choices,
+        verbose_name=_("OUT Attendance Status"),
+    )
+
+    in_attendance_reject_reason_code = models.CharField(
+        max_length=64,
+        null=True,
+        blank=True,
+        choices=WorkModeRequestRejectReasonCode.choices,
+        verbose_name=_("IN Reject Reason Code"),
+    )
+    out_attendance_reject_reason_code = models.CharField(
+        max_length=64,
+        null=True,
+        blank=True,
+        choices=WorkModeRequestRejectReasonCode.choices,
+        verbose_name=_("OUT Reject Reason Code"),
+    )
+
+    # Related request IDs used for punch decisions (per IN/OUT)
+    in_related_work_type_request_id = models.IntegerField(null=True, blank=True)
+    out_related_work_type_request_id = models.IntegerField(null=True, blank=True)
 
     attendance_clock_in_location = models.JSONField(
         null=True, blank=True, verbose_name=_("Check-In Location")
