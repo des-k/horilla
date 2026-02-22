@@ -31,7 +31,7 @@ SUBMENUS = [
     },
     {
         "menu": _("Work Type Requests"),
-        "redirect": reverse("work-type-request-view"),
+        "redirect": reverse("attendance-work-type-request-view"),
     },
     
     {
