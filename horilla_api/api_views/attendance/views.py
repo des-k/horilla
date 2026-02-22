@@ -5,7 +5,7 @@ from django import template
 from django.conf import settings
 from django.core.mail import EmailMessage
 from django.db import transaction
-from django.db.models import Case, CharField, F, Value, When
+from django.db.models import Case, CharField, F, Q, Value, When
 from django.http import QueryDict
 from django.shortcuts import get_object_or_404
 from django.utils import timezone as dj_timezone
@@ -30,10 +30,19 @@ from attendance.models import (
     AttendanceWorkMode,
     WorkModeRequestScope,
     WorkModeRequestStatus,
+    WorkModeRequestRejectReasonCode,
 )
 from attendance.views.clock_in_out import *
 from attendance.views.clock_in_out import clock_out
 import attendance.views.clock_in_out as cio  # Access underscore helpers excluded by import *
+
+from attendance.services.work_type_request_rules import (
+    effective_work_type,
+    punch_allowed,
+    auto_reject_wfa_waiting_for_date,
+    apply_rejection_to_attendance,
+    has_attachments,
+)
 
 from attendance.views.dashboard import (
     find_expected_attendances,
@@ -83,55 +92,28 @@ def query_dict(data):
 # Work-mode helpers (WFO/WFA/ON_DUTY)
 # -----------------------------------------------------------------------------
 def _pick_work_mode_request(employee, target_date: date, want: str):
-    """Pick the most relevant WorkModeRequest for a date.
+    """Return the *effective* WorkModeRequest for the given date.
 
-    want: "in" or "out" (scope filter)
-    Priority:
-      1) APPROVED
-      2) PENDING
-      3) others (excluding REJECTED/CANCELED)
-      then newest first
+    Kept for backward compatibility; core resolution is delegated to
+    ``attendance.services.work_type_request_rules``.
     """
-    if want not in ("in", "out"):
-        raise ValueError("want must be 'in' or 'out'")
+    return effective_work_type(employee, target_date, want).request
 
-    qs = WorkModeRequest.objects.filter(
-        employee_id=employee,
-        start_date__lte=target_date,
-        end_date__gte=target_date,
-    ).exclude(
-        status__in=[WorkModeRequestStatus.REJECTED, WorkModeRequestStatus.CANCELED]
-    )
 
-    if want == "in":
-        qs = qs.filter(scope__in=[WorkModeRequestScope.IN, WorkModeRequestScope.FULL])
-    else:
-        qs = qs.filter(scope__in=[WorkModeRequestScope.OUT, WorkModeRequestScope.FULL])
+def _resolve_effective_work_type(employee, target_date: date, want: str):
+    """Return tuple (mode, source, request)."""
+    eff = effective_work_type(employee, target_date, want)
+    return eff.mode, eff.source, eff.request
 
-    qs = qs.annotate(
-        _status_rank=Case(
-                When(status=WorkModeRequestStatus.APPROVED, then=Value(0)),
-                When(status=WorkModeRequestStatus.PENDING, then=Value(1)),
-                default=Value(9),
-            )
-        ).order_by("_status_rank", "-id")
-
-    return qs.first()
 
 def _mode_from_request(req) -> str:
+    # Compatibility helper
     return req.mode if req else AttendanceWorkMode.WFO
 
-def _is_punch_allowed(mode: str, req) -> bool:
-    """Server-side authority: whether mobile punch is allowed for a mode."""
-    if mode == AttendanceWorkMode.WFO:
-        return False
-    if not req:
-        return False
-    if mode == AttendanceWorkMode.WFA:
-        return req.status == WorkModeRequestStatus.APPROVED
-    if mode == AttendanceWorkMode.ON_DUTY:
-        return req.status in (WorkModeRequestStatus.PENDING, WorkModeRequestStatus.APPROVED)
-    return False
+
+def _is_punch_allowed(mode: str, req, source: str):
+    from attendance.services.work_type_request_rules import EffectiveWorkType
+    return punch_allowed(EffectiveWorkType(mode=mode, source=source, request=req))
 
 def _requires_proof(mode: str) -> bool:
     return mode in (AttendanceWorkMode.WFA, AttendanceWorkMode.ON_DUTY)
@@ -287,6 +269,101 @@ def _normalize_none(value):
     if isinstance(value, str) and value.strip() in ("", "None", "null", "NULL"):
         return None
     return value
+
+
+def _auto_reject_stale_wfa_waiting_for_queryset(qs, *, request, now_dt: datetime) -> None:
+    """Auto-reject stale WFA WAITING_FOR_APPROVAL requests.
+
+    Why:
+    - A WFA request must be rejected automatically after the relevant cutoff passes.
+    - If nobody opens CheckingStatus on that attendance_date, the request could stay WAITING forever.
+    - List/Approvals endpoints must therefore enforce auto-reject too.
+
+    Implementation:
+    - For each (employee, request.start_date) pair, compute that day's cutoff(s) from shift schedule,
+      then call `auto_reject_wfa_waiting_for_date(...)` which handles IN/OUT/FULL and applies Option-B audit.
+    """
+    try:
+        from employee.models import Employee
+    except Exception:
+        return
+
+    try:
+        today = now_dt.date()
+        qs = qs.filter(
+            mode=AttendanceWorkMode.WFA,
+            status=WorkModeRequestStatus.WAITING_FOR_APPROVAL,
+            start_date__lte=today,
+        )
+        pairs = list(qs.values_list("employee_id_id", "start_date").distinct())
+        if not pairs:
+            return
+
+        emp_ids = sorted({eid for (eid, _d) in pairs if eid})
+        emp_map = {
+            e.id: e
+            for e in Employee.objects.filter(id__in=emp_ids).select_related("employee_work_info")
+        }
+
+        for eid, target_date in pairs:
+            emp = emp_map.get(eid)
+            if not emp:
+                continue
+
+            shift = None
+            try:
+                shift = emp.employee_work_info.shift_id
+            except Exception:
+                shift = None
+            if not shift:
+                continue
+
+            weekday = target_date.strftime("%A").lower()
+
+            # Prefer explicit schedule row for that weekday when available.
+            day_obj = None
+            try:
+                schedule = cio.EmployeeShiftSchedule.objects.filter(
+                    shift_id=shift, day__day=weekday
+                ).select_related("day").first()
+                day_obj = schedule.day if schedule else None
+            except Exception:
+                day_obj = None
+
+            if not day_obj:
+                day_obj = EmployeeShiftDay.objects.filter(day=weekday).first()
+            if not day_obj:
+                continue
+
+            try:
+                _min_hour, start_sec, end_sec = shift_schedule_today(day=day_obj, shift=shift)
+            except Exception:
+                start_sec, end_sec = 0, 0
+
+            try:
+                rules = cio.get_shift_rules(
+                    target_date,
+                    shift,
+                    day_obj,
+                    start_time_sec=start_sec,
+                    end_time_sec=end_sec,
+                )
+            except Exception:
+                rules = {"cutoff_in_dt": None, "cutoff_out_dt": None}
+
+            cutoff_in_dt = _coerce_datetime_like(rules.get("cutoff_in_dt"), now_dt)
+            cutoff_out_dt = _coerce_datetime_like(rules.get("cutoff_out_dt"), now_dt)
+
+            auto_reject_wfa_waiting_for_date(
+                employee=emp,
+                target_date=target_date,
+                now_dt=now_dt,
+                cutoff_in_dt=cutoff_in_dt,
+                cutoff_out_dt=cutoff_out_dt,
+            )
+    except Exception:
+        # Do not break listing endpoints due to auto-reject best-effort logic
+        return
 
 
 def _format_minimum_hour(value):
@@ -534,9 +611,8 @@ class ClockInAPIView(APIView):
             _api_resolve_attendance_date_and_day(shift, dt_now)
         )
 
-        # Resolve mode + request for IN
-        in_req = _pick_work_mode_request(employee, attendance_date, "in")
-        in_mode = _mode_from_request(in_req)
+        # Resolve work type for IN (request overrides schedule)
+        in_mode, in_source, in_req = _resolve_effective_work_type(employee, attendance_date, "in")
 
         if in_mode == AttendanceWorkMode.WFO:
             return Response(
@@ -544,7 +620,7 @@ class ClockInAPIView(APIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        if not _is_punch_allowed(in_mode, in_req):
+        if not _is_punch_allowed(in_mode, in_req, in_source):
             msg = "Request is required." if not in_req else "Request is not approved yet."
             if in_mode == AttendanceWorkMode.ON_DUTY and in_req:
                 msg = "On Duty request is not active."
@@ -601,6 +677,21 @@ class ClockInAPIView(APIView):
         cutoff_in_dt = rules.get("cutoff_in_dt")
 
         cutoff_in_dt = _coerce_datetime_like(cutoff_in_dt, dt_now)
+
+        # Auto reject WFA waiting (IN/FULL uses cutoff_in)
+        try:
+            auto_reject_wfa_waiting_for_date(
+                employee=employee,
+                target_date=attendance_date,
+                now_dt=dt_now,
+                cutoff_in_dt=cutoff_in_dt,
+                cutoff_out_dt=None,
+            )
+            # Re-resolve effective type after possible auto-reject
+            in_mode, in_source, in_req = _resolve_effective_work_type(employee, attendance_date, "in")
+        except Exception:
+            pass
+
         if cutoff_in_dt and dt_now > cutoff_in_dt:
             return Response(
                 {
@@ -639,12 +730,38 @@ class ClockInAPIView(APIView):
             is_presensi_only=(in_mode == AttendanceWorkMode.ON_DUTY),
         )
 
+        # Re-resolve OUT side for consistent response
+        out_mode, out_source, out_req = _resolve_effective_work_type(employee, attendance_date, "out")
+        attendance = Attendance.objects.filter(employee_id=employee, attendance_date=attendance_date).first()
+
         return Response(
             {
                 "message": "Clocked-In",
                 "attendance_date": str(attendance_date),
+
+                # Legacy
                 "in_mode": in_mode,
+                "out_mode": out_mode,
                 "work_mode_request_id": getattr(in_req, "id", None),
+
+                # New work-type fields
+                "in_work_type": in_mode,
+                "out_work_type": out_mode,
+                "in_work_type_source": in_source,
+                "out_work_type_source": out_source,
+                "in_work_type_request_id": getattr(in_req, "id", None),
+                "out_work_type_request_id": getattr(out_req, "id", None),
+                "in_work_type_request_status": getattr(in_req, "status", None),
+                "out_work_type_request_status": getattr(out_req, "status", None),
+
+                # Option B (per-punch audit status)
+                "in_attendance_status": getattr(attendance, "in_attendance_status", None) if attendance else None,
+                "out_attendance_status": getattr(attendance, "out_attendance_status", None) if attendance else None,
+                "in_attendance_reject_reason_code": getattr(attendance, "in_attendance_reject_reason_code", None) if attendance else None,
+                "out_attendance_reject_reason_code": getattr(attendance, "out_attendance_reject_reason_code", None) if attendance else None,
+                "in_related_work_type_request_id": getattr(attendance, "in_related_work_type_request_id", None) if attendance else None,
+                "out_related_work_type_request_id": getattr(attendance, "out_related_work_type_request_id", None) if attendance else None,
+
                 "minimum_working_hour": _format_minimum_hour(minimum_hour),
                 "server_now": dt_now.isoformat(),
                 "server_time": dt_now.strftime("%H:%M"),
@@ -683,8 +800,7 @@ class ClockOutAPIView(APIView):
             _api_resolve_attendance_date_and_day(shift, dt_now)
         )
 
-        out_req = _pick_work_mode_request(employee, attendance_date, "out")
-        out_mode = _mode_from_request(out_req)
+        out_mode, out_source, out_req = _resolve_effective_work_type(employee, attendance_date, "out")
 
         if out_mode == AttendanceWorkMode.WFO:
             return Response(
@@ -692,7 +808,7 @@ class ClockOutAPIView(APIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        if not _is_punch_allowed(out_mode, out_req):
+        if not _is_punch_allowed(out_mode, out_req, out_source):
             msg = "Request is required." if not out_req else "Request is not approved yet."
             if out_mode == AttendanceWorkMode.ON_DUTY and out_req:
                 msg = "On Duty request is not active."
@@ -745,6 +861,22 @@ class ClockOutAPIView(APIView):
 
 
         cutoff_out_dt = _coerce_datetime_like(cutoff_out_dt, dt_now) if cutoff_out_dt else None
+
+        # Auto reject WFA waiting (OUT uses cutoff_out; FULL uses cutoff_in)
+        try:
+            _cutoff_in_tmp = rules.get("cutoff_in_dt")
+            _cutoff_in_tmp = _coerce_datetime_like(_cutoff_in_tmp, dt_now) if _cutoff_in_tmp else None
+            auto_reject_wfa_waiting_for_date(
+                employee=employee,
+                target_date=attendance_date,
+                now_dt=dt_now,
+                cutoff_in_dt=_cutoff_in_tmp,
+                cutoff_out_dt=cutoff_out_dt,
+            )
+            out_mode, out_source, out_req = _resolve_effective_work_type(employee, attendance_date, "out")
+        except Exception:
+            pass
+
 
 
         if cutoff_out_dt and dt_now > cutoff_out_dt:
@@ -941,21 +1073,45 @@ class ClockOutAPIView(APIView):
             # Do not fail clock-out response if hint computation fails.
             pass
 
-
+        # Re-resolve IN side for consistent response
+        in_mode, in_source, in_req = _resolve_effective_work_type(employee, attendance_date, "in")
+        attendance = Attendance.objects.filter(employee_id=employee, attendance_date=attendance_date).first()
 
         return Response(
             {
                 "message": "Clocked-Out",
                 "attendance_date": str(attendance_date),
+
+                # Legacy
+                "in_mode": in_mode,
                 "out_mode": out_mode,
                 "work_mode_request_id": getattr(out_req, "id", None),
-                "missing_check_in": bool(missing_check_in),
 
-            "late_by": late_by_hhmm,
-            "planned_check_out": planned_check_out_hhmm,
-            "work_hours_below_minimum": bool(work_hours_below_minimum),
-            "work_hours_shortfall": work_hours_shortfall_hhmm,
-            "checked_out_early": bool(checked_out_early),
+                # New work-type fields
+                "in_work_type": in_mode,
+                "out_work_type": out_mode,
+                "in_work_type_source": in_source,
+                "out_work_type_source": out_source,
+                "in_work_type_request_id": getattr(in_req, "id", None),
+                "out_work_type_request_id": getattr(out_req, "id", None),
+                "in_work_type_request_status": getattr(in_req, "status", None),
+                "out_work_type_request_status": getattr(out_req, "status", None),
+
+                # Option B (per-punch audit status)
+                "in_attendance_status": getattr(attendance, "in_attendance_status", None) if attendance else None,
+                "out_attendance_status": getattr(attendance, "out_attendance_status", None) if attendance else None,
+                "in_attendance_reject_reason_code": getattr(attendance, "in_attendance_reject_reason_code", None) if attendance else None,
+                "out_attendance_reject_reason_code": getattr(attendance, "out_attendance_reject_reason_code", None) if attendance else None,
+                "in_related_work_type_request_id": getattr(attendance, "in_related_work_type_request_id", None) if attendance else None,
+                "out_related_work_type_request_id": getattr(attendance, "out_related_work_type_request_id", None) if attendance else None,
+
+                "missing_check_in": bool(missing_check_in),
+                "late_by": late_by_hhmm,
+                "planned_check_out": planned_check_out_hhmm,
+                "work_hours_below_minimum": bool(work_hours_below_minimum),
+                "work_hours_shortfall": work_hours_shortfall_hhmm,
+                "checked_out_early": bool(checked_out_early),
+
                 "updated": bool(allow_update),
                 "minimum_working_hour": _format_minimum_hour(minimum_hour),
                 "server_now": dt_now.isoformat(),
@@ -1535,7 +1691,16 @@ class AttendanceRequestRejectView(APIView):
 
 
 class WorkModeRequestView(APIView):
-    """CRUD for WorkModeRequest (WFA / On Duty) used by mobile."""
+    """CRUD for WorkModeRequest (WFA / ON_DUTY).
+
+    Notes:
+    - Endpoint aliases expose this as work-type-request.
+    - DB model stays WorkModeRequest.
+    - Status rules (FINAL spec):
+        * WFA: WAITING_FOR_APPROVAL
+        * ON_DUTY: PENDING if no attachment; WAITING_FOR_APPROVAL if attachment exists
+    - Edit (PATCH/PUT) is restricted: only add attachments and/or update note (reason).
+    """
 
     permission_classes = [IsAuthenticated]
     serializer_class = WorkModeRequestSerializer
@@ -1544,7 +1709,6 @@ class WorkModeRequestView(APIView):
     def get(self, request, pk=None):
         if pk:
             obj = get_object_or_404(WorkModeRequest, pk=pk)
-            # Owner, admin, or supervisor in chain can view
             emp_id = getattr(obj, "employee_id_id", None) or obj.employee_id.id
             if not _can_act_on_employee(
                 request,
@@ -1561,26 +1725,10 @@ class WorkModeRequestView(APIView):
                     {"error": "You do not have permission to view this request."},
                     status=status.HTTP_403_FORBIDDEN,
                 )
-
-            serializer = self.serializer_class(obj)
-            return Response(serializer.data, status=200)
+            return Response(self.serializer_class(obj).data, status=200)
 
         qs = WorkModeRequest.objects.all()
-        # Filter to own + subordinates unless user has global view permission.
         qs = filtersubordinates(request, qs, perm="attendance.view_workmoderequest")
-
-        # Filters
-        status_q = request.GET.get("status")
-        if status_q:
-            qs = qs.filter(status=status_q)
-
-        mode_q = request.GET.get("mode")
-        if mode_q:
-            qs = qs.filter(mode=mode_q)
-
-        scope_q = request.GET.get("scope")
-        if scope_q:
-            qs = qs.filter(scope=scope_q)
 
         # mine=1 => only my requests
         if request.GET.get("mine") in ("1", "true", "True"):
@@ -1589,18 +1737,81 @@ class WorkModeRequestView(APIView):
             except Exception:
                 qs = qs.none()
 
+        # Filters
+        status_q = request.GET.get("status")
+        if status_q:
+            qs = qs.filter(status=status_q)
+
+        mode_q = request.GET.get("mode") or request.GET.get("work_type")
+        if mode_q:
+            qs = qs.filter(mode=mode_q)
+
+        scope_q = request.GET.get("scope")
+        if scope_q:
+            qs = qs.filter(scope=scope_q)
+
+        # Keep list consistent with FINAL spec: auto-reject stale WFA WAITING requests (best-effort)
+        try:
+            now_dt = _api_now(request)
+            _auto_reject_stale_wfa_waiting_for_queryset(qs, request=request, now_dt=now_dt)
+        except Exception:
+            pass
+
+        # Optional search (used by mobile)
+        search = (request.GET.get("search") or "").strip()
+        if search:
+            q = Q(mode__icontains=search) | Q(scope__icontains=search) | Q(status__icontains=search)
+            q |= Q(reason__icontains=search) | Q(reason_code__icontains=search)
+            q |= Q(employee_id__employee_first_name__icontains=search) | Q(employee_id__employee_last_name__icontains=search)
+
+            if search.isdigit():
+                try:
+                    q |= Q(id=int(search)) | Q(employee_id__id=int(search))
+                except Exception:
+                    pass
+            else:
+                try:
+                    d = datetime.strptime(search, "%Y-%m-%d").date()
+                    q |= Q(start_date=d) | Q(end_date=d)
+                except Exception:
+                    pass
+
+            qs = qs.filter(q)
+
         pagenation = PageNumberPagination()
         page = pagenation.paginate_queryset(qs.order_by("-id"), request)
         serializer = self.serializer_class(page, many=True)
         return pagenation.get_paginated_response(serializer.data)
 
+    def _collect_uploaded_files(self, request):
+        uploaded = []
+        if hasattr(request, "FILES"):
+            uploaded = request.FILES.getlist("files") or []
+            if not uploaded:
+                f_single = request.FILES.get("file")
+                if f_single:
+                    uploaded = [f_single]
+        return uploaded
+
+    def _attach_files(self, obj: WorkModeRequest, uploaded_files):
+        try:
+            from attendance.models import AttendanceRequestFile
+
+            for up in uploaded_files:
+                arf = AttendanceRequestFile.objects.create(file=up)
+                obj.files.add(arf)
+        except Exception:
+            pass
+
     @transaction.atomic
     def post(self, request):
         data = request.data.copy() if hasattr(request.data, "copy") else dict(request.data)
 
-        # Backward compatible aliases from older mobile UI
+        # Backward compatible aliases
         if not data.get("mode") and data.get("work_mode"):
             data["mode"] = data.get("work_mode")
+        if not data.get("mode") and data.get("work_type"):
+            data["mode"] = data.get("work_type")
         if not data.get("reason") and data.get("description"):
             data["reason"] = data.get("description")
         if not data.get("start_date") and data.get("date"):
@@ -1608,16 +1819,15 @@ class WorkModeRequestView(APIView):
         if not data.get("end_date") and data.get("start_date"):
             data["end_date"] = data.get("start_date")
 
-        # Default employee_id to current user.
+        # Default employee_id to current user
         try:
             my_emp = request.user.employee_get
         except Exception:
             my_emp = None
-
         if not data.get("employee_id") and my_emp:
             data["employee_id"] = my_emp.id
 
-        # Non-admin cannot create for another employee.
+        # Non-admin cannot create for other employee
         if my_emp and str(data.get("employee_id")) != str(my_emp.id):
             if not request.user.has_perm("attendance.add_workmoderequest"):
                 return Response(
@@ -1628,7 +1838,7 @@ class WorkModeRequestView(APIView):
         # Disallow WFO
         if str(data.get("mode")) == AttendanceWorkMode.WFO:
             return Response(
-                {"error": "WFO should not be requested. Use WFA or On Duty."},
+                {"error": "WFO should not be requested. Use WFA or ON DUTY."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -1636,33 +1846,37 @@ class WorkModeRequestView(APIView):
         if not serializer.is_valid():
             return Response(serializer.errors, status=400)
 
+        # Create with provisional status; finalized after file attach
         obj: WorkModeRequest = serializer.save(status=WorkModeRequestStatus.PENDING)
 
-        # Attach files (optional)
-        try:
-            from attendance.models import AttendanceRequestFile
+        uploaded = self._collect_uploaded_files(request)
+        if uploaded:
+            self._attach_files(obj, uploaded)
 
-            uploaded = []
-            if hasattr(request, "FILES"):
-                uploaded = request.FILES.getlist("files") or []
-                if not uploaded:
-                    f_single = request.FILES.get("file")
-                    if f_single:
-                        uploaded = [f_single]
-
-            for up in uploaded:
-                arf = AttendanceRequestFile.objects.create(file=up)
-                obj.files.add(arf)
-
-        except Exception:
-            pass
+        # FINAL status rules
+        if obj.mode == AttendanceWorkMode.WFA:
+            obj.status = WorkModeRequestStatus.WAITING_FOR_APPROVAL
+        elif obj.mode == AttendanceWorkMode.ON_DUTY:
+            obj.status = (
+                WorkModeRequestStatus.WAITING_FOR_APPROVAL
+                if has_attachments(obj)
+                else WorkModeRequestStatus.PENDING
+            )
+        obj.save(update_fields=["status"])
 
         return Response(self.serializer_class(obj).data, status=200)
 
+    def patch(self, request, pk):
+        return self._patch_or_put(request, pk)
+
     @transaction.atomic
     def put(self, request, pk):
-        obj = get_object_or_404(WorkModeRequest, pk=pk)
-        # Owner can edit only while pending. Admin can edit always.
+        # Backward compatibility: treat PUT as PATCH
+        return self._patch_or_put(request, pk)
+
+    def _patch_or_put(self, request, pk):
+        obj = get_object_or_404(WorkModeRequest.objects.select_for_update(), pk=pk)
+
         is_admin = request.user.has_perm("attendance.change_workmoderequest")
         is_owner = False
         try:
@@ -1670,86 +1884,98 @@ class WorkModeRequestView(APIView):
         except Exception:
             is_owner = False
 
-        if not (is_admin or (is_owner and obj.status == WorkModeRequestStatus.PENDING)):
+        if not (is_admin or is_owner):
             return Response(
                 {"error": "You do not have permission to update this request."},
                 status=status.HTTP_403_FORBIDDEN,
             )
 
+        if obj.status not in (
+            WorkModeRequestStatus.PENDING,
+            WorkModeRequestStatus.WAITING_FOR_APPROVAL,
+        ):
+            return Response({"error": "Only PENDING/WAITING requests can be updated."}, status=400)
+
+        # Spec: edit only for adding attachment + note; do not allow changing type/scope/dates
         data = request.data.copy() if hasattr(request.data, "copy") else dict(request.data)
-
-        # Backward compatible aliases
-        if not data.get("mode") and data.get("work_mode"):
-            data["mode"] = data.get("work_mode")
-        if not data.get("reason") and data.get("description"):
-            data["reason"] = data.get("description")
-        if not data.get("start_date") and data.get("date"):
-            data["start_date"] = data.get("date")
-        if not data.get("end_date") and data.get("start_date"):
-            data["end_date"] = data.get("start_date")
-
-        # Remove file-only keys from serializer payload (attachments handled separately)
-        data_no_files = {k: v for k, v in data.items() if k not in ("files", "file")}
-
-        # Do not allow switching to WFO
-        if str(data.get("mode", obj.mode)) == AttendanceWorkMode.WFO:
+        forbidden = {"mode", "work_type", "work_mode", "scope", "start_date", "end_date", "employee_id"}
+        if any(k in data for k in forbidden):
             return Response(
-                {"error": "WFO should not be requested. Use WFA or On Duty."},
-                status=status.HTTP_400_BAD_REQUEST,
+                {"error": "You can only add attachments and/or update note. work_type/scope/dates cannot be changed."},
+                status=400,
             )
 
-        # If this PUT only uploads files, skip serializer validation.
-        if data_no_files:
-            serializer = self.serializer_class(obj, data=data_no_files, partial=True)
-            if not serializer.is_valid():
-                return Response(serializer.errors, status=400)
-            obj = serializer.save()
+        # Update reason/note
+        note = data.get("reason") or data.get("note") or data.get("description")
+        if note is not None:
+            obj.reason = str(note)
+            obj.save(update_fields=["reason"])
 
-        # Attach files (optional)
-        try:
-            from attendance.models import AttendanceRequestFile
+        # Attach files
+        uploaded = self._collect_uploaded_files(request)
+        if uploaded:
+            self._attach_files(obj, uploaded)
 
-            uploaded = []
-            if hasattr(request, "FILES"):
-                uploaded = request.FILES.getlist("files") or []
-                if not uploaded:
-                    f_single = request.FILES.get("file")
-                    if f_single:
-                        uploaded = [f_single]
-
-            for up in uploaded:
-                arf = AttendanceRequestFile.objects.create(file=up)
-                obj.files.add(arf)
-        except Exception:
-            pass
+        # ON_DUTY: if PENDING and now has attachments => WAITING_FOR_APPROVAL
+        if obj.mode == AttendanceWorkMode.ON_DUTY and obj.status == WorkModeRequestStatus.PENDING:
+            if has_attachments(obj):
+                obj.status = WorkModeRequestStatus.WAITING_FOR_APPROVAL
+                obj.save(update_fields=["status"])
 
         return Response(self.serializer_class(obj).data, status=200)
 
 
 class WorkModeRequestApprovalsView(APIView):
-    """List pending work-mode requests that the current user can approve."""
+    """List requests awaiting approval (WAITING_FOR_APPROVAL only)."""
 
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        qs = WorkModeRequest.objects.filter(status=WorkModeRequestStatus.PENDING)
+        now_dt = _api_now(request)
 
+        qs = WorkModeRequest.objects.filter(status=WorkModeRequestStatus.WAITING_FOR_APPROVAL)
+
+        # Scope to subordinates unless user has full approval permission
         if request.user.has_perm("attendance.change_workmoderequest"):
-            # Admin: see all
             pass
         else:
-            # Supervisor: only subordinates
             sub_ids = get_subordinate_employee_ids(request, nested=True)
             if not sub_ids:
                 qs = qs.none()
             else:
                 qs = qs.filter(employee_id__id__in=sub_ids)
 
+        # Keep approvals clean: auto-reject stale WFA WAITING requests based on each request's attendance_date
+        _auto_reject_stale_wfa_waiting_for_queryset(qs, request=request, now_dt=now_dt)
+
+        # Re-build queryset (some items may have become REJECTED)
+        qs = qs.filter(status=WorkModeRequestStatus.WAITING_FOR_APPROVAL)
+
+        # Optional search (used by mobile)
+        search = (request.GET.get("search") or "").strip()
+        if search:
+            q = Q(mode__icontains=search) | Q(scope__icontains=search) | Q(status__icontains=search)
+            q |= Q(reason__icontains=search) | Q(reason_code__icontains=search)
+            q |= Q(employee_id__employee_first_name__icontains=search) | Q(employee_id__employee_last_name__icontains=search)
+
+            if search.isdigit():
+                try:
+                    q |= Q(id=int(search)) | Q(employee_id__id=int(search))
+                except Exception:
+                    pass
+            else:
+                try:
+                    d = datetime.strptime(search, "%Y-%m-%d").date()
+                    q |= Q(start_date=d) | Q(end_date=d)
+                except Exception:
+                    pass
+
+            qs = qs.filter(q)
+
         pagenation = PageNumberPagination()
         page = pagenation.paginate_queryset(qs.order_by("-id"), request)
         serializer = WorkModeRequestSerializer(page, many=True)
         return pagenation.get_paginated_response(serializer.data)
-
 
 class WorkModeRequestApproveView(APIView):
     permission_classes = [IsAuthenticated]
@@ -1759,7 +1985,7 @@ class WorkModeRequestApproveView(APIView):
         obj = get_object_or_404(WorkModeRequest.objects.select_for_update(), pk=pk)
         emp_id = getattr(obj, "employee_id_id", None) or obj.employee_id.id
 
-        # Owner cannot approve unless admin.
+        # Owner cannot approve unless admin
         try:
             if (
                 obj.employee_id.employee_user_id == request.user
@@ -1772,27 +1998,23 @@ class WorkModeRequestApproveView(APIView):
         except Exception:
             pass
 
-        if not _can_act_on_employee(
-            request,
-            emp_id,
-            "attendance.change_workmoderequest",
-            allow_owner=False,
-        ):
+        if not _can_act_on_employee(request, emp_id, "attendance.change_workmoderequest", allow_owner=False):
             return Response(
                 {"error": "You do not have permission to perform this action."},
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        if obj.status != WorkModeRequestStatus.PENDING:
-            return Response({"error": "Request is not pending."}, status=400)
+        if obj.status != WorkModeRequestStatus.WAITING_FOR_APPROVAL:
+            return Response({"error": "Request is not waiting for approval."}, status=400)
 
         obj.status = WorkModeRequestStatus.APPROVED
+        obj.reason_code = None
         try:
             obj.approved_by = request.user.employee_get
         except Exception:
             obj.approved_by = None
         obj.approved_at = dj_timezone.now()
-        obj.save()
+        obj.save(update_fields=["status", "reason_code", "approved_by", "approved_at"])
         return Response({"status": "approved"}, status=200)
 
 
@@ -1804,7 +2026,7 @@ class WorkModeRequestRejectView(APIView):
         obj = get_object_or_404(WorkModeRequest.objects.select_for_update(), pk=pk)
         emp_id = getattr(obj, "employee_id_id", None) or obj.employee_id.id
 
-        # Owner cannot reject unless admin.
+        # Owner cannot reject unless admin
         try:
             if (
                 obj.employee_id.employee_user_id == request.user
@@ -1817,36 +2039,41 @@ class WorkModeRequestRejectView(APIView):
         except Exception:
             pass
 
-        if not _can_act_on_employee(
-            request,
-            emp_id,
-            "attendance.change_workmoderequest",
-            allow_owner=False,
-        ):
+        if not _can_act_on_employee(request, emp_id, "attendance.change_workmoderequest", allow_owner=False):
             return Response(
                 {"error": "You do not have permission to perform this action."},
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        if obj.status != WorkModeRequestStatus.PENDING:
-            return Response({"error": "Request is not pending."}, status=400)
+        is_admin = request.user.has_perm("attendance.change_workmoderequest")
+        if obj.status not in (WorkModeRequestStatus.WAITING_FOR_APPROVAL, WorkModeRequestStatus.PENDING):
+            return Response({"error": "Request cannot be rejected in this status."}, status=400)
+        if obj.status == WorkModeRequestStatus.PENDING and not is_admin:
+            return Response({"error": "Pending ON DUTY requests are not in approvals."}, status=400)
 
-        # Optional comment
         comment_text = (
             (request.data.get("comment") if hasattr(request, "data") else None)
             or (request.data.get("reason") if hasattr(request, "data") else None)
             or None
         )
-        if comment_text and not obj.reason:
+        if comment_text:
             obj.reason = str(comment_text)
 
         obj.status = WorkModeRequestStatus.REJECTED
+        obj.reason_code = WorkModeRequestRejectReasonCode.MANUAL_REJECT
         try:
             obj.approved_by = request.user.employee_get
         except Exception:
             obj.approved_by = None
         obj.approved_at = dj_timezone.now()
-        obj.save()
+        obj.save(update_fields=["status", "reason_code", "reason", "approved_by", "approved_at"])
+
+        # Option B: mark any attendance that already used this request
+        try:
+            apply_rejection_to_attendance(obj)
+        except Exception:
+            pass
+
         return Response({"status": "rejected"}, status=200)
 
 
@@ -1870,12 +2097,13 @@ class WorkModeRequestCancelView(APIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        if obj.status != WorkModeRequestStatus.PENDING:
-            return Response({"error": "Only pending requests can be canceled."}, status=400)
+        if obj.status not in (WorkModeRequestStatus.PENDING, WorkModeRequestStatus.WAITING_FOR_APPROVAL):
+            return Response({"error": "Only PENDING/WAITING requests can be canceled."}, status=400)
 
         obj.status = WorkModeRequestStatus.CANCELED
-        obj.save()
+        obj.save(update_fields=["status"])
         return Response({"status": "canceled"}, status=200)
+
 
 
 class AttendanceOverTimeView(APIView):
@@ -2285,12 +2513,21 @@ class CheckingStatus(APIView):
         if cutoff_out_dt and dt_now > cutoff_out_dt:
             check_out_cutoff_has_passed = True
 
-        # Resolve work-mode requests (IN/OUT can differ)
-        in_req = _pick_work_mode_request(employee, attendance_date, "in")
-        out_req = _pick_work_mode_request(employee, attendance_date, "out")
+        # Auto reject WFA waiting requests after cutoff (FINAL spec)
+        try:
+            auto_reject_wfa_waiting_for_date(
+                employee=employee,
+                target_date=attendance_date,
+                now_dt=dt_now,
+                cutoff_in_dt=cutoff_in_dt,
+                cutoff_out_dt=cutoff_out_dt,
+            )
+        except Exception:
+            pass
 
-        in_mode = _mode_from_request(in_req)
-        out_mode = _mode_from_request(out_req)
+# Resolve effective work type (request overrides schedule; IN/OUT can differ)
+        in_mode, in_source, in_req = _resolve_effective_work_type(employee, attendance_date, "in")
+        out_mode, out_source, out_req = _resolve_effective_work_type(employee, attendance_date, "out")
 
         # Attendance row
         attendance = Attendance.objects.filter(employee_id=employee, attendance_date=attendance_date).first()
@@ -2346,8 +2583,8 @@ class CheckingStatus(APIView):
         )
 
         # Action permissions
-        in_allowed = _is_punch_allowed(in_mode, in_req)
-        out_allowed = _is_punch_allowed(out_mode, out_req)
+        in_allowed = _is_punch_allowed(in_mode, in_req, in_source)
+        out_allowed = _is_punch_allowed(out_mode, out_req, out_source)
 
         requires_photo_in = _requires_proof(in_mode)
         requires_location_in = _requires_proof(in_mode)
@@ -2495,7 +2732,15 @@ class CheckingStatus(APIView):
 
             # Work-mode
             "in_mode": in_mode,
-            "out_mode": out_mode,
+                    "out_mode": out_mode,
+                    "in_work_type": in_mode,
+                    "out_work_type": out_mode,
+                    "in_work_type_source": in_source,
+                    "out_work_type_source": out_source,
+                    "in_work_type_request_id": getattr(in_req, 'id', None),
+                    "out_work_type_request_id": getattr(out_req, 'id', None),
+                    "in_work_type_request_status": getattr(in_req, 'status', None),
+                    "out_work_type_request_status": getattr(out_req, 'status', None),
             "in_request_status": getattr(in_req, "status", None),
             "out_request_status": getattr(out_req, "status", None),
             "in_request_scope": getattr(in_req, "scope", None),
@@ -2557,6 +2802,20 @@ class CheckingStatus(APIView):
                 payload["clock_out_location"] = getattr(attendance, "attendance_clock_out_location", None)
             except Exception:
                 pass
+
+
+        # Option B (per punch audit status)
+        if attendance:
+            payload.update(
+                {
+                    'in_attendance_status': getattr(attendance, 'in_attendance_status', None),
+                    'out_attendance_status': getattr(attendance, 'out_attendance_status', None),
+                    'in_attendance_reject_reason_code': getattr(attendance, 'in_attendance_reject_reason_code', None),
+                    'out_attendance_reject_reason_code': getattr(attendance, 'out_attendance_reject_reason_code', None),
+                    'in_related_work_type_request_id': getattr(attendance, 'in_related_work_type_request_id', None),
+                    'out_related_work_type_request_id': getattr(attendance, 'out_related_work_type_request_id', None),
+                }
+            )
 
         return Response(payload, status=status.HTTP_200_OK)
 
