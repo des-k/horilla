@@ -31,6 +31,8 @@ from django.http import HttpResponse
 from django.utils import timezone as dj_timezone
 from django.utils.translation import gettext_lazy as _
 
+from employee.models import EmployeeWorkInformation
+
 from attendance.methods.utils import (
     employee_exists,
     format_time,
@@ -951,6 +953,20 @@ def clock_in(request):
         return HttpResponse(
             _("You Don't have work information filled or your employee detail neither entered ")
         )
+
+    # Customization: reporting managers are approver-only and must not punch attendance.
+    try:
+        if EmployeeWorkInformation.objects.filter(reporting_manager_id=employee).only("id").exists():
+            return HttpResponse(_("Attendance is disabled for reporting managers (approver-only)."))
+    except Exception:
+        pass
+
+    # Customization: reporting managers are approver-only and must not punch attendance.
+    try:
+        if EmployeeWorkInformation.objects.filter(reporting_manager_id=employee).only("id").exists():
+            return HttpResponse(_("Attendance is disabled for reporting managers (approver-only)."))
+    except Exception:
+        pass
 
     shift = work_info.shift_id
     datetime_now = _get_request_datetime(request)
