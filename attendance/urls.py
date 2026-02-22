@@ -266,37 +266,37 @@ urlpatterns = [
     path(
         "work-type-requests/",
         attendance.views.work_type_requests.work_type_request_view,
-        name="work-type-request-view",
+        name="attendance-work-type-request-view",
     ),
     path(
         "work-type-requests/create",
         attendance.views.work_type_requests.work_type_request_create,
-        name="work-type-request-create",
+        name="attendance-work-type-request-create",
     ),
     path(
         "work-type-requests/update/<int:obj_id>/",
         attendance.views.work_type_requests.work_type_request_update,
-        name="work-type-request-update",
+        name="attendance-work-type-request-update",
     ),
     path(
         "work-type-requests/cancel/<int:obj_id>/",
         attendance.views.work_type_requests.work_type_request_cancel,
-        name="work-type-request-cancel",
+        name="attendance-work-type-request-cancel",
     ),
     path(
         "work-type-requests/approve/<int:obj_id>/",
         attendance.views.work_type_requests.work_type_request_approve,
-        name="work-type-request-approve",
+        name="attendance-work-type-request-approve",
     ),
     path(
         "work-type-requests/reject/<int:obj_id>/",
         attendance.views.work_type_requests.work_type_request_reject,
-        name="work-type-request-reject",
+        name="attendance-work-type-request-reject",
     ),
     path(
         "work-type-requests/attachments/<int:obj_id>/",
         attendance.views.work_type_requests.work_type_request_attachments,
-        name="work-type-request-attachments",
+        name="attendance-work-type-request-attachments",
     ),
     path(
         "request-attendance/<int:attendance_id>/",
