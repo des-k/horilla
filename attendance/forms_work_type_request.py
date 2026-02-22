@@ -1,0 +1,142 @@
+"""attendance/forms_work_type_request.py
+
+Django (templates) forms for Attendance **Work Type Requests**.
+
+UI terminology: *Work Type* (WFA / ON DUTY)
+DB model: attendance.WorkModeRequest (kept for backward compatibility).
+"""
+
+from __future__ import annotations
+
+from datetime import date
+from typing import Optional
+
+from django import forms
+from django.core.exceptions import ValidationError
+
+from attendance.models import (
+    AttendanceWorkMode,
+    WorkModeRequest,
+    WorkModeRequestRejectReasonCode,
+    WorkModeRequestScope,
+)
+from attendance.services.work_type_request_rules import validate_work_type_request
+
+
+class WorkTypeRequestCreateForm(forms.ModelForm):
+    """Create Work Type Request (Attendance)."""
+
+    # UI label: Work Type
+    mode = forms.ChoiceField(
+        label="Work Type",
+        choices=(
+            (AttendanceWorkMode.WFA, "WFA"),
+            (AttendanceWorkMode.ON_DUTY, "ON DUTY"),
+        ),
+        widget=forms.Select(attrs={"class": "oh-select w-100"}),
+    )
+
+    scope = forms.ChoiceField(
+        label="Scope",
+        choices=WorkModeRequestScope.choices,
+        widget=forms.Select(attrs={"class": "oh-select w-100"}),
+    )
+
+    start_date = forms.DateField(
+        label="Start Date",
+        widget=forms.DateInput(attrs={"type": "date", "class": "oh-input w-100"}),
+    )
+
+    end_date = forms.DateField(
+        label="End Date",
+        widget=forms.DateInput(attrs={"type": "date", "class": "oh-input w-100"}),
+    )
+
+    reason = forms.CharField(
+        label="Note",
+        required=False,
+        widget=forms.Textarea(attrs={"class": "oh-input w-100", "rows": 3}),
+    )
+
+    files = forms.FileField(
+        label="Attachments",
+        required=False,
+        widget=forms.ClearableFileInput(attrs={"multiple": True, "class": "oh-input w-100"}),
+    )
+
+    def __init__(self, *args, employee=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._employee = employee
+
+        # Default end_date = start_date (single-day scopes will sync via JS too)
+        if self.initial.get("start_date") and not self.initial.get("end_date"):
+            self.initial["end_date"] = self.initial.get("start_date")
+
+    class Meta:
+        model = WorkModeRequest
+        fields = ["mode", "scope", "start_date", "end_date", "reason"]
+
+    def clean(self):
+        cleaned = super().clean()
+
+        employee = self._employee
+        if employee is None:
+            raise ValidationError("Employee is required")
+
+        mode = cleaned.get("mode")
+        scope = cleaned.get("scope")
+        start_date: Optional[date] = cleaned.get("start_date")
+        end_date: Optional[date] = cleaned.get("end_date")
+
+        if not start_date:
+            return cleaned
+
+        # For IN/OUT, force single day.
+        if scope in (WorkModeRequestScope.IN, WorkModeRequestScope.OUT):
+            cleaned["end_date"] = start_date
+            end_date = start_date
+
+        if not end_date:
+            cleaned["end_date"] = start_date
+            end_date = start_date
+
+        # Central rules
+        validate_work_type_request(
+            employee=employee,
+            mode=mode,
+            scope=scope,
+            start_date=start_date,
+            end_date=end_date,
+            instance_id=None,
+        )
+
+        return cleaned
+
+
+class WorkTypeRequestUpdateForm(forms.Form):
+    """Limited edit: add attachments + update note."""
+
+    reason = forms.CharField(
+        label="Note",
+        required=False,
+        widget=forms.Textarea(attrs={"class": "oh-input w-100", "rows": 3}),
+    )
+
+    files = forms.FileField(
+        label="Attachments",
+        required=False,
+        widget=forms.ClearableFileInput(attrs={"multiple": True, "class": "oh-input w-100"}),
+    )
+
+
+class WorkTypeRequestRejectForm(forms.Form):
+    reason_code = forms.ChoiceField(
+        label="Reject Reason Code",
+        choices=WorkModeRequestRejectReasonCode.choices,
+        widget=forms.Select(attrs={"class": "oh-select w-100"}),
+    )
+    reason = forms.CharField(
+        label="Reject Note",
+        required=False,
+        widget=forms.Textarea(attrs={"class": "oh-input w-100", "rows": 3}),
+    )
