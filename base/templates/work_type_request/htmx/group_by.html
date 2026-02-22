@@ -1,4 +1,4 @@
-{% load horillafilters %} {% load basefilters %} {% load static %}
+{% load horillafilters %} {% load basefilters %} {% load static %} {% load worktype_display %}
 {% load i18n %} {% include 'filter_tags.html' %} {% if messages %}
 <div class="oh-wrapper">
   {% for message in messages %}
@@ -147,10 +147,10 @@
                     </div>
                   </div>
                   <div class="oh-sticky-table__td">
-                    {{work_type_request.work_type_id}}
+                    {{work_type_request.work_type_id|worktype_label}}
                   </div>
                   <div class="oh-sticky-table__td">
-                    {{work_type_request.previous_work_type_id}}
+                    {{work_type_request.previous_work_type_id|worktype_label}}
                   </div>
                   <div class="oh-sticky-table__td dateformat_changer">
                     {{work_type_request.requested_date}}
