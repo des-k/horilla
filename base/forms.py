@@ -32,6 +32,7 @@ from django.utils.translation import gettext as _
 from django.utils.translation import gettext_lazy as _trans
 
 from base.methods import reload_queryset
+from base.worktype_display import worktype_label, worktype_queryset_wfo_wfa
 from base.models import (
     Announcement,
     AnnouncementComment,
@@ -78,6 +79,13 @@ from horilla_widgets.widgets.horilla_multi_select_field import HorillaMultiSelec
 from horilla_widgets.widgets.select_widgets import HorillaMultiSelectWidget
 
 # your form here
+
+
+class _WorkTypeChoiceField(forms.ModelChoiceField):
+    """WorkType dropdown with consistent WFO/WFA labels."""
+
+    def label_from_instance(self, obj):
+        return worktype_label(obj)
 
 
 def validate_time_format(value):
@@ -704,8 +712,8 @@ class RotatingWorkTypeForm(ModelForm):
         work_type_counts = 0
 
         def create_work_type_field(work_type_key, required, initial=None):
-            self.fields[work_type_key] = forms.ModelChoiceField(
-                queryset=WorkType.objects.all(),
+            self.fields[work_type_key] = _WorkTypeChoiceField(
+                queryset=worktype_queryset_wfo_wfa(WorkType.objects.all()),
                 widget=forms.Select(
                     attrs={
                         "class": "oh-select oh-select-2 mb-3",
@@ -1871,6 +1879,26 @@ class WorkTypeRequestForm(ModelForm):
     """
     WorkTypeRequest model's form
     """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        # Employee module Work Type Request should only allow WFO/WFA.
+        # Attendance module has its own Work Type Request (WorkModeRequest) that can include ON_DUTY
+        # without touching base.WorkType.
+        if "work_type_id" in self.fields:
+            f = self.fields["work_type_id"]
+            if isinstance(f, forms.ModelChoiceField):
+                qs = worktype_queryset_wfo_wfa(getattr(f, "queryset", WorkType.objects.none()))
+                self.fields["work_type_id"] = _WorkTypeChoiceField(
+                    queryset=qs,
+                    required=f.required,
+                    label=f.label,
+                    help_text=f.help_text,
+                    widget=f.widget,
+                    empty_label=getattr(f, "empty_label", None),
+                    initial=f.initial,
+                )
 
     class Meta:
         """
