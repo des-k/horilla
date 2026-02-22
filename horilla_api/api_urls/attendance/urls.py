@@ -110,6 +110,54 @@ urlpatterns = [
         WorkModeRequestCancelView.as_view(),
         name="api-work-mode-request-cancel",
     ),
+
+
+    # Work type requests (alias for work-mode-request)
+    path(
+        "permission-check/work-type-request-approve",
+        WorkModeRequestApprovePermissionCheck.as_view(),
+    ),
+    path(
+        "work-type-request/",
+        WorkModeRequestView.as_view(),
+        name="api-work-type-request",
+    ),
+    path(
+        "work-type-request",
+        WorkModeRequestView.as_view(),
+        name="api-work-type-request-noslash",
+    ),
+    path(
+        "work-type-request/<int:pk>",
+        WorkModeRequestView.as_view(),
+        name="api-work-type-request-detail",
+    ),
+    path(
+        "work-type-request-approvals/",
+        WorkModeRequestApprovalsView.as_view(),
+        name="api-work-type-request-approvals",
+    ),
+    path(
+        "work-type-request-approvals",
+        WorkModeRequestApprovalsView.as_view(),
+        name="api-work-type-request-approvals-noslash",
+    ),
+    path(
+        "work-type-request-approve/<int:pk>",
+        WorkModeRequestApproveView.as_view(),
+        name="api-work-type-request-approve",
+    ),
+    path(
+        "work-type-request-reject/<int:pk>",
+        WorkModeRequestRejectView.as_view(),
+        name="api-work-type-request-reject",
+    ),
+    path(
+        "work-type-request-cancel/<int:pk>",
+        WorkModeRequestCancelView.as_view(),
+        name="api-work-type-request-cancel",
+    ),
+
     path("checking-in", CheckingStatus.as_view()),
     path("offline-employee-mail-send", OfflineEmployeeMailsend.as_view()),
     path("converted-mail-template", ConvertedMailTemplateConvert.as_view()),
