@@ -35,6 +35,7 @@ from django.utils.translation import gettext as _
 from django.utils.translation import gettext_lazy as trans
 
 from base.methods import eval_validate, reload_queryset
+from base.worktype_display import worktype_label, worktype_queryset_wfo_wfa
 from employee.models import (
     Actiontype,
     BonusPoint,
@@ -393,9 +394,27 @@ class EmployeeWorkInformationForm(ModelForm):
                         empty_label = _("---Choose {label}---").format(
                             label=translated_label
                         )
+
+                        # For employee default Work Type: only allow WFO/WFA and show friendly labels.
+                        qs = field.queryset
+                        if field.label == "Work Type" and field_name == "work_type":
+                            qs = worktype_queryset_wfo_wfa(qs)
+
+                            # Default selection for new employees: WFO.
+                            try:
+                                if not self.instance.pk and not getattr(self.instance, "work_type_id_id", None):
+                                    wfo_id = qs.filter(work_type__iexact="WFO").values_list("id", flat=True).first()
+                                    if wfo_id:
+                                        field.initial = wfo_id
+                            except Exception:
+                                pass
+
+                        base_choices = list(qs.values_list("id", f"{field_name}"))
+                        if field.label == "Work Type" and field_name == "work_type":
+                            base_choices = [(pk, worktype_label(val)) for pk, val in base_choices]
+
                         self.fields[label] = forms.ChoiceField(
-                            choices=[("", empty_label)]
-                            + list(field.queryset.values_list("id", f"{field_name}")),
+                            choices=[("", empty_label)] + base_choices,
                             required=field.required,
                             label=translated_label,
                             initial=field.initial,
