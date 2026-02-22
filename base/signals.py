@@ -19,6 +19,87 @@ from base.models import Announcement, PenaltyAccounts
 from horilla.methods import get_horilla_model_class
 
 
+def _ensure_wfo_wfa_worktypes(company=None):
+    """Ensure WorkType codes WFO/WFA exist and are attached to companies.
+
+    Fresh installs often create the first user via `createhorillauser` without
+    loading fixtures. Our employee forms intentionally filter WorkTypes to
+    only WFO/WFA, so if those rows don't exist the dropdown becomes empty.
+
+    We store short codes in DB (WFO/WFA) and render friendly labels in UI.
+    Attendance ON_DUTY is handled separately (string mode) and does not need
+    to exist as a base.WorkType.
+    """
+
+    try:
+        from base.models import Company, WorkType
+
+        # Use entire() to avoid any request/company middleware filtering.
+        qs = (
+            WorkType.objects.entire()
+            if hasattr(WorkType.objects, "entire")
+            else WorkType.objects
+        )
+
+        wfo = qs.filter(work_type__iexact="WFO").first()
+        if not wfo:
+            wfo = WorkType(work_type="WFO")
+            wfo.save()
+
+        wfa = qs.filter(work_type__iexact="WFA").first()
+        if not wfa:
+            wfa = WorkType(work_type="WFA")
+            wfa.save()
+
+        # Attach to companies so it appears under company-filtered UI.
+        if company is not None:
+            companies = [company]
+        else:
+            companies = list(Company.objects.all()) if Company else []
+
+        for c in companies:
+            try:
+                wfo.company_id.add(c)
+                wfa.company_id.add(c)
+            except Exception:
+                # If M2M isn't ready yet, ignore.
+                pass
+    except Exception:
+        # DB may not be ready during early migrate phases.
+        return
+
+
+@receiver(post_migrate)
+def seed_default_worktypes(sender, **kwargs):
+    """Seed WFO/WFA after base migrations."""
+
+    try:
+        if getattr(sender, "label", "") != "base":
+            return
+    except Exception:
+        return
+
+    _ensure_wfo_wfa_worktypes()
+
+
+@receiver(post_save)
+def seed_worktypes_on_company_create(sender, instance, created=False, **kwargs):
+    """When a new Company is created (e.g. createhorillauser), ensure WFO/WFA exist."""
+
+    try:
+        from base.models import Company
+
+        if sender is not Company:
+            return
+    except Exception:
+        return
+
+    if not created:
+        return
+
+    _ensure_wfo_wfa_worktypes(company=instance)
+
+
 @receiver(post_save, sender=PenaltyAccounts)
 def create_deduction_cutleave_from_penalty(sender, instance, created, **kwargs):
     """
