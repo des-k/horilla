@@ -618,6 +618,17 @@ def clock_in_attendance_and_activity(
         attendance.work_mode_request_id = work_mode_request
         att_updates.append("work_mode_request_id")
 
+    # Option B (per-punch audit)
+    if work_mode_request is not None and _has_model_field(Attendance, "in_related_work_type_request_id"):
+        attendance.in_related_work_type_request_id = getattr(work_mode_request, 'id', work_mode_request)
+        att_updates.append("in_related_work_type_request_id")
+    if _has_model_field(Attendance, "in_attendance_status"):
+        attendance.in_attendance_status = 'VALID'
+        att_updates.append("in_attendance_status")
+    if _has_model_field(Attendance, "in_attendance_reject_reason_code"):
+        attendance.in_attendance_reject_reason_code = None
+        att_updates.append("in_attendance_reject_reason_code")
+
     if is_presensi_only and _has_model_field(Attendance, "is_presensi_only"):
         if not getattr(attendance, "is_presensi_only", False):
             attendance.is_presensi_only = True
@@ -739,6 +750,17 @@ def clock_out_attendance_and_activity(
     if work_mode_request is not None and _has_model_field(Attendance, "work_mode_request_id"):
         attendance.work_mode_request_id = work_mode_request
         updates.append("work_mode_request_id")
+
+    # Option B (per-punch audit)
+    if work_mode_request is not None and _has_model_field(Attendance, "out_related_work_type_request_id"):
+        attendance.out_related_work_type_request_id = getattr(work_mode_request, "id", work_mode_request)
+        updates.append("out_related_work_type_request_id")
+    if _has_model_field(Attendance, "out_attendance_status"):
+        attendance.out_attendance_status = "VALID"
+        updates.append("out_attendance_status")
+    if _has_model_field(Attendance, "out_attendance_reject_reason_code"):
+        attendance.out_attendance_reject_reason_code = None
+        updates.append("out_attendance_reject_reason_code")
     if is_presensi_only and _has_model_field(Attendance, "is_presensi_only"):
         if not getattr(attendance, "is_presensi_only", False):
             attendance.is_presensi_only = True
@@ -833,6 +855,14 @@ def clock_out_attendance_and_activity(
 
     if work_mode_request is not None and _has_model_field(Attendance, "work_mode_request_id"):
         attendance.work_mode_request_id = work_mode_request
+
+    # Option B (per-punch audit)
+    if work_mode_request is not None and _has_model_field(Attendance, "out_related_work_type_request_id"):
+        attendance.out_related_work_type_request_id = getattr(work_mode_request, 'id', work_mode_request)
+    if _has_model_field(Attendance, "out_attendance_status"):
+        attendance.out_attendance_status = 'VALID'
+    if _has_model_field(Attendance, "out_attendance_reject_reason_code"):
+        attendance.out_attendance_reject_reason_code = None
 
     # Presence-only: keep hours 00:00
     if is_presensi_only or getattr(attendance, "is_presensi_only", False):
