@@ -34,7 +34,9 @@ SUBMENUS = [
         "redirect": reverse("shift-request-view"),
     },
     {
-        "menu": trans("Work Type Requests"),
+        # This is the built-in employee/base WorkTypeRequest feature (NOT attendance override).
+        # Rename to avoid confusion with Attendance → Work Type Requests (attendance.WorkModeRequest).
+        "menu": trans("Default Work Type Requests"),
         "redirect": reverse("work-type-request-view"),
     },
     {
@@ -43,7 +45,7 @@ SUBMENUS = [
         "accessibility": "employee.sidebar.rotating_shift_accessibility",
     },
     {
-        "menu": trans("Rotating Work Type Assign"),
+        "menu": trans("Work Type Schedule"),
         "redirect": reverse("rotating-work-type-assign"),
         "accessibility": "employee.sidebar.rotating_work_type_accessibility",
     },
