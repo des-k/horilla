@@ -81,7 +81,7 @@
                       class="oh-btn oh-btn--light-bkg"
                       title="{% trans 'View attachments' %}"
                       data-toggle="oh-modal-toggle" data-target="#objectDetailsModal"
-                      hx-get="{% url 'work-type-request-attachments' r.id %}"
+                      hx-get="{% url 'attendance-work-type-request-attachments' r.id %}"
                       hx-target="#objectDetailsModalTarget"
                       onclick="event.preventDefault()"
                     >
@@ -104,11 +104,11 @@
               <div class="d-flex gap-2 justify-content-end">
                 {% if r.status == 'pending' or r.status == 'waiting_for_approval' %}
                   <button class="oh-btn oh-btn--light-bkg" data-toggle="oh-modal-toggle" data-target="#objectUpdateModal"
-                    hx-get="{% url 'work-type-request-update' r.id %}" hx-target="#objectUpdateModalTarget" onclick="event.preventDefault()">
+                    hx-get="{% url 'attendance-work-type-request-update' r.id %}" hx-target="#objectUpdateModalTarget" onclick="event.preventDefault()">
                     <ion-icon name="attach-outline"></ion-icon>
                   </button>
 
-                  <button class="oh-btn oh-btn--danger" hx-post="{% url 'work-type-request-cancel' r.id %}" hx-target="#ohMessages" hx-swap="innerHTML" onclick="event.preventDefault()">
+                  <button class="oh-btn oh-btn--danger" hx-post="{% url 'attendance-work-type-request-cancel' r.id %}" hx-target="#ohMessages" hx-swap="innerHTML" onclick="event.preventDefault()">
                     <ion-icon name="close-circle-outline"></ion-icon>
                   </button>
                 {% else %}
