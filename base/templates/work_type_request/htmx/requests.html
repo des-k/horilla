@@ -2,6 +2,7 @@
 {% load horillafilters %}
 {% load static %}
 {% load i18n %}
+{% load worktype_display %}
 {% include 'filter_tags.html' %}
 
 {% if messages %}
@@ -97,8 +98,8 @@
                             <span class="oh-profile__name oh-text--dark">{{work_type_request.employee_id}}</span>
                         </div>
                     </div>
-                    <div class="oh-sticky-table__td" data-cell-index="1">{{work_type_request.work_type_id}}</div>
-                    <div class="oh-sticky-table__td" data-cell-index="2">{{work_type_request.previous_work_type_id}}
+                    <div class="oh-sticky-table__td" data-cell-index="1">{{work_type_request.work_type_id|worktype_label}}</div>
+                    <div class="oh-sticky-table__td" data-cell-index="2">{{work_type_request.previous_work_type_id|worktype_label}}
                     </div>
                     <div class="oh-sticky-table__td dateformat_changer" data-cell-index="3">
                         {{work_type_request.requested_date}}</div>
