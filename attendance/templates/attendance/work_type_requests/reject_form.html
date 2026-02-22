@@ -20,7 +20,7 @@
     </small>
   </div>
 
-  <form id="workTypeRequestRejectForm" hx-post="{% url 'work-type-request-reject' req.id %}" hx-target="#objectDetailsModalTarget" hx-swap="innerHTML">
+  <form id="workTypeRequestRejectForm" hx-post="{% url 'attendance-work-type-request-reject' req.id %}" hx-target="#objectDetailsModalTarget" hx-swap="innerHTML">
 
     <div class="oh-input-group">
       <label class="oh-label">{{ form.reason_code.label }}</label>
