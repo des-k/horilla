@@ -54,6 +54,7 @@ from base.backends import ConfiguredEmailBackend
 from base.methods import generate_pdf, is_reportingmanager, filtersubordinates, get_subordinate_employee_ids
 from base.models import HorillaMailTemplate
 from employee.filters import EmployeeFilter
+from employee.models import EmployeeWorkInformation
 
 from ...api_decorators.base.decorators import (
     manager_permission_required,
@@ -85,6 +86,24 @@ def query_dict(data):
         else:
             query_dict.update({key: value})
     return query_dict
+
+
+def _is_attendance_exempt_manager(employee) -> bool:
+    """Return True if employee should be excluded from IN/OUT attendance.
+
+    Custom rule requested: if an employee is a reporting manager of at least one
+    other employee, they act as "approver-only" and use an external attendance
+    system. They can still approve, but must not punch or be counted as missing.
+    """
+
+    try:
+        return (
+            EmployeeWorkInformation.objects.filter(reporting_manager_id=employee)
+            .only("id")
+            .exists()
+        )
+    except Exception:
+        return False
 
 
 # -----------------------------------------------------------------------------
@@ -505,6 +524,26 @@ class ClockInAPIView(APIView):
             return Response(
                 {"error": "Missing work information or employee details."},
                 status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if _is_attendance_exempt_manager(employee):
+            return Response(
+                {
+                    "error": "Attendance is disabled for reporting managers (approver-only).",
+                    "attendance_enabled": False,
+                    "attendance_exempt_reason": "REPORTING_MANAGER",
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        if _is_attendance_exempt_manager(employee):
+            return Response(
+                {
+                    "error": "Attendance is disabled for reporting managers (approver-only).",
+                    "attendance_enabled": False,
+                    "attendance_exempt_reason": "REPORTING_MANAGER",
+                },
+                status=status.HTTP_403_FORBIDDEN,
             )
 
         dt_now = _api_now(request)
@@ -2285,6 +2324,83 @@ class CheckingStatus(APIView):
         server_now_iso = dt_now.isoformat()
         server_time_hhmm = dt_now.strftime("%H:%M")
 
+        # Approver-only managers (reporting managers) are excluded from attendance.
+        # They can still approve requests, but must not clock-in/out in Horilla.
+        if _is_attendance_exempt_manager(employee):
+            attendance_date = dt_now.date()
+            return Response(
+                {
+                    "status": True,
+                    "attendance_enabled": False,
+                    "attendance_exempt_reason": "REPORTING_MANAGER",
+                    "message": "Attendance is disabled for reporting managers (approver-only).",
+
+                    "has_attendance": False,
+                    "attendance_date": attendance_date.strftime("%Y-%m-%d"),
+                    "first_check_in": None,
+                    "last_check_out": None,
+                    "late_by": None,
+                    "planned_check_out": None,
+                    "work_hours_below_minimum": False,
+                    "work_hours_shortfall": None,
+                    "checked_out_early": False,
+                    "worked_hours": "00:00",
+                    "worked_seconds": 0,
+                    "is_working": False,
+                    "missing_check_in": False,
+                    "check_in_cutoff_has_passed": False,
+                    "check_out_cutoff_has_passed": False,
+                    "can_clock_in": False,
+                    "can_clock_out": False,
+                    "can_update_clock_out": False,
+
+                    # Legacy work-mode
+                    "in_mode": AttendanceWorkMode.WFO,
+                    "out_mode": AttendanceWorkMode.WFO,
+
+                    # Work Type Request (Attendance) fields
+                    "in_work_type": AttendanceWorkMode.WFO,
+                    "out_work_type": AttendanceWorkMode.WFO,
+                    "in_work_type_source": "schedule",
+                    "out_work_type_source": "schedule",
+                    "in_work_type_request_id": None,
+                    "out_work_type_request_id": None,
+                    "in_work_type_request_status": None,
+                    "out_work_type_request_status": None,
+
+                    # Legacy request keys
+                    "in_request_status": None,
+                    "out_request_status": None,
+                    "in_request_scope": None,
+                    "out_request_scope": None,
+                    "in_work_mode_request_id": None,
+                    "out_work_mode_request_id": None,
+
+                    # Option B (audit fields)
+                    "in_attendance_status": None,
+                    "out_attendance_status": None,
+                    "in_attendance_reject_reason_code": None,
+                    "out_attendance_reject_reason_code": None,
+                    "in_related_work_type_request_id": None,
+                    "out_related_work_type_request_id": None,
+
+                    "shift_start": None,
+                    "shift_end": None,
+                    "grace_time": 0,
+                    "minimum_working_hour": None,
+                    "check_in_cutoff_time": None,
+                    "check_out_cutoff_time": None,
+                    "requires_photo_in": False,
+                    "requires_location_in": False,
+                    "requires_photo_out": False,
+                    "requires_location_out": False,
+                    "is_presensi_only": False,
+                    "server_now": server_now_iso,
+                    "server_time": server_time_hhmm,
+                },
+                status=status.HTTP_200_OK,
+            )
+
         # Resolve shift
         shift = None
         try:
@@ -2307,6 +2423,8 @@ class CheckingStatus(APIView):
             return Response(
                 {
                     "status": False,
+                    "attendance_enabled": True,
+                    "attendance_exempt_reason": None,
                     "has_attendance": False,
                     "attendance_date": attendance_date.strftime("%Y-%m-%d"),
                     "first_check_in": None,
@@ -2652,6 +2770,8 @@ class CheckingStatus(APIView):
 
         payload = {
             "status": (False if is_presensi_only else bool(is_working)),
+            "attendance_enabled": True,
+            "attendance_exempt_reason": None,
             "has_attendance": bool(attendance),
             "attendance_date": attendance_date.strftime("%Y-%m-%d"),
 
