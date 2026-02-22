@@ -72,7 +72,7 @@
                       class="oh-btn oh-btn--light-bkg"
                       title="{% trans 'View attachments' %}"
                       data-toggle="oh-modal-toggle" data-target="#objectDetailsModal"
-                      hx-get="{% url 'work-type-request-attachments' r.id %}"
+                      hx-get="{% url 'attendance-work-type-request-attachments' r.id %}"
                       hx-target="#objectDetailsModalTarget"
                       onclick="event.preventDefault()"
                     >
@@ -93,12 +93,12 @@
             </div>
             <div class="oh-sticky-table__td oh-sticky-table__right">
               <div class="d-flex gap-2 justify-content-end">
-                <button class="oh-btn oh-btn--success" hx-post="{% url 'work-type-request-approve' r.id %}" hx-target="#ohMessages" hx-swap="innerHTML" onclick="event.preventDefault()">
+                <button class="oh-btn oh-btn--success" hx-post="{% url 'attendance-work-type-request-approve' r.id %}" hx-target="#ohMessages" hx-swap="innerHTML" onclick="event.preventDefault()">
                   <ion-icon name="checkmark-circle-outline"></ion-icon>
                 </button>
 
                 <button class="oh-btn oh-btn--danger" data-toggle="oh-modal-toggle" data-target="#objectDetailsModal"
-                  hx-get="{% url 'work-type-request-reject' r.id %}" hx-target="#objectDetailsModalTarget" onclick="event.preventDefault()">
+                  hx-get="{% url 'attendance-work-type-request-reject' r.id %}" hx-target="#objectDetailsModalTarget" onclick="event.preventDefault()">
                   <ion-icon name="close-circle-outline"></ion-icon>
                 </button>
               </div>
