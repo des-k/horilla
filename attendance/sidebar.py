@@ -30,6 +30,11 @@ SUBMENUS = [
         "redirect": reverse("request-attendance-view"),
     },
     {
+        "menu": _("Work Type Requests"),
+        "redirect": reverse("work-type-request-view"),
+    },
+    
+    {
         "menu": _("Hour Account"),
         "redirect": reverse("attendance-overtime-view"),
         "accessibility": "attendance.sidebar.hour_account_accessibility",
