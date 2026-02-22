@@ -137,6 +137,22 @@ class EmployeeFilter(HorillaFilterSet):
         The method to filter out the not check-in yet employees
         """
 
+        # Customization: "Approver-only managers" (employees who are a reporting
+        # manager for at least one other employee) are excluded from attendance
+        # in/out calculations. They use a different attendance system.
+        try:
+            from employee.models import EmployeeWorkInformation
+
+            manager_ids = (
+                EmployeeWorkInformation.objects.exclude(reporting_manager_id__isnull=True)
+                .values_list("reporting_manager_id", flat=True)
+                .distinct()
+            )
+            queryset = queryset.exclude(id__in=manager_ids)
+        except Exception:
+            # Fail open (don't block filtering) if models aren't ready.
+            pass
+
         # Getting the queryset for those employees dont have any attendance for the date
         # in value.
 
@@ -156,6 +172,19 @@ class EmployeeFilter(HorillaFilterSet):
         """
         The method to filter out the not check-in yet employees
         """
+
+        # Exclude "approver-only managers" (see not_in_yet_func).
+        try:
+            from employee.models import EmployeeWorkInformation
+
+            manager_ids = (
+                EmployeeWorkInformation.objects.exclude(reporting_manager_id__isnull=True)
+                .values_list("reporting_manager_id", flat=True)
+                .distinct()
+            )
+            queryset = queryset.exclude(id__in=manager_ids)
+        except Exception:
+            pass
 
         # Getting the queryset for those employees dont have any attendance for the date
         # in value.
