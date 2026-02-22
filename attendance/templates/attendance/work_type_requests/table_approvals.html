@@ -1,0 +1,148 @@
+{% load i18n %}
+
+<div class="oh-card">
+  <div class="oh-card__body">
+
+<div class="oh-sticky-table oh-sticky-table--no-overflow">
+  <div class="oh-sticky-table__table">
+    <div class="oh-sticky-table__thead">
+      <div class="oh-sticky-table__tr">
+        <div class="oh-sticky-table__th">
+          <a href="?{{ sort_app_urls.employee }}" style="color: inherit; text-decoration: none;">
+            {% trans "Employee" %}
+            {% if sort_app == 'employee' %}{% if dir_app == 'asc' %} ▲{% else %} ▼{% endif %}{% endif %}
+          </a>
+        </div>
+        <div class="oh-sticky-table__th">
+          <a href="?{{ sort_app_urls.mode }}" style="color: inherit; text-decoration: none;">
+            {% trans "Work Type" %}
+            {% if sort_app == 'mode' %}{% if dir_app == 'asc' %} ▲{% else %} ▼{% endif %}{% endif %}
+          </a>
+        </div>
+        <div class="oh-sticky-table__th">
+          <a href="?{{ sort_app_urls.scope }}" style="color: inherit; text-decoration: none;">
+            {% trans "Scope" %}
+            {% if sort_app == 'scope' %}{% if dir_app == 'asc' %} ▲{% else %} ▼{% endif %}{% endif %}
+          </a>
+        </div>
+        <div class="oh-sticky-table__th">
+          <a href="?{{ sort_app_urls.start_date }}" style="color: inherit; text-decoration: none;">
+            {% trans "Date" %}
+            {% if sort_app == 'start_date' %}{% if dir_app == 'asc' %} ▲{% else %} ▼{% endif %}{% endif %}
+          </a>
+        </div>
+        <div class="oh-sticky-table__th">{% trans "Attachments" %}</div>
+        <div class="oh-sticky-table__th">{% trans "Note" %}</div>
+        <div class="oh-sticky-table__th oh-sticky-table__right">{% trans "Actions" %}</div>
+      </div>
+    </div>
+
+    <div class="oh-sticky-table__tbody">
+      {% if approvals %}
+        {% for r in approvals %}
+          <div class="oh-sticky-table__tr">
+            <div class="oh-sticky-table__td">
+              {% with full=r.employee_id.employee_first_name|add:" "|add:r.employee_id.employee_last_name %}
+                <span title="{{ full }}">{{ full|truncatechars:24 }}</span>
+              {% endwith %}
+            </div>
+            <div class="oh-sticky-table__td">
+              {% if r.mode == 'on_duty' %}
+                <span class="oh-badge oh-badge--info oh-badge--small oh-badge--round">ON DUTY</span>
+              {% else %}
+                <span class="oh-badge oh-badge--secondary oh-badge--small oh-badge--round">{{ r.mode|upper }}</span>
+              {% endif %}
+            </div>
+            <div class="oh-sticky-table__td">
+              <span class="oh-badge oh-badge--secondary oh-badge--small oh-badge--round">{{ r.scope|upper }}</span>
+            </div>
+            <div class="oh-sticky-table__td">
+              {% if r.end_date and r.end_date != r.start_date %}
+                {{ r.start_date }} → {{ r.end_date }}
+              {% else %}
+                {{ r.start_date }}
+              {% endif %}
+            </div>
+            <div class="oh-sticky-table__td">
+              {% with c=r.files.count %}
+                {% if c %}
+                  <div class="d-flex align-items-center gap-2">
+                    <span class="oh-badge oh-badge--secondary oh-badge--small oh-badge--round">{{ c }}</span>
+                    <button
+                      class="oh-btn oh-btn--light-bkg"
+                      title="{% trans 'View attachments' %}"
+                      data-toggle="oh-modal-toggle" data-target="#objectDetailsModal"
+                      hx-get="{% url 'work-type-request-attachments' r.id %}"
+                      hx-target="#objectDetailsModalTarget"
+                      onclick="event.preventDefault()"
+                    >
+                      <ion-icon name="document-attach-outline"></ion-icon>
+                    </button>
+                  </div>
+                {% else %}
+                  <span class="text-muted">-</span>
+                {% endif %}
+              {% endwith %}
+            </div>
+            <div class="oh-sticky-table__td">
+              {% if r.reason %}
+                <span title="{{ r.reason }}">{{ r.reason|truncatechars:40 }}</span>
+              {% else %}
+                <span class="text-muted">-</span>
+              {% endif %}
+            </div>
+            <div class="oh-sticky-table__td oh-sticky-table__right">
+              <div class="d-flex gap-2 justify-content-end">
+                <button class="oh-btn oh-btn--success" hx-post="{% url 'work-type-request-approve' r.id %}" hx-target="#ohMessages" hx-swap="innerHTML" onclick="event.preventDefault()">
+                  <ion-icon name="checkmark-circle-outline"></ion-icon>
+                </button>
+
+                <button class="oh-btn oh-btn--danger" data-toggle="oh-modal-toggle" data-target="#objectDetailsModal"
+                  hx-get="{% url 'work-type-request-reject' r.id %}" hx-target="#objectDetailsModalTarget" onclick="event.preventDefault()">
+                  <ion-icon name="close-circle-outline"></ion-icon>
+                </button>
+              </div>
+            </div>
+          </div>
+        {% endfor %}
+      {% else %}
+        <div class="oh-sticky-table__tr">
+          <div class="oh-sticky-table__td" style="grid-column: 1 / -1; text-align:center; padding: 18px;">
+            {% trans "There are no requests to display" %}
+          </div>
+        </div>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+{% if approvals.paginator.num_pages > 1 %}
+  <nav class="oh-pagination mt-3" aria-label="Pagination">
+    <ul class="oh-pagination__list">
+      {% if approvals.has_previous %}
+        <li class="oh-pagination__item oh-pagination__item--wide">
+          <a class="oh-pagination__link" href="?{% if pd_app %}{{ pd_app }}&{% endif %}page_app=1">{% trans "First" %}</a>
+        </li>
+        <li class="oh-pagination__item oh-pagination__item--wide">
+          <a class="oh-pagination__link" href="?{% if pd_app %}{{ pd_app }}&{% endif %}page_app={{ approvals.previous_page_number }}">{% trans "Previous" %}</a>
+        </li>
+      {% endif %}
+
+      <li class="oh-pagination__item">
+        <span class="oh-pagination__link">{{ approvals.number }} / {{ approvals.paginator.num_pages }}</span>
+      </li>
+
+      {% if approvals.has_next %}
+        <li class="oh-pagination__item oh-pagination__item--wide">
+          <a class="oh-pagination__link" href="?{% if pd_app %}{{ pd_app }}&{% endif %}page_app={{ approvals.next_page_number }}">{% trans "Next" %}</a>
+        </li>
+        <li class="oh-pagination__item oh-pagination__item--wide">
+          <a class="oh-pagination__link" href="?{% if pd_app %}{{ pd_app }}&{% endif %}page_app={{ approvals.paginator.num_pages }}">{% trans "Last" %}</a>
+        </li>
+      {% endif %}
+    </ul>
+  </nav>
+{% endif %}
+
+  </div>
+</div>

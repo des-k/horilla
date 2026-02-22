@@ -1,0 +1,161 @@
+{% load i18n %}
+
+<div class="oh-card">
+  <div class="oh-card__body">
+
+<div class="oh-sticky-table oh-sticky-table--no-overflow">
+  <div class="oh-sticky-table__table">
+    <div class="oh-sticky-table__thead">
+      <div class="oh-sticky-table__tr">
+        <div class="oh-sticky-table__th">
+          <a href="?{{ sort_my_urls.mode }}" style="color: inherit; text-decoration: none;">
+            {% trans "Work Type" %}
+            {% if sort_my == 'mode' %}{% if dir_my == 'asc' %} ▲{% else %} ▼{% endif %}{% endif %}
+          </a>
+        </div>
+        <div class="oh-sticky-table__th">
+          <a href="?{{ sort_my_urls.scope }}" style="color: inherit; text-decoration: none;">
+            {% trans "Scope" %}
+            {% if sort_my == 'scope' %}{% if dir_my == 'asc' %} ▲{% else %} ▼{% endif %}{% endif %}
+          </a>
+        </div>
+        <div class="oh-sticky-table__th">
+          <a href="?{{ sort_my_urls.start_date }}" style="color: inherit; text-decoration: none;">
+            {% trans "Date" %}
+            {% if sort_my == 'start_date' %}{% if dir_my == 'asc' %} ▲{% else %} ▼{% endif %}{% endif %}
+          </a>
+        </div>
+        <div class="oh-sticky-table__th">
+          <a href="?{{ sort_my_urls.status }}" style="color: inherit; text-decoration: none;">
+            {% trans "Status" %}
+            {% if sort_my == 'status' %}{% if dir_my == 'asc' %} ▲{% else %} ▼{% endif %}{% endif %}
+          </a>
+        </div>
+        <div class="oh-sticky-table__th">{% trans "Attachments" %}</div>
+        <div class="oh-sticky-table__th">{% trans "Note" %}</div>
+        <div class="oh-sticky-table__th oh-sticky-table__right">{% trans "Actions" %}</div>
+      </div>
+    </div>
+
+    <div class="oh-sticky-table__tbody">
+      {% if my_requests %}
+        {% for r in my_requests %}
+          <div class="oh-sticky-table__tr">
+            <div class="oh-sticky-table__td">
+              {% if r.mode == 'on_duty' %}
+                <span class="oh-badge oh-badge--info oh-badge--small oh-badge--round">ON DUTY</span>
+              {% else %}
+                <span class="oh-badge oh-badge--secondary oh-badge--small oh-badge--round">{{ r.mode|upper }}</span>
+              {% endif %}
+            </div>
+            <div class="oh-sticky-table__td">
+              <span class="oh-badge oh-badge--secondary oh-badge--small oh-badge--round">{{ r.scope|upper }}</span>
+            </div>
+            <div class="oh-sticky-table__td">
+              {% if r.end_date and r.end_date != r.start_date %}
+                {{ r.start_date }} → {{ r.end_date }}
+              {% else %}
+                {{ r.start_date }}
+              {% endif %}
+            </div>
+            <div class="oh-sticky-table__td">
+              {% if r.status == 'approved' %}
+                <span class="oh-badge oh-badge--info oh-badge--small oh-badge--round">{{ r.status|upper }}</span>
+              {% elif r.status == 'waiting_for_approval' %}
+                <span class="oh-badge oh-badge--info oh-badge--small oh-badge--round">WAITING</span>
+              {% elif r.status == 'rejected' %}
+                <span class="oh-badge oh-badge--danger oh-badge--small oh-badge--round">{{ r.status|upper }}</span>
+                {% if r.reason_code %}<div class="text-muted" style="font-size: 12px;">{{ r.reason_code }}</div>{% endif %}
+              {% elif r.status == 'canceled' %}
+                <span class="oh-badge oh-badge--secondary oh-badge--small oh-badge--round">{{ r.status|upper }}</span>
+              {% else %}
+                <span class="oh-badge oh-badge--secondary oh-badge--small oh-badge--round">PENDING</span>
+              {% endif %}
+            </div>
+            <div class="oh-sticky-table__td">
+              {% with c=r.files.count %}
+                {% if c %}
+                  <div class="d-flex align-items-center gap-2">
+                    <span class="oh-badge oh-badge--secondary oh-badge--small oh-badge--round">{{ c }}</span>
+                    <button
+                      class="oh-btn oh-btn--light-bkg"
+                      title="{% trans 'View attachments' %}"
+                      data-toggle="oh-modal-toggle" data-target="#objectDetailsModal"
+                      hx-get="{% url 'work-type-request-attachments' r.id %}"
+                      hx-target="#objectDetailsModalTarget"
+                      onclick="event.preventDefault()"
+                    >
+                      <ion-icon name="document-attach-outline"></ion-icon>
+                    </button>
+                  </div>
+                {% else %}
+                  <span class="text-muted">-</span>
+                {% endif %}
+              {% endwith %}
+            </div>
+            <div class="oh-sticky-table__td">
+              {% if r.reason %}
+                <span title="{{ r.reason }}">{{ r.reason|truncatechars:40 }}</span>
+              {% else %}
+                <span class="text-muted">-</span>
+              {% endif %}
+            </div>
+            <div class="oh-sticky-table__td oh-sticky-table__right">
+              <div class="d-flex gap-2 justify-content-end">
+                {% if r.status == 'pending' or r.status == 'waiting_for_approval' %}
+                  <button class="oh-btn oh-btn--light-bkg" data-toggle="oh-modal-toggle" data-target="#objectUpdateModal"
+                    hx-get="{% url 'work-type-request-update' r.id %}" hx-target="#objectUpdateModalTarget" onclick="event.preventDefault()">
+                    <ion-icon name="attach-outline"></ion-icon>
+                  </button>
+
+                  <button class="oh-btn oh-btn--danger" hx-post="{% url 'work-type-request-cancel' r.id %}" hx-target="#ohMessages" hx-swap="innerHTML" onclick="event.preventDefault()">
+                    <ion-icon name="close-circle-outline"></ion-icon>
+                  </button>
+                {% else %}
+                  <span class="text-muted">-</span>
+                {% endif %}
+              </div>
+            </div>
+          </div>
+        {% endfor %}
+      {% else %}
+        <div class="oh-sticky-table__tr">
+          <div class="oh-sticky-table__td" style="grid-column: 1 / -1; text-align:center; padding: 18px;">
+            {% trans "There are no requests to display" %}
+          </div>
+        </div>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+{% if my_requests.paginator.num_pages > 1 %}
+  <nav class="oh-pagination mt-3" aria-label="Pagination">
+    <ul class="oh-pagination__list">
+      {% if my_requests.has_previous %}
+        <li class="oh-pagination__item oh-pagination__item--wide">
+          <a class="oh-pagination__link" href="?{% if pd_my %}{{ pd_my }}&{% endif %}page_my=1">{% trans "First" %}</a>
+        </li>
+        <li class="oh-pagination__item oh-pagination__item--wide">
+          <a class="oh-pagination__link" href="?{% if pd_my %}{{ pd_my }}&{% endif %}page_my={{ my_requests.previous_page_number }}">{% trans "Previous" %}</a>
+        </li>
+      {% endif %}
+
+      <li class="oh-pagination__item">
+        <span class="oh-pagination__link">{{ my_requests.number }} / {{ my_requests.paginator.num_pages }}</span>
+      </li>
+
+      {% if my_requests.has_next %}
+        <li class="oh-pagination__item oh-pagination__item--wide">
+          <a class="oh-pagination__link" href="?{% if pd_my %}{{ pd_my }}&{% endif %}page_my={{ my_requests.next_page_number }}">{% trans "Next" %}</a>
+        </li>
+        <li class="oh-pagination__item oh-pagination__item--wide">
+          <a class="oh-pagination__link" href="?{% if pd_my %}{{ pd_my }}&{% endif %}page_my={{ my_requests.paginator.num_pages }}">{% trans "Last" %}</a>
+        </li>
+      {% endif %}
+    </ul>
+  </nav>
+{% endif %}
+
+  </div>
+</div>

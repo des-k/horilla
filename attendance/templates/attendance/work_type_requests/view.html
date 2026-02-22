@@ -1,0 +1,56 @@
+{% extends 'index.html' %}
+{% load i18n %}
+{% load static %}
+
+{% block content %}
+<div id="ohMessages"></div>
+
+{% include 'attendance/work_type_requests/nav.html' %}
+
+<div class="oh-wrapper">
+  <div class="oh-tabs">
+    <ul class="oh-tabs__tablist">
+      <li class="oh-tabs__tab oh-tabs__tab--active" data-target="#tab_my">
+        <span class="oh-tabs__input-badge-container">
+          <span class="oh-badge oh-badge--secondary oh-badge--small oh-badge--round mr-1">{{ my_requests.paginator.count|default:0 }}</span>
+          {% trans "My Requests" %}
+        </span>
+      </li>
+      {% if can_approve %}
+        <li class="oh-tabs__tab" data-target="#tab_app">
+          <span class="oh-tabs__input-badge-container">
+            <span class="oh-badge oh-badge--secondary oh-badge--small oh-badge--round mr-1">{{ approvals.paginator.count|default:0 }}</span>
+            {% trans "Approvals" %}
+          </span>
+        </li>
+      {% endif %}
+    </ul>
+
+    <div id="tab_my" class="oh-tabs__content oh-tabs__content--active">
+      {% include 'attendance/work_type_requests/table_my.html' %}
+    </div>
+
+    {% if can_approve %}
+      <div id="tab_app" class="oh-tabs__content">
+        {% include 'attendance/work_type_requests/table_approvals.html' %}
+      </div>
+    {% endif %}
+  </div>
+</div>
+
+<script>
+  // basic tabs switching (similar to other pages)
+  document.querySelectorAll('.oh-tabs__tab').forEach(function(tab){
+    tab.addEventListener('click', function(e){
+      e.preventDefault();
+      document.querySelectorAll('.oh-tabs__tab').forEach(t => t.classList.remove('oh-tabs__tab--active'));
+      tab.classList.add('oh-tabs__tab--active');
+
+      document.querySelectorAll('.oh-tabs__content').forEach(c => c.classList.remove('oh-tabs__content--active'));
+      const target = tab.getAttribute('data-target');
+      const el = document.querySelector(target);
+      if (el) el.classList.add('oh-tabs__content--active');
+    });
+  });
+</script>
+{% endblock content %}

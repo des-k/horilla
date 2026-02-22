@@ -1,0 +1,44 @@
+{% load i18n %}
+
+<div class="oh-modal__dialog-header">
+  <h2 class="oh-modal__dialog-title" id="objectDetailsModalLabel">
+    {% trans "Attachments" %} — {% trans "Work Type Request" %} (#{{ req.id }})
+  </h2>
+  <button class="oh-modal__close" aria-label="Close">
+    <ion-icon name="close-outline"></ion-icon>
+  </button>
+</div>
+
+<div class="oh-modal__dialog-body">
+  <div class="mb-2">
+    <small class="text-muted">
+      <strong>{% trans "Employee" %}:</strong> {{ req.employee_id.employee_first_name }} {{ req.employee_id.employee_last_name }}<br />
+      <strong>{% trans "Work Type" %}:</strong> {% if req.mode == 'on_duty' %}ON DUTY{% else %}{{ req.mode|upper }}{% endif %}<br />
+      <strong>{% trans "Scope" %}:</strong> {{ req.scope|upper }}<br />
+      <strong>{% trans "Date" %}:</strong>
+      {% if req.end_date and req.end_date != req.start_date %}{{ req.start_date }} → {{ req.end_date }}{% else %}{{ req.start_date }}{% endif %}
+    </small>
+  </div>
+
+  {% if files %}
+    <div class="oh-card">
+      <div class="oh-card__body">
+        <ul class="list-unstyled mb-0">
+          {% for f in files %}
+            <li class="d-flex align-items-center justify-content-between py-2" style="border-bottom: 1px solid rgba(0,0,0,.06);">
+              <div class="d-flex align-items-center gap-2">
+                <ion-icon name="document-attach-outline"></ion-icon>
+                <span class="text-truncate" style="max-width: 360px;">{{ f.file.name|default:_('Attachment') }}</span>
+              </div>
+              <a class="oh-btn oh-btn--light-bkg" href="{{ f.file.url }}" target="_blank" rel="noopener">
+                <ion-icon name="open-outline" class="me-1"></ion-icon>{% trans "Open" %}
+              </a>
+            </li>
+          {% endfor %}
+        </ul>
+      </div>
+    </div>
+  {% else %}
+    <div class="text-muted">{% trans "No attachments." %}</div>
+  {% endif %}
+</div>

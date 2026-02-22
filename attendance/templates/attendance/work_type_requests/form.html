@@ -1,0 +1,102 @@
+{% load i18n %}
+
+<div class="oh-modal__dialog-header">
+  <h2 class="oh-modal__dialog-title" id="objectCreateModalLabel">{% trans "Create Work Type Request" %}</h2>
+  <button class="oh-modal__close" aria-label="Close">
+    <ion-icon name="close-outline"></ion-icon>
+  </button>
+</div>
+
+<div class="oh-modal__dialog-body">
+  <form id="workTypeRequestCreateForm" hx-post="{% url 'work-type-request-create' %}" hx-target="#objectCreateModalTarget" hx-swap="innerHTML" enctype="multipart/form-data">
+
+    <div class="row">
+      <div class="col-md-6">
+        <div class="oh-input-group">
+          <label class="oh-label">{{ form.mode.label }}</label>
+          {{ form.mode }}
+          {% if form.mode.errors %}<small class="text-danger">{{ form.mode.errors|join:", " }}</small>{% endif %}
+        </div>
+      </div>
+
+      <div class="col-md-6">
+        <div class="oh-input-group">
+          <label class="oh-label">{{ form.scope.label }}</label>
+          {{ form.scope }}
+          {% if form.scope.errors %}<small class="text-danger">{{ form.scope.errors|join:", " }}</small>{% endif %}
+        </div>
+      </div>
+
+      <div class="col-md-6">
+        <div class="oh-input-group">
+          <label class="oh-label">{{ form.start_date.label }}</label>
+          {{ form.start_date }}
+          {% if form.start_date.errors %}<small class="text-danger">{{ form.start_date.errors|join:", " }}</small>{% endif %}
+        </div>
+      </div>
+
+      <div class="col-md-6" id="endDateWrap">
+        <div class="oh-input-group">
+          <label class="oh-label">{{ form.end_date.label }}</label>
+          {{ form.end_date }}
+          {% if form.end_date.errors %}<small class="text-danger">{{ form.end_date.errors|join:", " }}</small>{% endif %}
+        </div>
+      </div>
+
+      <div class="col-md-12">
+        <div class="oh-input-group">
+          <label class="oh-label">{{ form.reason.label }}</label>
+          {{ form.reason }}
+          {% if form.reason.errors %}<small class="text-danger">{{ form.reason.errors|join:", " }}</small>{% endif %}
+        </div>
+      </div>
+
+      <div class="col-md-12">
+        <div class="oh-input-group">
+          <label class="oh-label">{{ form.files.label }}</label>
+          {{ form.files }}
+          {% if form.files.errors %}<small class="text-danger">{{ form.files.errors|join:", " }}</small>{% endif %}
+          <small class="text-muted">
+            {% trans "ON DUTY requires an attachment (assignment letter), but you may submit without it and upload later while status is PENDING." %}
+          </small>
+        </div>
+      </div>
+
+      {% if form.non_field_errors %}
+        <div class="col-md-12">
+          <div class="alert alert-danger mt-2">{{ form.non_field_errors }}</div>
+        </div>
+      {% endif %}
+    </div>
+
+    <div class="d-flex justify-content-end mt-2">
+      <button type="submit" class="oh-btn oh-btn--secondary">
+        <ion-icon name="save-outline" class="me-1"></ion-icon>{% trans "Submit" %}
+      </button>
+    </div>
+
+  </form>
+</div>
+
+<script>
+  (function() {
+    const scope = document.querySelector('#id_scope');
+    const start = document.querySelector('#id_start_date');
+    const end = document.querySelector('#id_end_date');
+    const endWrap = document.querySelector('#endDateWrap');
+
+    function syncEndVisibility(){
+      const v = (scope && scope.value) ? scope.value.toLowerCase() : 'full';
+      if (v === 'in' || v === 'out') {
+        if (endWrap) endWrap.style.display = 'none';
+        if (end && start) end.value = start.value;
+      } else {
+        if (endWrap) endWrap.style.display = '';
+      }
+    }
+
+    if (scope) scope.addEventListener('change', syncEndVisibility);
+    if (start) start.addEventListener('change', syncEndVisibility);
+    syncEndVisibility();
+  })();
+</script>

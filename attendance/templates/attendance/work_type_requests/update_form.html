@@ -1,0 +1,47 @@
+{% load i18n %}
+
+<div class="oh-modal__dialog-header">
+  <h2 class="oh-modal__dialog-title" id="objectUpdateModalLabel">
+    {% trans "Update Work Type Request" %} (#{{ req.id }})
+  </h2>
+  <button class="oh-modal__close" aria-label="Close">
+    <ion-icon name="close-outline"></ion-icon>
+  </button>
+</div>
+
+<div class="oh-modal__dialog-body">
+  <div class="mb-2">
+    <small class="text-muted">
+      {% trans "Allowed edit: add attachments and update note." %}
+      <br />
+      <strong>{% trans "Current status" %}:</strong> {{ req.status|upper }}
+    </small>
+  </div>
+
+  <form id="workTypeRequestUpdateForm" hx-post="{% url 'work-type-request-update' req.id %}" hx-target="#objectUpdateModalTarget" hx-swap="innerHTML" enctype="multipart/form-data">
+
+    <div class="oh-input-group">
+      <label class="oh-label">{{ form.reason.label }}</label>
+      {{ form.reason }}
+      {% if form.reason.errors %}<small class="text-danger">{{ form.reason.errors|join:", " }}</small>{% endif %}
+    </div>
+
+    <div class="oh-input-group">
+      <label class="oh-label">{{ form.files.label }}</label>
+      {{ form.files }}
+      {% if form.files.errors %}<small class="text-danger">{{ form.files.errors|join:", " }}</small>{% endif %}
+      <small class="text-muted">{% trans "Upload one or more files." %}</small>
+    </div>
+
+    {% if form.non_field_errors %}
+      <div class="alert alert-danger mt-2">{{ form.non_field_errors }}</div>
+    {% endif %}
+
+    <div class="d-flex justify-content-end mt-2">
+      <button type="submit" class="oh-btn oh-btn--secondary">
+        <ion-icon name="save-outline" class="me-1"></ion-icon>{% trans "Save" %}
+      </button>
+    </div>
+
+  </form>
+</div>

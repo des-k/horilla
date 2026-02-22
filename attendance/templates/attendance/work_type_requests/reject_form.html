@@ -1,0 +1,47 @@
+{% load i18n %}
+
+<div class="oh-modal__dialog-header">
+  <h2 class="oh-modal__dialog-title" id="objectDetailsModalLabel">
+    {% trans "Reject Work Type Request" %} (#{{ req.id }})
+  </h2>
+  <button class="oh-modal__close" aria-label="Close">
+    <ion-icon name="close-outline"></ion-icon>
+  </button>
+</div>
+
+<div class="oh-modal__dialog-body">
+  <div class="mb-2">
+    <small class="text-muted">
+      <strong>{% trans "Employee" %}:</strong> {{ req.employee_id.employee_first_name }} {{ req.employee_id.employee_last_name }}<br />
+      <strong>{% trans "Work Type" %}:</strong> {% if req.mode == 'on_duty' %}ON DUTY{% else %}{{ req.mode|upper }}{% endif %}<br />
+      <strong>{% trans "Scope" %}:</strong> {{ req.scope|upper }}<br />
+      <strong>{% trans "Date" %}:</strong>
+      {% if req.end_date and req.end_date != req.start_date %}{{ req.start_date }} → {{ req.end_date }}{% else %}{{ req.start_date }}{% endif %}
+    </small>
+  </div>
+
+  <form id="workTypeRequestRejectForm" hx-post="{% url 'work-type-request-reject' req.id %}" hx-target="#objectDetailsModalTarget" hx-swap="innerHTML">
+
+    <div class="oh-input-group">
+      <label class="oh-label">{{ form.reason_code.label }}</label>
+      {{ form.reason_code }}
+      {% if form.reason_code.errors %}<small class="text-danger">{{ form.reason_code.errors|join:", " }}</small>{% endif %}
+    </div>
+
+    <div class="oh-input-group">
+      <label class="oh-label">{{ form.reason.label }}</label>
+      {{ form.reason }}
+      {% if form.reason.errors %}<small class="text-danger">{{ form.reason.errors|join:", " }}</small>{% endif %}
+    </div>
+
+    {% if form.non_field_errors %}
+      <div class="alert alert-danger mt-2">{{ form.non_field_errors }}</div>
+    {% endif %}
+
+    <div class="d-flex justify-content-end mt-2">
+      <button type="submit" class="oh-btn oh-btn--danger">
+        <ion-icon name="close-circle-outline" class="me-1"></ion-icon>{% trans "Reject" %}
+      </button>
+    </div>
+  </form>
+</div>
