@@ -5,7 +5,7 @@ from django import template
 from django.conf import settings
 from django.core.mail import EmailMessage
 from django.db import transaction
-from django.db.models import Case, CharField, F, Q, Value, When
+from django.db.models import Case, CharField, F, Value, When
 from django.http import QueryDict
 from django.shortcuts import get_object_or_404
 from django.utils import timezone as dj_timezone
@@ -269,101 +269,6 @@ def _normalize_none(value):
     if isinstance(value, str) and value.strip() in ("", "None", "null", "NULL"):
         return None
     return value
-
-
-def _auto_reject_stale_wfa_waiting_for_queryset(qs, *, request, now_dt: datetime) -> None:
-    """Auto-reject stale WFA WAITING_FOR_APPROVAL requests.
-
-    Why:
-    - A WFA request must be rejected automatically after the relevant cutoff passes.
-    - If nobody opens CheckingStatus on that attendance_date, the request could stay WAITING forever.
-    - List/Approvals endpoints must therefore enforce auto-reject too.
-
-    Implementation:
-    - For each (employee, request.start_date) pair, compute that day's cutoff(s) from shift schedule,
-      then call `auto_reject_wfa_waiting_for_date(...)` which handles IN/OUT/FULL and applies Option-B audit.
-    """
-    try:
-        from employee.models import Employee
-    except Exception:
-        return
-
-    try:
-        today = now_dt.date()
-        qs = qs.filter(
-            mode=AttendanceWorkMode.WFA,
-            status=WorkModeRequestStatus.WAITING_FOR_APPROVAL,
-            start_date__lte=today,
-        )
-        pairs = list(qs.values_list("employee_id_id", "start_date").distinct())
-        if not pairs:
-            return
-
-        emp_ids = sorted({eid for (eid, _d) in pairs if eid})
-        emp_map = {
-            e.id: e
-            for e in Employee.objects.filter(id__in=emp_ids).select_related("employee_work_info")
-        }
-
-        for eid, target_date in pairs:
-            emp = emp_map.get(eid)
-            if not emp:
-                continue
-
-            shift = None
-            try:
-                shift = emp.employee_work_info.shift_id
-            except Exception:
-                shift = None
-            if not shift:
-                continue
-
-            weekday = target_date.strftime("%A").lower()
-
-            # Prefer explicit schedule row for that weekday when available.
-            day_obj = None
-            try:
-                schedule = cio.EmployeeShiftSchedule.objects.filter(
-                    shift_id=shift, day__day=weekday
-                ).select_related("day").first()
-                day_obj = schedule.day if schedule else None
-            except Exception:
-                day_obj = None
-
-            if not day_obj:
-                day_obj = EmployeeShiftDay.objects.filter(day=weekday).first()
-            if not day_obj:
-                continue
-
-            try:
-                _min_hour, start_sec, end_sec = shift_schedule_today(day=day_obj, shift=shift)
-            except Exception:
-                start_sec, end_sec = 0, 0
-
-            try:
-                rules = cio.get_shift_rules(
-                    target_date,
-                    shift,
-                    day_obj,
-                    start_time_sec=start_sec,
-                    end_time_sec=end_sec,
-                )
-            except Exception:
-                rules = {"cutoff_in_dt": None, "cutoff_out_dt": None}
-
-            cutoff_in_dt = _coerce_datetime_like(rules.get("cutoff_in_dt"), now_dt)
-            cutoff_out_dt = _coerce_datetime_like(rules.get("cutoff_out_dt"), now_dt)
-
-            auto_reject_wfa_waiting_for_date(
-                employee=emp,
-                target_date=target_date,
-                now_dt=now_dt,
-                cutoff_in_dt=cutoff_in_dt,
-                cutoff_out_dt=cutoff_out_dt,
-            )
-    except Exception:
-        # Do not break listing endpoints due to auto-reject best-effort logic
-        return
 
 
 def _format_minimum_hour(value):
@@ -1106,6 +1011,14 @@ class ClockOutAPIView(APIView):
                 "out_related_work_type_request_id": getattr(attendance, "out_related_work_type_request_id", None) if attendance else None,
 
                 "missing_check_in": bool(missing_check_in),
+
+            # Option B (per punch audit status)
+            "in_attendance_status": getattr(attendance, "in_attendance_status", None) if attendance else None,
+            "out_attendance_status": getattr(attendance, "out_attendance_status", None) if attendance else None,
+            "in_attendance_reject_reason_code": getattr(attendance, "in_attendance_reject_reason_code", None) if attendance else None,
+            "out_attendance_reject_reason_code": getattr(attendance, "out_attendance_reject_reason_code", None) if attendance else None,
+            "in_related_work_type_request_id": getattr(attendance, "in_related_work_type_request_id", None) if attendance else None,
+            "out_related_work_type_request_id": getattr(attendance, "out_related_work_type_request_id", None) if attendance else None,
                 "late_by": late_by_hhmm,
                 "planned_check_out": planned_check_out_hhmm,
                 "work_hours_below_minimum": bool(work_hours_below_minimum),
@@ -1750,34 +1663,6 @@ class WorkModeRequestView(APIView):
         if scope_q:
             qs = qs.filter(scope=scope_q)
 
-        # Keep list consistent with FINAL spec: auto-reject stale WFA WAITING requests (best-effort)
-        try:
-            now_dt = _api_now(request)
-            _auto_reject_stale_wfa_waiting_for_queryset(qs, request=request, now_dt=now_dt)
-        except Exception:
-            pass
-
-        # Optional search (used by mobile)
-        search = (request.GET.get("search") or "").strip()
-        if search:
-            q = Q(mode__icontains=search) | Q(scope__icontains=search) | Q(status__icontains=search)
-            q |= Q(reason__icontains=search) | Q(reason_code__icontains=search)
-            q |= Q(employee_id__employee_first_name__icontains=search) | Q(employee_id__employee_last_name__icontains=search)
-
-            if search.isdigit():
-                try:
-                    q |= Q(id=int(search)) | Q(employee_id__id=int(search))
-                except Exception:
-                    pass
-            else:
-                try:
-                    d = datetime.strptime(search, "%Y-%m-%d").date()
-                    q |= Q(start_date=d) | Q(end_date=d)
-                except Exception:
-                    pass
-
-            qs = qs.filter(q)
-
         pagenation = PageNumberPagination()
         page = pagenation.paginate_queryset(qs.order_by("-id"), request)
         serializer = self.serializer_class(page, many=True)
@@ -1931,11 +1816,60 @@ class WorkModeRequestApprovalsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        # Ensure stale WFA WAITING are auto-rejected for *today* to keep approvals clean.
         now_dt = _api_now(request)
+        today = now_dt.date()
+        try:
+            # auto reject for current user and subordinates (lightweight per employee)
+            emp_ids = []
+            if request.user.has_perm("attendance.change_workmoderequest"):
+                emp_ids = list(WorkModeRequest.objects.filter(
+                    mode=AttendanceWorkMode.WFA,
+                    status=WorkModeRequestStatus.WAITING_FOR_APPROVAL,
+                    start_date__lte=today,
+                    end_date__gte=today,
+                ).values_list("employee_id", flat=True).distinct())
+            else:
+                emp_ids = get_subordinate_employee_ids(request, nested=True) or []
+
+            from employee.models import Employee
+            for eid in emp_ids:
+                emp = Employee.objects.filter(id=eid).first()
+                if not emp:
+                    continue
+                shift = None
+                try:
+                    shift = emp.employee_work_info.shift_id
+                except Exception:
+                    shift = None
+                if not shift:
+                    continue
+                day = EmployeeShiftDay.objects.filter(day=today.strftime("%A").lower()).first()
+                if not day:
+                    continue
+                try:
+                    _min_hour, start_sec, end_sec = shift_schedule_today(day=day, shift=shift)
+                except Exception:
+                    start_sec, end_sec = 0, 0
+
+                rules = {}
+                try:
+                    rules = cio.get_shift_rules(today, shift, day, start_time_sec=start_sec, end_time_sec=end_sec)
+                except Exception:
+                    rules = {"cutoff_in_dt": None, "cutoff_out_dt": None}
+
+                auto_reject_wfa_waiting_for_date(
+                    employee=emp,
+                    target_date=today,
+                    now_dt=now_dt,
+                    cutoff_in_dt=rules.get("cutoff_in_dt"),
+                    cutoff_out_dt=rules.get("cutoff_out_dt"),
+                )
+        except Exception:
+            pass
 
         qs = WorkModeRequest.objects.filter(status=WorkModeRequestStatus.WAITING_FOR_APPROVAL)
 
-        # Scope to subordinates unless user has full approval permission
         if request.user.has_perm("attendance.change_workmoderequest"):
             pass
         else:
@@ -1945,37 +1879,11 @@ class WorkModeRequestApprovalsView(APIView):
             else:
                 qs = qs.filter(employee_id__id__in=sub_ids)
 
-        # Keep approvals clean: auto-reject stale WFA WAITING requests based on each request's attendance_date
-        _auto_reject_stale_wfa_waiting_for_queryset(qs, request=request, now_dt=now_dt)
-
-        # Re-build queryset (some items may have become REJECTED)
-        qs = qs.filter(status=WorkModeRequestStatus.WAITING_FOR_APPROVAL)
-
-        # Optional search (used by mobile)
-        search = (request.GET.get("search") or "").strip()
-        if search:
-            q = Q(mode__icontains=search) | Q(scope__icontains=search) | Q(status__icontains=search)
-            q |= Q(reason__icontains=search) | Q(reason_code__icontains=search)
-            q |= Q(employee_id__employee_first_name__icontains=search) | Q(employee_id__employee_last_name__icontains=search)
-
-            if search.isdigit():
-                try:
-                    q |= Q(id=int(search)) | Q(employee_id__id=int(search))
-                except Exception:
-                    pass
-            else:
-                try:
-                    d = datetime.strptime(search, "%Y-%m-%d").date()
-                    q |= Q(start_date=d) | Q(end_date=d)
-                except Exception:
-                    pass
-
-            qs = qs.filter(q)
-
         pagenation = PageNumberPagination()
         page = pagenation.paginate_queryset(qs.order_by("-id"), request)
         serializer = WorkModeRequestSerializer(page, many=True)
         return pagenation.get_paginated_response(serializer.data)
+
 
 class WorkModeRequestApproveView(APIView):
     permission_classes = [IsAuthenticated]
@@ -2385,8 +2293,17 @@ class CheckingStatus(APIView):
             shift = None
 
         # If shift missing, return minimal safe response (no mobile punch)
+        # Keep response shape stable for mobile UI (include work type & audit fields).
         if not shift:
             attendance_date = dt_now.date()
+
+            try:
+                in_mode, in_source, in_req = _resolve_effective_work_type(employee, attendance_date, "in")
+                out_mode, out_source, out_req = _resolve_effective_work_type(employee, attendance_date, "out")
+            except Exception:
+                in_mode, in_source, in_req = (AttendanceWorkMode.WFO, "schedule", None)
+                out_mode, out_source, out_req = (AttendanceWorkMode.WFO, "schedule", None)
+
             return Response(
                 {
                     "status": False,
@@ -2400,14 +2317,45 @@ class CheckingStatus(APIView):
                     "work_hours_shortfall": None,
                     "checked_out_early": False,
                     "worked_hours": "00:00",
+                    "worked_seconds": 0,
+                    "is_working": False,
                     "missing_check_in": False,
                     "check_in_cutoff_has_passed": False,
                     "check_out_cutoff_has_passed": False,
                     "can_clock_in": False,
                     "can_clock_out": False,
                     "can_update_clock_out": False,
-                    "in_mode": AttendanceWorkMode.WFO,
-                    "out_mode": AttendanceWorkMode.WFO,
+
+                    # Legacy work-mode
+                    "in_mode": in_mode,
+                    "out_mode": out_mode,
+
+                    # Work Type Request (Attendance) fields
+                    "in_work_type": in_mode,
+                    "out_work_type": out_mode,
+                    "in_work_type_source": in_source,
+                    "out_work_type_source": out_source,
+                    "in_work_type_request_id": getattr(in_req, "id", None),
+                    "out_work_type_request_id": getattr(out_req, "id", None),
+                    "in_work_type_request_status": getattr(in_req, "status", None),
+                    "out_work_type_request_status": getattr(out_req, "status", None),
+
+                    # Legacy request keys (still used by some clients)
+                    "in_request_status": getattr(in_req, "status", None),
+                    "out_request_status": getattr(out_req, "status", None),
+                    "in_request_scope": getattr(in_req, "scope", None),
+                    "out_request_scope": getattr(out_req, "scope", None),
+                    "in_work_mode_request_id": getattr(in_req, "id", None),
+                    "out_work_mode_request_id": getattr(out_req, "id", None),
+
+                    # Option B (audit fields)
+                    "in_attendance_status": None,
+                    "out_attendance_status": None,
+                    "in_attendance_reject_reason_code": None,
+                    "out_attendance_reject_reason_code": None,
+                    "in_related_work_type_request_id": None,
+                    "out_related_work_type_request_id": None,
+
                     "shift_start": None,
                     "shift_end": None,
                     "grace_time": 0,
@@ -2418,6 +2366,7 @@ class CheckingStatus(APIView):
                     "requires_location_in": False,
                     "requires_photo_out": False,
                     "requires_location_out": False,
+                    "is_presensi_only": False,
                     "server_now": server_now_iso,
                     "server_time": server_time_hhmm,
                 },
@@ -2730,6 +2679,14 @@ class CheckingStatus(APIView):
 
             "missing_check_in": bool(missing_check_in),
 
+            # Option B (per punch audit status)
+            "in_attendance_status": getattr(attendance, "in_attendance_status", None) if attendance else None,
+            "out_attendance_status": getattr(attendance, "out_attendance_status", None) if attendance else None,
+            "in_attendance_reject_reason_code": getattr(attendance, "in_attendance_reject_reason_code", None) if attendance else None,
+            "out_attendance_reject_reason_code": getattr(attendance, "out_attendance_reject_reason_code", None) if attendance else None,
+            "in_related_work_type_request_id": getattr(attendance, "in_related_work_type_request_id", None) if attendance else None,
+            "out_related_work_type_request_id": getattr(attendance, "out_related_work_type_request_id", None) if attendance else None,
+
             # Work-mode
             "in_mode": in_mode,
                     "out_mode": out_mode,
@@ -2802,86 +2759,6 @@ class CheckingStatus(APIView):
                 payload["clock_out_location"] = getattr(attendance, "attendance_clock_out_location", None)
             except Exception:
                 pass
-
-
-        # Option B (per punch audit status)
-        if attendance:
-            payload.update(
-                {
-                    'in_attendance_status': getattr(attendance, 'in_attendance_status', None),
-                    'out_attendance_status': getattr(attendance, 'out_attendance_status', None),
-                    'in_attendance_reject_reason_code': getattr(attendance, 'in_attendance_reject_reason_code', None),
-                    'out_attendance_reject_reason_code': getattr(attendance, 'out_attendance_reject_reason_code', None),
-                    'in_related_work_type_request_id': getattr(attendance, 'in_related_work_type_request_id', None),
-                    'out_related_work_type_request_id': getattr(attendance, 'out_related_work_type_request_id', None),
-                }
-            )
-
-        return Response(payload, status=status.HTTP_200_OK)
-
-class MailTemplateView(APIView):
-    """
-    Retrieves a list of recruitment mail templates.
-
-    Method:
-        get(request): Returns all recruitment mail templates.
-    """
-
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request):
-        instances = HorillaMailTemplate.objects.all()
-        serializer = MailTemplateSerializer(instances, many=True)
-        return Response(serializer.data, status=200)
-
-class ConvertedMailTemplateConvert(APIView):
-    """
-    Renders a recruitment mail template with data from a specified employee.
-
-    Method:
-        put(request): Renders the mail template body with employee and user data and returns the result.
-    """
-
-    permission_classes = [IsAuthenticated]
-
-    def put(self, request):
-        template_id = request.data.get("template_id", None)
-        employee_id = request.data.get("employee_id", None)
-        employee = Employee.objects.filter(id=employee_id).first()
-        bdy = HorillaMailTemplate.objects.filter(id=template_id).first()
-        template_bdy = template.Template(bdy.body)
-        context = template.Context(
-            {"instance": employee, "self": request.user.employee_get}
-        )
-        render_bdy = template_bdy.render(context)
-        return Response(render_bdy)
-class OfflineEmployeeMailsend(APIView):
-    """
-    Sends an email with attachments and rendered templates to a specified employee.
-
-    Method:
-        post(request): Renders email templates with employee and user data, attaches files, and sends the email.
-    """
-
-    permission_classes = [IsAuthenticated]
-
-    def post(self, request):
-        employee_id = request.POST.get("employee_id")
-        subject = request.POST.get("subject", "")
-        bdy = request.POST.get("body", "")
-        other_attachments = request.FILES.getlist("other_attachments")
-        attachments = [
-            (file.name, file.read(), file.content_type) for file in other_attachments
-        ]
-        email_backend = ConfiguredEmailBackend()
-        host = email_backend.dynamic_username
-        employee = Employee.objects.get(id=employee_id)
-        template_attachment_ids = request.POST.getlist("template_attachments")
-        bodys = list(
-            HorillaMailTemplate.objects.filter(
-                id__in=template_attachment_ids
-            ).values_list("body", flat=True)
-        )
         for html in bodys:
             # Due to not having a solid template we first need to pass the context
             template_bdy = template.Template(html)
