@@ -9,7 +9,7 @@
   </div>
 
   <div class="oh-main__titlebar oh-main__titlebar--right">
-    <form method="get" action="{% url 'work-type-request-view' %}" class="d-flex flex-wrap align-items-center" style="gap: 8px;" onsubmit="event.preventDefault(); this.submit();">
+    <form method="get" action="{% url 'attendance-work-type-request-view' %}" class="d-flex flex-wrap align-items-center" style="gap: 8px;" onsubmit="event.preventDefault(); this.submit();">
       {# Preserve current sorting when applying search / quick filters #}
       <input type="hidden" name="sort_my" value="{{ sort_my }}" />
       <input type="hidden" name="dir_my" value="{{ dir_my }}" />
@@ -47,11 +47,11 @@
 
       <div class="oh-main__titlebar-button-container d-flex" style="gap: 8px;">
         <button class="oh-btn oh-btn--secondary" data-toggle="oh-modal-toggle" data-target="#objectCreateModal"
-          hx-get="{% url 'work-type-request-create' %}" hx-target="#objectCreateModalTarget" onclick="event.preventDefault()">
+          hx-get="{% url 'attendance-work-type-request-create' %}" hx-target="#objectCreateModalTarget" onclick="event.preventDefault()">
           <ion-icon name="add-sharp" class="mr-1"></ion-icon>{% trans "Create" %}
         </button>
 
-        <a class="oh-btn oh-btn--light-bkg" href="{% url 'work-type-request-view' %}" title="{% trans 'Reset filters' %}">
+        <a class="oh-btn oh-btn--light-bkg" href="{% url 'attendance-work-type-request-view' %}" title="{% trans 'Reset filters' %}">
           <ion-icon name="refresh-outline" class="mr-1"></ion-icon>{% trans "Reset" %}
         </a>
       </div>
