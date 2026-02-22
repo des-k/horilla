@@ -1,5 +1,5 @@
 {% load basefilters %}
-{% load i18n %} {% load horillafilters %} {% load static %}
+{% load i18n %} {% load horillafilters %} {% load static %} {% load worktype_display %}
 {% if messages %}
     <div class="oh-wrapper">
         {% for message in messages %}
@@ -60,11 +60,11 @@
             <div class="oh-timeoff-modal__stats-container mb-3">
                 <div class="oh-timeoff-modal__stat">
                     <span class="oh-timeoff-modal__stat-title">{% trans "Requested work type" %}</span>
-                    <span class="oh-timeoff-modal__stat-count">{{work_type_request.work_type_id}}</span>
+                    <span class="oh-timeoff-modal__stat-count">{{work_type_request.work_type_id|worktype_label}}</span>
                 </div>
                 <div class="oh-timeoff-modal__stat" style="margin-left: 20px;">
                     <span class="oh-timeoff-modal__stat-title">{% trans "Previous work type" %}</span>
-                    <span class="oh-timeoff-modal__stat-count">{{work_type_request.previous_work_type_id}}</span>
+                    <span class="oh-timeoff-modal__stat-count">{{work_type_request.previous_work_type_id|worktype_label}}</span>
                 </div>
             </div>
             <div class="oh-timeoff-modal__stats-container mb-3">
