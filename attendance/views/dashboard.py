@@ -60,6 +60,20 @@ def find_expected_attendances(week_day):
     This method is used to find count of expected attendances for the week day
     """
     employees = Employee.objects.filter(is_active=True)
+
+    # Customization: exclude reporting managers (approver-only) from expected
+    # attendance calculations.
+    try:
+        from employee.models import EmployeeWorkInformation
+
+        manager_ids = (
+            EmployeeWorkInformation.objects.exclude(reporting_manager_id__isnull=True)
+            .values_list("reporting_manager_id", flat=True)
+            .distinct()
+        )
+        employees = employees.exclude(id__in=manager_ids)
+    except Exception:
+        pass
     if apps.is_installed("leave"):
         LeaveRequest = get_horilla_model_class(app_label="leave", model="leaverequest")
         on_leave = LeaveRequest.objects.filter(status="Approved")
