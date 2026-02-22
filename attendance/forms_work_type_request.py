@@ -23,6 +23,23 @@ from attendance.models import (
 from attendance.services.work_type_request_rules import validate_work_type_request
 
 
+class MultipleClearableFileInput(forms.ClearableFileInput):
+    """ClearableFileInput that supports selecting multiple files."""
+
+    allow_multiple_selected = True
+
+
+class MultipleFileField(forms.FileField):
+    """FileField that can clean a list of uploaded files."""
+
+    def clean(self, data, initial=None):
+        if data in (None, "", []):
+            return super().clean(None, initial)
+        if isinstance(data, (list, tuple)):
+            return [super().clean(d, initial) for d in data]
+        return super().clean(data, initial)
+
+
 class WorkTypeRequestCreateForm(forms.ModelForm):
     """Create Work Type Request (Attendance)."""
 
@@ -58,10 +75,10 @@ class WorkTypeRequestCreateForm(forms.ModelForm):
         widget=forms.Textarea(attrs={"class": "oh-input w-100", "rows": 3}),
     )
 
-    files = forms.FileField(
+    files = MultipleFileField(
         label="Attachments",
         required=False,
-        widget=forms.ClearableFileInput(attrs={"multiple": True, "class": "oh-input w-100"}),
+        widget=MultipleClearableFileInput(attrs={"multiple": True, "class": "oh-input w-100"}),
     )
 
     def __init__(self, *args, employee=None, **kwargs):
@@ -122,10 +139,10 @@ class WorkTypeRequestUpdateForm(forms.Form):
         widget=forms.Textarea(attrs={"class": "oh-input w-100", "rows": 3}),
     )
 
-    files = forms.FileField(
+    files = MultipleFileField(
         label="Attachments",
         required=False,
-        widget=forms.ClearableFileInput(attrs={"multiple": True, "class": "oh-input w-100"}),
+        widget=MultipleClearableFileInput(attrs={"multiple": True, "class": "oh-input w-100"}),
     )
 
 
