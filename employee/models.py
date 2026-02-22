@@ -940,6 +940,33 @@ class BonusPoint(HorillaModel):
             BonusPoint.objects.create(employee_id=instance)
 
 
+@receiver(post_save, sender=EmployeeWorkInformation)
+def employee_work_info_default_work_type(sender, instance, created=False, **_kwargs):
+    """Ensure new employees default to WFO when Work Type is not provided.
+
+    This is for fresh installs / imports where the creator may not explicitly
+    set work_type_id. We keep DB values short (WFO/WFA) and use UI helpers for
+    friendly labels.
+    """
+
+    # Only set if empty. Never override explicit choices.
+    try:
+        if instance.work_type_id_id is not None:
+            return
+    except Exception:
+        return
+
+    try:
+        wfo = WorkType.objects.filter(work_type__iexact="WFO").only("id").first()
+        if not wfo:
+            return
+        # Avoid recursion: update at DB level.
+        EmployeeWorkInformation.objects.filter(pk=instance.pk).update(work_type_id=wfo)
+    except Exception:
+        # If migrations aren't ready or WorkType doesn't exist yet, do nothing.
+        return
+
+
 class Actiontype(HorillaModel):
     """
     Action type model
