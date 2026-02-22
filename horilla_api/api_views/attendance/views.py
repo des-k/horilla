@@ -2759,6 +2759,71 @@ class CheckingStatus(APIView):
                 payload["clock_out_location"] = getattr(attendance, "attendance_clock_out_location", None)
             except Exception:
                 pass
+        return Response(payload, status=status.HTTP_200_OK)
+
+class MailTemplateView(APIView):
+    """
+    Retrieves a list of recruitment mail templates.
+
+    Method:
+        get(request): Returns all recruitment mail templates.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        instances = HorillaMailTemplate.objects.all()
+        serializer = MailTemplateSerializer(instances, many=True)
+        return Response(serializer.data, status=200)
+
+class ConvertedMailTemplateConvert(APIView):
+    """
+    Renders a recruitment mail template with data from a specified employee.
+
+    Method:
+        put(request): Renders the mail template body with employee and user data and returns the result.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def put(self, request):
+        template_id = request.data.get("template_id", None)
+        employee_id = request.data.get("employee_id", None)
+        employee = Employee.objects.filter(id=employee_id).first()
+        bdy = HorillaMailTemplate.objects.filter(id=template_id).first()
+        template_bdy = template.Template(bdy.body)
+        context = template.Context(
+            {"instance": employee, "self": request.user.employee_get}
+        )
+        render_bdy = template_bdy.render(context)
+        return Response(render_bdy)
+class OfflineEmployeeMailsend(APIView):
+    """
+    Sends an email with attachments and rendered templates to a specified employee.
+
+    Method:
+        post(request): Renders email templates with employee and user data, attaches files, and sends the email.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        employee_id = request.POST.get("employee_id")
+        subject = request.POST.get("subject", "")
+        bdy = request.POST.get("body", "")
+        other_attachments = request.FILES.getlist("other_attachments")
+        attachments = [
+            (file.name, file.read(), file.content_type) for file in other_attachments
+        ]
+        email_backend = ConfiguredEmailBackend()
+        host = email_backend.dynamic_username
+        employee = Employee.objects.get(id=employee_id)
+        template_attachment_ids = request.POST.getlist("template_attachments")
+        bodys = list(
+            HorillaMailTemplate.objects.filter(
+                id__in=template_attachment_ids
+            ).values_list("body", flat=True)
+        )
         for html in bodys:
             # Due to not having a solid template we first need to pass the context
             template_bdy = template.Template(html)
