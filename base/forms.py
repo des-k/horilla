@@ -1141,6 +1141,19 @@ class EmployeeShiftScheduleUpdateForm(ModelForm):
             "cutoff_check_out_offset": forms.TextInput(
                 attrs={"placeholder": "07:00:00", "class": "oh-input w-100 form-control"}
             ),
+            # Attendance window config (FINAL spec)
+            "early_checkin_minutes": forms.NumberInput(
+                attrs={"class": "oh-input w-100 form-control", "min": 0}
+            ),
+            "late_checkin_minutes": forms.NumberInput(
+                attrs={"class": "oh-input w-100 form-control", "min": 0}
+            ),
+            "early_checkout_grace_minutes": forms.NumberInput(
+                attrs={"class": "oh-input w-100 form-control", "min": 0}
+            ),
+            "max_late_checkout_hours": forms.NumberInput(
+                attrs={"class": "oh-input w-100 form-control", "min": 0}
+            ),
         }
 
     def __init__(self, *args, **kwargs):
@@ -1264,6 +1277,19 @@ class EmployeeShiftScheduleForm(ModelForm):
             ),
             "cutoff_check_out_offset": forms.TextInput(
                 attrs={"placeholder": "07:00:00", "class": "oh-input w-100 form-control"}
+            ),
+            # Attendance window config (FINAL spec)
+            "early_checkin_minutes": forms.NumberInput(
+                attrs={"class": "oh-input w-100 form-control", "min": 0}
+            ),
+            "late_checkin_minutes": forms.NumberInput(
+                attrs={"class": "oh-input w-100 form-control", "min": 0}
+            ),
+            "early_checkout_grace_minutes": forms.NumberInput(
+                attrs={"class": "oh-input w-100 form-control", "min": 0}
+            ),
+            "max_late_checkout_hours": forms.NumberInput(
+                attrs={"class": "oh-input w-100 form-control", "min": 0}
             ),
         }
 
