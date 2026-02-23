@@ -73,6 +73,16 @@ class WorkModeRequestRejectReasonCode(models.TextChoices):
     AUTO_REJECT_CUTOFF_OUT_PASSED = "AUTO_REJECT_CUTOFF_OUT_PASSED", _("Auto Reject: Cutoff OUT Passed")
     AUTO_REJECT_CUTOFF_FULL_PASSED = "AUTO_REJECT_CUTOFF_FULL_PASSED", _("Auto Reject: Cutoff FULL Passed")
 
+    # Attendance punch reject reasons (Option B)
+    EARLY_CHECKOUT_BEFORE_SHIFT_END = (
+        "EARLY_CHECKOUT_BEFORE_SHIFT_END",
+        _("Early check-out before shift end"),
+    )
+    EARLY_CHECKOUT_BEFORE_CUTOFF_IN = (
+        "EARLY_CHECKOUT_BEFORE_CUTOFF_IN",
+        _("Early check-out before cutoff-in"),
+    )
+
 
 class AttendancePunchStatus(models.TextChoices):
     """Audit status for a punch (IN/OUT) after request decision."""
