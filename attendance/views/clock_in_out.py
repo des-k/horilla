@@ -48,6 +48,11 @@ from attendance.models import (
     GraceTime,
 )
 from attendance.views.views import attendance_validate
+from attendance.services.attendance_window_rules import (
+    WindowConfig,
+    compute_checkin_window,
+    compute_checkout_window_wfo_wfa,
+)
 from base.context_processors import (
     enable_late_come_early_out_tracking,
     timerunner_enabled,
@@ -127,6 +132,52 @@ def _resolve_grace_time(schedule, shift):
     if shift and getattr(shift, "grace_time_id", None) and shift.grace_time_id.is_active:
         return shift.grace_time_id
     return GraceTime.objects.filter(is_default=True, is_active=True).first()
+
+
+def _resolve_window_config(schedule) -> WindowConfig:
+    """Resolve window config from schedule with safe defaults.
+
+    The schedule model may not have the new fields in older deployments,
+    so we probe attributes and fall back to defaults.
+    """
+
+    def _get_int(name: str, default: int) -> int:
+        try:
+            val = getattr(schedule, name, None) if schedule is not None else None
+            if val is None:
+                return int(default)
+            v = int(val)
+            return v if v >= 0 else int(default)
+        except Exception:
+            return int(default)
+
+    return WindowConfig(
+        early_checkin_minutes=_get_int("early_checkin_minutes", 120),
+        late_checkin_minutes=_get_int("late_checkin_minutes", 120),
+        early_checkout_grace_minutes=_get_int("early_checkout_grace_minutes", 0),
+        max_late_checkout_hours=_get_int("max_late_checkout_hours", 12),
+    )
+
+
+def _compute_shift_datetimes(
+    *,
+    attendance_date: date,
+    start_time: Optional[time],
+    end_time: Optional[time],
+    is_night_shift: bool,
+) -> tuple[Optional[datetime], Optional[datetime]]:
+    """Return (shift_start_dt, shift_end_dt) in local business time."""
+    if not start_time:
+        return None, None
+
+    shift_start_dt = _combine_local_datetime(attendance_date, start_time)
+
+    if not end_time:
+        return shift_start_dt, None
+
+    end_date = attendance_date + timedelta(days=1) if is_night_shift else attendance_date
+    shift_end_dt = _combine_local_datetime(end_date, end_time)
+    return shift_start_dt, shift_end_dt
 
 
 def _has_model_field(model_cls, field_name: str) -> bool:
@@ -421,9 +472,13 @@ def get_shift_rules(
       - start_time: datetime.time | None
       - end_time: datetime.time | None
       - grace_seconds: int  (check-in grace in seconds; 0 if not applicable)
-      - cutoff_in_dt: datetime | None (last allowed check-in time)
-      - cutoff_out_dt: datetime | None (last allowed check-out time)
+      - cutoff_in_dt: datetime | None (legacy: last allowed check-in time)
+      - cutoff_out_dt: datetime | None (legacy: last allowed check-out time)
       - is_night_shift: bool
+      - shift_start_dt / shift_end_dt: datetime | None
+      - check_in_window_start_dt / check_in_window_end_dt: datetime | None
+      - check_out_window_start_dt / check_out_window_end_dt: datetime | None
+      - window_config: dict (minutes/hours used)
     """
     schedule = None
     try:
@@ -487,6 +542,27 @@ def get_shift_rules(
     except Exception:
         cutoff_out_dt = None
 
+    # Window config (FINAL spec)
+    window_cfg = _resolve_window_config(schedule)
+    shift_start_dt, shift_end_dt = _compute_shift_datetimes(
+        attendance_date=attendance_date,
+        start_time=start_time,
+        end_time=end_time,
+        is_night_shift=is_night_shift,
+    )
+
+    check_in_window_start_dt, check_in_window_end_dt = compute_checkin_window(
+        shift_start_dt=shift_start_dt,
+        cutoff_in_dt=cutoff_in_dt,
+        cfg=window_cfg,
+    )
+
+    check_out_window_start_dt, check_out_window_end_dt = compute_checkout_window_wfo_wfa(
+        shift_end_dt=shift_end_dt,
+        cutoff_out_dt=cutoff_out_dt,
+        cfg=window_cfg,
+    )
+
     return {
         "schedule": schedule,
         "start_time": start_time,
@@ -495,6 +571,20 @@ def get_shift_rules(
         "cutoff_in_dt": cutoff_in_dt,
         "cutoff_out_dt": cutoff_out_dt,
         "is_night_shift": is_night_shift,
+
+        # Shift dt + windows (FINAL spec)
+        "shift_start_dt": shift_start_dt,
+        "shift_end_dt": shift_end_dt,
+        "check_in_window_start_dt": check_in_window_start_dt,
+        "check_in_window_end_dt": check_in_window_end_dt,
+        "check_out_window_start_dt": check_out_window_start_dt,
+        "check_out_window_end_dt": check_out_window_end_dt,
+        "window_config": {
+            "early_checkin_minutes": window_cfg.early_checkin_minutes,
+            "late_checkin_minutes": window_cfg.late_checkin_minutes,
+            "early_checkout_grace_minutes": window_cfg.early_checkout_grace_minutes,
+            "max_late_checkout_hours": window_cfg.max_late_checkout_hours,
+        },
     }
 
 
@@ -690,6 +780,31 @@ def clock_out_attendance_and_activity(
     out_date = out_datetime.date()
     out_time = out_datetime.time()
 
+    # Shift context (used for early checkout rejection + worked hours start)
+    # Best-effort: when schedule missing, rules may omit window boundaries.
+    start_time_sec = None
+    end_time_sec = None
+    try:
+        _min_h, start_time_sec, end_time_sec = shift_schedule_today(day=day, shift=shift)
+    except Exception:
+        start_time_sec = None
+        end_time_sec = None
+
+    try:
+        rules = get_shift_rules(
+            attendance_date,
+            shift,
+            day,
+            start_time_sec=start_time_sec,
+            end_time_sec=end_time_sec,
+        )
+    except Exception:
+        rules = {}
+
+    shift_start_dt = rules.get("shift_start_dt")
+    cutoff_in_dt = rules.get("cutoff_in_dt")
+    earliest_checkout_dt = cutoff_in_dt if is_presensi_only else rules.get("check_out_window_start_dt")
+
     # 1) Ensure Attendance exists (skeleton allowed)
     attendance_defaults = {
         "shift_id": shift,
@@ -866,6 +981,29 @@ def clock_out_attendance_and_activity(
     if _has_model_field(Attendance, "out_attendance_reject_reason_code"):
         attendance.out_attendance_reject_reason_code = None
 
+    # -----------------------------------------------------------------
+    # EARLY CHECK-OUT REJECT (FINAL spec)
+    # Store OUT for audit, but mark as REJECTED when outside the allowed window.
+    # - WFO/WFA: earliest = shift_end - grace
+    # - ON_DUTY: earliest = cutoff_in_dt
+    # -----------------------------------------------------------------
+    is_early_checkout = False
+    try:
+        if earliest_checkout_dt and out_datetime < earliest_checkout_dt:
+            is_early_checkout = True
+    except Exception:
+        is_early_checkout = False
+
+    if is_early_checkout:
+        if _has_model_field(Attendance, "out_attendance_status"):
+            attendance.out_attendance_status = 'REJECTED'
+        if _has_model_field(Attendance, "out_attendance_reject_reason_code"):
+            attendance.out_attendance_reject_reason_code = (
+                'EARLY_CHECKOUT_BEFORE_CUTOFF_IN'
+                if is_presensi_only
+                else 'EARLY_CHECKOUT_BEFORE_SHIFT_END'
+            )
+
     # Presence-only: keep hours 00:00
     if is_presensi_only or getattr(attendance, "is_presensi_only", False):
         if _has_model_field(Attendance, "is_presensi_only"):
@@ -876,11 +1014,29 @@ def clock_out_attendance_and_activity(
         attendance.save()
         return attendance, missing_check_in_original
 
-    # Compute worked hours from Attendance summary (supports missing check-in placeholder behavior)
+    # If OUT is REJECTED (early checkout), do NOT compute valid worked hours.
+    # Keep record for audit, but payroll/KPI should rely on VALID OUT.
+    if getattr(attendance, "out_attendance_status", None) == "REJECTED":
+        attendance.attendance_worked_hour = "00:00"
+        attendance.attendance_overtime = "00:00"
+        attendance.attendance_validated = False
+        attendance.save()
+        return attendance, missing_check_in_original
+
+    # Compute worked hours from Attendance summary.
+    # FINAL spec: if IN earlier than shift_start, start counting from shift_start.
     if attendance.attendance_clock_in_date and attendance.attendance_clock_in:
         in_dt = _combine_local_datetime(attendance.attendance_clock_in_date, attendance.attendance_clock_in)
         out_dt = _combine_local_datetime(attendance.attendance_clock_out_date, attendance.attendance_clock_out)
-        duration_seconds = int((out_dt - in_dt).total_seconds())
+
+        worked_start_dt = in_dt
+        try:
+            if shift_start_dt:
+                worked_start_dt = max(in_dt, shift_start_dt)
+        except Exception:
+            worked_start_dt = in_dt
+
+        duration_seconds = int((out_dt - worked_start_dt).total_seconds())
         if duration_seconds < 0:
             duration_seconds = 0
 
