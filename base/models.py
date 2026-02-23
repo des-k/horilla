@@ -658,6 +658,32 @@ class EmployeeShiftSchedule(HorillaModel):
     start_time = models.TimeField(null=True, verbose_name=_("Start Time"))
     end_time = models.TimeField(null=True, verbose_name=_("End Time"))
     is_night_shift = models.BooleanField(default=False, verbose_name=_("Night Shift"))
+
+    # -----------------------------------------------------------------
+    # Attendance window configuration (FINAL spec)
+    # These values drive mobile + biometric time windows.
+    # Defaults are safe for fresh installs.
+    # -----------------------------------------------------------------
+    early_checkin_minutes = models.IntegerField(
+        default=120,
+        verbose_name=_("Early Check-In Minutes"),
+        help_text=_("Earliest check-in = start_time - this many minutes."),
+    )
+    late_checkin_minutes = models.IntegerField(
+        default=120,
+        verbose_name=_("Late Check-In Minutes"),
+        help_text=_("If no cutoff-in is available, latest check-in = start_time + this many minutes."),
+    )
+    early_checkout_grace_minutes = models.IntegerField(
+        default=0,
+        verbose_name=_("Early Check-Out Grace Minutes"),
+        help_text=_("Earliest check-out (WFO/WFA) = end_time - this many minutes."),
+    )
+    max_late_checkout_hours = models.IntegerField(
+        default=12,
+        verbose_name=_("Max Late Check-Out Hours"),
+        help_text=_("Latest check-out = end_time + this many hours (unless a schedule cutoff-out exists)."),
+    )
     is_auto_punch_out_enabled = models.BooleanField(
         default=False,
         verbose_name=_("Enable Automatic Check Out"),
