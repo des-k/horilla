@@ -38,6 +38,7 @@ from attendance.models import (
     BatchAttendance,
 )
 from attendance.views.clock_in_out import early_out, late_come
+import attendance.views.clock_in_out as cio
 from base.methods import (
     choosesubordinates,
     closest_numbers,
@@ -623,6 +624,61 @@ def approve_validate_attendance_request(request, attendance_id):
     # -----------------------------------------------------------------
     _ensure_single_session_activity(attendance, prev_attendance_date=prev_attendance_date)
     _refresh_late_come_early_out(attendance)
+
+    # -------------------------------------------------------------
+    # FINAL spec: If approving an attendance request that effectively
+    # approves an early-checkout which was previously REJECTED,
+    # flip OUT status back to VALID + clear reject reason.
+    # Also recompute worked hours using shift_start as baseline.
+    # -------------------------------------------------------------
+    try:
+        if (
+            getattr(attendance, "out_attendance_status", None) == "REJECTED"
+            and getattr(attendance, "out_attendance_reject_reason_code", None)
+            in (
+                "EARLY_CHECKOUT_BEFORE_SHIFT_END",
+                "EARLY_CHECKOUT_BEFORE_CUTOFF_IN",
+            )
+        ):
+            attendance.out_attendance_status = "VALID"
+            attendance.out_attendance_reject_reason_code = None
+
+            # Recompute worked hours from max(real_in, shift_start)
+            if (
+                attendance.attendance_clock_in_date
+                and attendance.attendance_clock_in
+                and attendance.attendance_clock_out_date
+                and attendance.attendance_clock_out
+            ):
+                shift = getattr(attendance, "shift_id", None)
+                day_obj = getattr(attendance, "attendance_day", None)
+                if shift and day_obj:
+                    _min_h, start_sec, end_sec = shift_schedule_today(day=day_obj, shift=shift)
+                    rules = cio.get_shift_rules(
+                        attendance.attendance_date,
+                        shift,
+                        day_obj,
+                        start_time_sec=start_sec,
+                        end_time_sec=end_sec,
+                    )
+                    shift_start_dt = rules.get("shift_start_dt")
+                else:
+                    shift_start_dt = None
+
+                in_dt = cio._combine_local_datetime(attendance.attendance_clock_in_date, attendance.attendance_clock_in)
+                out_dt = cio._combine_local_datetime(attendance.attendance_clock_out_date, attendance.attendance_clock_out)
+
+                worked_start_dt = max(in_dt, shift_start_dt) if shift_start_dt else in_dt
+                duration_seconds = int((out_dt - worked_start_dt).total_seconds())
+                if duration_seconds < 0:
+                    duration_seconds = 0
+
+                attendance.attendance_worked_hour = cio.format_time(duration_seconds)
+                attendance.attendance_overtime = cio.overtime_calculation(attendance)
+            attendance.save()
+    except Exception:
+        # Approval must not fail due to window recompute.
+        pass
 
     messages.success(request, _("Attendance request has been approved"))
     employee = attendance.employee_id
