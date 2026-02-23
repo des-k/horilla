@@ -619,8 +619,22 @@ class ClockInAPIView(APIView):
 
 
         cutoff_in_dt = rules.get("cutoff_in_dt")
+        cutoff_in_dt = _coerce_datetime_like(cutoff_in_dt, dt_now) if cutoff_in_dt else None
 
-        cutoff_in_dt = _coerce_datetime_like(cutoff_in_dt, dt_now)
+        # Window start/end (FINAL spec)
+        check_in_window_start_dt = rules.get("check_in_window_start_dt")
+        check_in_window_end_dt = rules.get("check_in_window_end_dt") or cutoff_in_dt
+
+        check_in_window_start_dt = (
+            _coerce_datetime_like(check_in_window_start_dt, dt_now)
+            if check_in_window_start_dt
+            else None
+        )
+        check_in_window_end_dt = (
+            _coerce_datetime_like(check_in_window_end_dt, dt_now)
+            if check_in_window_end_dt
+            else None
+        )
 
         # Auto reject WFA waiting (IN/FULL uses cutoff_in)
         try:
@@ -636,11 +650,23 @@ class ClockInAPIView(APIView):
         except Exception:
             pass
 
-        if cutoff_in_dt and dt_now > cutoff_in_dt:
+        if check_in_window_start_dt and dt_now < check_in_window_start_dt:
+            return Response(
+                {
+                    "error": "Check-in window has not started yet.",
+                    "check_in_window_start": check_in_window_start_dt.strftime("%H:%M"),
+                    "check_in_window_end": check_in_window_end_dt.strftime("%H:%M") if check_in_window_end_dt else None,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if check_in_window_end_dt and dt_now > check_in_window_end_dt:
             return Response(
                 {
                     "error": "Check-in cut-off has passed.",
-                    "last_allowed": cutoff_in_dt.strftime("%Y-%m-%d %H:%M"),
+                    "last_allowed": check_in_window_end_dt.strftime("%Y-%m-%d %H:%M"),
+                    "check_in_window_start": check_in_window_start_dt.strftime("%H:%M") if check_in_window_start_dt else None,
+                    "check_in_window_end": check_in_window_end_dt.strftime("%H:%M"),
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
@@ -801,10 +827,9 @@ class ClockOutAPIView(APIView):
 
 
 
-        cutoff_out_dt = rules.get("cutoff_out_dt")
-
-
-        cutoff_out_dt = _coerce_datetime_like(cutoff_out_dt, dt_now) if cutoff_out_dt else None
+        # Window end (FINAL spec): end_time + max_late_checkout_hours (or schedule cutoff-out)
+        window_end_dt = rules.get("check_out_window_end_dt") or rules.get("cutoff_out_dt")
+        window_end_dt = _coerce_datetime_like(window_end_dt, dt_now) if window_end_dt else None
 
         # Auto reject WFA waiting (OUT uses cutoff_out; FULL uses cutoff_in)
         try:
@@ -815,55 +840,21 @@ class ClockOutAPIView(APIView):
                 target_date=attendance_date,
                 now_dt=dt_now,
                 cutoff_in_dt=_cutoff_in_tmp,
-                cutoff_out_dt=cutoff_out_dt,
+                cutoff_out_dt=window_end_dt,
             )
             out_mode, out_source, out_req = _resolve_effective_work_type(employee, attendance_date, "out")
         except Exception:
             pass
 
-
-
-        if cutoff_out_dt and dt_now > cutoff_out_dt:
-
-
+        # Hard block only AFTER window end (audit should still be allowed for early checkout)
+        if window_end_dt and dt_now > window_end_dt:
             return Response(
-
-
-                {"error": "Check-out cut-off has passed. Please submit an attendance request."},
-
-
+                {
+                    "error": "Check-out window has ended. Please submit an attendance request.",
+                    "check_out_window_end": window_end_dt.strftime("%H:%M"),
+                },
                 status=status.HTTP_400_BAD_REQUEST,
-
-
             )
-
-
-
-        # OUT-only rule: allow only after check-in cutoff has passed
-
-
-        if out_req and out_req.scope == WorkModeRequestScope.OUT:
-
-
-            cutoff_in_dt = rules.get("cutoff_in_dt")
-
-
-            cutoff_in_dt = _coerce_datetime_like(cutoff_in_dt, dt_now) if cutoff_in_dt else None
-
-
-            if cutoff_in_dt and dt_now <= cutoff_in_dt:
-
-
-                return Response(
-
-
-                    {"error": "Clock-out is available only after check-in cut-off time."},
-
-
-                    status=status.HTTP_400_BAD_REQUEST,
-
-
-                )
 
         # Proof
         image = request.FILES.get("image")
@@ -875,7 +866,17 @@ class ClockOutAPIView(APIView):
             if not location:
                 return Response({"error": "Location is required."}, status=status.HTTP_400_BAD_REQUEST)
 
-        allow_update = out_mode == AttendanceWorkMode.WFA
+        # Allow updating checkout for:
+        # - WFA (last punch wins)
+        # - Any mode when the existing OUT punch is REJECTED (early checkout)
+        existing_att = Attendance.objects.filter(
+            employee_id=employee, attendance_date=attendance_date
+        ).first()
+        existing_out_rejected = bool(
+            existing_att
+            and getattr(existing_att, "out_attendance_status", None) == "REJECTED"
+        )
+        allow_update = (out_mode == AttendanceWorkMode.WFA) or existing_out_rejected
 
         try:
             attendance, missing_check_in = cio.clock_out_attendance_and_activity(
@@ -897,8 +898,13 @@ class ClockOutAPIView(APIView):
             logger.exception("clock_out_attendance_and_activity failed")
             return Response({"error": str(error)}, status=status.HTTP_400_BAD_REQUEST)
 
-        # For presence-only (On Duty), skip late/early calculations
-        if attendance and not getattr(attendance, "is_presensi_only", False) and not missing_check_in:
+        # For presence-only (On Duty), or REJECTED OUT punches, skip late/early calculations
+        if (
+            attendance
+            and not getattr(attendance, "is_presensi_only", False)
+            and not missing_check_in
+            and getattr(attendance, "out_attendance_status", None) != "REJECTED"
+        ):
             try:
                 attendance.late_come_early_out.filter(type="early_out").delete()
             except Exception:
@@ -1510,6 +1516,55 @@ class AttendanceRequestApproveView(APIView):
 
             _ensure_single_session_activity(attendance, prev_attendance_date=prev_attendance_date)
             _rebuild_late_early(attendance)
+
+            # FINAL spec: approving an attendance request may approve an early-checkout
+            # that was previously stored as REJECTED. Flip it back to VALID and clear reason.
+            try:
+                if (
+                    getattr(attendance, "out_attendance_status", None) == "REJECTED"
+                    and getattr(attendance, "out_attendance_reject_reason_code", None)
+                    in (
+                        "EARLY_CHECKOUT_BEFORE_SHIFT_END",
+                        "EARLY_CHECKOUT_BEFORE_CUTOFF_IN",
+                    )
+                ):
+                    attendance.out_attendance_status = "VALID"
+                    attendance.out_attendance_reject_reason_code = None
+
+                    # Recompute worked hours from max(real_in, shift_start)
+                    if (
+                        attendance.attendance_clock_in_date
+                        and attendance.attendance_clock_in
+                        and attendance.attendance_clock_out_date
+                        and attendance.attendance_clock_out
+                        and getattr(attendance, "is_presensi_only", False) is False
+                    ):
+                        shift = getattr(attendance, "shift_id", None)
+                        day_obj = getattr(attendance, "attendance_day", None)
+                        shift_start_dt = None
+                        if shift and day_obj:
+                            _min_h, start_sec, end_sec = shift_schedule_today(day=day_obj, shift=shift)
+                            rules = cio.get_shift_rules(
+                                attendance.attendance_date,
+                                shift,
+                                day_obj,
+                                start_time_sec=start_sec,
+                                end_time_sec=end_sec,
+                            )
+                            shift_start_dt = rules.get("shift_start_dt")
+
+                        in_dt = cio._combine_local_datetime(attendance.attendance_clock_in_date, attendance.attendance_clock_in)
+                        out_dt = cio._combine_local_datetime(attendance.attendance_clock_out_date, attendance.attendance_clock_out)
+                        worked_start_dt = max(in_dt, shift_start_dt) if shift_start_dt else in_dt
+                        duration_seconds = int((out_dt - worked_start_dt).total_seconds())
+                        if duration_seconds < 0:
+                            duration_seconds = 0
+
+                        attendance.attendance_worked_hour = format_time(duration_seconds)
+                        attendance.attendance_overtime = overtime_calculation(attendance)
+                    attendance.save()
+            except Exception:
+                pass
 
         except Exception as E:
             return Response({"error": str(E)}, status=400)
@@ -2354,6 +2409,15 @@ class CheckingStatus(APIView):
                     "can_clock_out": False,
                     "can_update_clock_out": False,
 
+                    "can_check_in": False,
+                    "can_check_out": False,
+                    "check_in_window_start": None,
+                    "check_in_window_end": None,
+                    "check_out_window_start": None,
+                    "check_out_window_end": None,
+                    "check_in_block_reason": "ATTENDANCE_DISABLED",
+                    "check_out_block_reason": "ATTENDANCE_DISABLED",
+
                     # Legacy work-mode
                     "in_mode": AttendanceWorkMode.WFO,
                     "out_mode": AttendanceWorkMode.WFO,
@@ -2443,6 +2507,15 @@ class CheckingStatus(APIView):
                     "can_clock_in": False,
                     "can_clock_out": False,
                     "can_update_clock_out": False,
+
+                    "can_check_in": False,
+                    "can_check_out": False,
+                    "check_in_window_start": None,
+                    "check_in_window_end": None,
+                    "check_out_window_start": None,
+                    "check_out_window_end": None,
+                    "check_in_block_reason": "SHIFT_NOT_ASSIGNED",
+                    "check_out_block_reason": "SHIFT_NOT_ASSIGNED",
 
                     # Legacy work-mode
                     "in_mode": in_mode,
@@ -2562,23 +2635,49 @@ class CheckingStatus(APIView):
 
 
         cutoff_in_dt = rules.get("cutoff_in_dt")
-
-
         cutoff_out_dt = rules.get("cutoff_out_dt")
 
-
-        check_in_cutoff_has_passed = False
-
-
-        check_out_cutoff_has_passed = False
+        # Windows (FINAL spec)
+        shift_start_dt = rules.get("shift_start_dt")
+        shift_end_dt = rules.get("shift_end_dt")
+        check_in_window_start_dt = rules.get("check_in_window_start_dt")
+        check_in_window_end_dt = rules.get("check_in_window_end_dt")
+        check_out_window_start_dt = rules.get("check_out_window_start_dt")
+        check_out_window_end_dt = rules.get("check_out_window_end_dt")
 
         cutoff_in_dt = _coerce_datetime_like(cutoff_in_dt, dt_now) if cutoff_in_dt else None
         cutoff_out_dt = _coerce_datetime_like(cutoff_out_dt, dt_now) if cutoff_out_dt else None
+        shift_start_dt = _coerce_datetime_like(shift_start_dt, dt_now) if shift_start_dt else None
+        shift_end_dt = _coerce_datetime_like(shift_end_dt, dt_now) if shift_end_dt else None
+        check_in_window_start_dt = _coerce_datetime_like(check_in_window_start_dt, dt_now) if check_in_window_start_dt else None
+        check_in_window_end_dt = _coerce_datetime_like(check_in_window_end_dt, dt_now) if check_in_window_end_dt else None
+        check_out_window_start_dt = _coerce_datetime_like(check_out_window_start_dt, dt_now) if check_out_window_start_dt else None
+        check_out_window_end_dt = _coerce_datetime_like(check_out_window_end_dt, dt_now) if check_out_window_end_dt else None
 
-        if cutoff_in_dt and dt_now > cutoff_in_dt:
-            check_in_cutoff_has_passed = True
-        if cutoff_out_dt and dt_now > cutoff_out_dt:
-            check_out_cutoff_has_passed = True
+        # Ensure window fields are ALWAYS present (even if shift rule helper
+        # couldn't compute them). This keeps the mobile UI free from hardcoded
+        # window math and supports fresh installs.
+        DEFAULT_EARLY_CHECKIN_MIN = 120
+        DEFAULT_LATE_CHECKIN_MIN = 120
+        DEFAULT_EARLY_CHECKOUT_GRACE_MIN = 0
+        DEFAULT_MAX_LATE_CHECKOUT_HOURS = 12
+
+        try:
+            if (check_in_window_start_dt is None) and shift_start_dt:
+                check_in_window_start_dt = shift_start_dt - timedelta(minutes=DEFAULT_EARLY_CHECKIN_MIN)
+            if (check_in_window_end_dt is None) and shift_start_dt:
+                check_in_window_end_dt = cutoff_in_dt or (shift_start_dt + timedelta(minutes=DEFAULT_LATE_CHECKIN_MIN))
+
+            if (check_out_window_start_dt is None) and shift_end_dt:
+                check_out_window_start_dt = shift_end_dt - timedelta(minutes=DEFAULT_EARLY_CHECKOUT_GRACE_MIN)
+            if (check_out_window_end_dt is None) and shift_end_dt:
+                check_out_window_end_dt = cutoff_out_dt or (shift_end_dt + timedelta(hours=DEFAULT_MAX_LATE_CHECKOUT_HOURS))
+        except Exception:
+            pass
+
+        # Legacy cutoff flags (kept for backwards compatibility)
+        check_in_cutoff_has_passed = bool(cutoff_in_dt and dt_now > cutoff_in_dt)
+        check_out_cutoff_has_passed = bool(cutoff_out_dt and dt_now > cutoff_out_dt)
 
         # Auto reject WFA waiting requests after cutoff (FINAL spec)
         try:
@@ -2604,6 +2703,9 @@ class CheckingStatus(APIView):
         # If this attendance is presence-only (On Duty), force worked hours to 00:00
         is_presensi_only = bool(attendance and getattr(attendance, "is_presensi_only", False))
 
+        out_punch_status = getattr(attendance, "out_attendance_status", None) if attendance else None
+        out_rejected = bool(out_punch_status == "REJECTED")
+
         # Worked hours calculation
         worked_seconds = 0
         is_working = False
@@ -2611,17 +2713,29 @@ class CheckingStatus(APIView):
             if clock_in_t:
                 in_date = getattr(attendance, "attendance_clock_in_date", None) or attendance_date
                 in_dt = _coerce_datetime_like(datetime.combine(in_date, clock_in_t), dt_now)
-                if not clock_out_t:
+
+                # FINAL spec: if checked-in earlier than shift_start, start counting at shift_start.
+                worked_start_dt = in_dt
+                try:
+                    if shift_start_dt and in_dt:
+                        worked_start_dt = max(in_dt, shift_start_dt)
+                except Exception:
+                    worked_start_dt = in_dt
+
+                # If OUT punch exists but was REJECTED, treat as not checked-out yet.
+                has_valid_out = bool(clock_out_t and not out_rejected)
+
+                if not has_valid_out:
                     is_working = True
                     try:
-                        worked_seconds = max(0, int((dt_now - in_dt).total_seconds()))
+                        worked_seconds = max(0, int((dt_now - worked_start_dt).total_seconds()))
                     except Exception:
                         worked_seconds = 0
                 else:
                     out_date = getattr(attendance, "attendance_clock_out_date", None) or attendance_date
                     out_dt = _coerce_datetime_like(datetime.combine(out_date, clock_out_t), dt_now)
                     try:
-                        worked_seconds = max(0, int((out_dt - in_dt).total_seconds()))
+                        worked_seconds = max(0, int((out_dt - worked_start_dt).total_seconds()))
                     except Exception:
                         worked_seconds = 0
             elif clock_out_t:
@@ -2631,7 +2745,10 @@ class CheckingStatus(APIView):
                     in_dt = _coerce_datetime_like(datetime.combine(activity.clock_in_date, activity.clock_in), dt_now)
                     out_dt = _coerce_datetime_like(datetime.combine(activity.clock_out_date, activity.clock_out), dt_now)
                     try:
-                        worked_seconds = max(0, int((out_dt - in_dt).total_seconds()))
+                        worked_start_dt = in_dt
+                        if shift_start_dt and in_dt:
+                            worked_start_dt = max(in_dt, shift_start_dt)
+                        worked_seconds = max(0, int((out_dt - worked_start_dt).total_seconds()))
                     except Exception:
                         worked_seconds = 0
                 else:
@@ -2658,34 +2775,69 @@ class CheckingStatus(APIView):
         requires_photo_out = _requires_proof(out_mode)
         requires_location_out = _requires_proof(out_mode)
 
-        # Can clock-in?
+        # Window selection (FINAL spec)
+        in_window_start = check_in_window_start_dt
+        in_window_end = check_in_window_end_dt
+
+        out_window_start = cutoff_in_dt if (out_mode == AttendanceWorkMode.ON_DUTY) else check_out_window_start_dt
+        out_window_end = check_out_window_end_dt
+
+        def _in_window_ok(start_dt, end_dt) -> bool:
+            if start_dt and dt_now < start_dt:
+                return False
+            if end_dt and dt_now > end_dt:
+                return False
+            return True
+
+        in_window_ok = _in_window_ok(in_window_start, in_window_end)
+        out_window_ok = _in_window_ok(out_window_start, out_window_end)
+
+        # Block reasons for mobile UI (FINAL spec)
+        check_in_block_reason = None
+        check_out_block_reason = None
+
+        if clock_in_t or clock_out_t:
+            check_in_block_reason = "ALREADY_PUNCHED"
+        elif not in_allowed:
+            check_in_block_reason = "MODE_NOT_ALLOWED"
+        elif in_window_start and dt_now < in_window_start:
+            check_in_block_reason = "BEFORE_WINDOW_START"
+        elif in_window_end and dt_now > in_window_end:
+            check_in_block_reason = "AFTER_WINDOW_END"
+
+        # Can check-in? (FINAL spec)
         can_clock_in = (
             (not bool(clock_in_t))
             and (not bool(clock_out_t))
-            and (not bool(check_in_cutoff_has_passed))
             and in_allowed
+            and in_window_ok
         )
 
         # Can update checkout?
         can_update_clock_out = (
             bool(clock_out_t)
-            and (not bool(check_out_cutoff_has_passed))
-            and (out_mode == AttendanceWorkMode.WFA)
             and out_allowed
+            and out_window_ok
+            and ((out_mode == AttendanceWorkMode.WFA) or out_rejected)
         )
 
-        # Can clock-out?
+        # Can check-out? (FINAL spec)
         can_clock_out = False
-        if not check_out_cutoff_has_passed and out_allowed:
+        if not out_allowed:
+            check_out_block_reason = "MODE_NOT_ALLOWED"
+        elif out_window_start and dt_now < out_window_start:
+            check_out_block_reason = "BEFORE_WINDOW_START"
+        elif out_window_end and dt_now > out_window_end:
+            check_out_block_reason = "AFTER_WINDOW_END"
+        else:
+            # within window
             if clock_out_t:
-                can_clock_out = can_update_clock_out  # update only (WFA)
+                can_clock_out = can_update_clock_out
+                if not can_clock_out:
+                    check_out_block_reason = "ALREADY_CHECKED_OUT"
             else:
-                # OUT-only must wait until check-in cutoff passes
-                if out_req and out_req.scope == WorkModeRequestScope.OUT and not check_in_cutoff_has_passed:
-                    can_clock_out = False
-                else:
-                    # either checked-in already or "missing check-in" after cutoff
-                    can_clock_out = bool(clock_in_t) or bool(missing_check_in)
+                # allow clock-out even when check-in is missing (single-session placeholder)
+                can_clock_out = True
 
         # Suggested action (for mobile)
         suggested_action = None
@@ -2829,6 +2981,15 @@ class CheckingStatus(APIView):
             "can_clock_in": bool(can_clock_in),
             "can_clock_out": bool(can_clock_out),
             "can_update_clock_out": bool(can_update_clock_out),
+            # New (FINAL spec) keys
+            "can_check_in": bool(can_clock_in),
+            "can_check_out": bool(can_clock_out),
+            "check_in_window_start": in_window_start.strftime("%H:%M") if in_window_start else None,
+            "check_in_window_end": in_window_end.strftime("%H:%M") if in_window_end else None,
+            "check_out_window_start": out_window_start.strftime("%H:%M") if out_window_start else None,
+            "check_out_window_end": out_window_end.strftime("%H:%M") if out_window_end else None,
+            "check_in_block_reason": check_in_block_reason,
+            "check_out_block_reason": check_out_block_reason,
             "suggested_action": suggested_action,
             "update_check_out": bool(can_update_clock_out),  # legacy key for existing mobile UI
 
