@@ -238,6 +238,18 @@ class WorkModeRequestSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         attrs = super().validate(attrs)
 
+        # Reason/Notes is required on create, and must not be cleared on update.
+        # (Model field is blank=True for backward compatibility, but UX requires it.)
+        reason_in = attrs.get("reason")
+        if self.instance is None:
+            # Creating
+            if reason_in is None or str(reason_in).strip() == "":
+                raise serializers.ValidationError({"reason": "Reason / Notes is required."})
+        else:
+            # Updating via serializer (some endpoints may use serializer directly)
+            if "reason" in attrs and str(reason_in or "").strip() == "":
+                raise serializers.ValidationError({"reason": "Reason / Notes is required."})
+
         employee = attrs.get("employee_id") or getattr(self.instance, "employee_id", None)
         mode = attrs.get("mode") or getattr(self.instance, "mode", None)
         scope = attrs.get("scope") or getattr(self.instance, "scope", None)
