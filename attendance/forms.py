@@ -575,57 +575,58 @@ class AttendanceRequestForm(BaseModelForm):
         )
 
     def __init__(self, *args, **kwargs):
-        if instance := kwargs.get("instance"):
+        instance = kwargs.get("instance")
+        if instance is not None:
             # django forms not showing value inside the date, time html element.
             # so here overriding default forms instance method to set initial value
             initial = {
                 "attendance_date": instance.attendance_date.strftime("%Y-%m-%d"),
-                "attendance_clock_in": instance.attendance_clock_in.strftime("%H:%M"),
-                "attendance_clock_in_date": instance.attendance_clock_in_date.strftime(
-                    "%Y-%m-%d"
-                ),
             }
-            if instance.attendance_clock_out_date is not None:
-                initial["attendance_clock_out"] = (
-                    instance.attendance_clock_out.strftime("%H:%M")
-                )
-                initial["attendance_clock_out_date"] = (
-                    instance.attendance_clock_out_date.strftime("%Y-%m-%d")
-                )
+            if getattr(instance, 'attendance_clock_in', None) is not None:
+                initial["attendance_clock_in"] = instance.attendance_clock_in.strftime("%H:%M")
+            if getattr(instance, 'attendance_clock_in_date', None) is not None:
+                initial["attendance_clock_in_date"] = instance.attendance_clock_in_date.strftime("%Y-%m-%d")
+            if getattr(instance, 'attendance_clock_out', None) is not None:
+                initial["attendance_clock_out"] = instance.attendance_clock_out.strftime("%H:%M")
+            if getattr(instance, 'attendance_clock_out_date', None) is not None:
+                initial["attendance_clock_out_date"] = instance.attendance_clock_out_date.strftime("%Y-%m-%d")
             kwargs["initial"] = initial
+
         super().__init__(*args, **kwargs)
-        self.fields["attendance_clock_out_date"].required = False
-        self.fields["attendance_clock_out"].required = False
-        self.fields["shift_id"].widget.attrs.update(
-            {
-                "id": str(uuid.uuid4()),
-                "hx-include": "#attendanceRequestForm",
-                "hx-target": "#attendanceRequestDiv",
-                "hx-swap": "outerHTML",
-                "hx-get": "/attendance/update-fields-based-shift",
-            }
-        )
-        for field in [
+
+        # Allow per-day request: IN only / OUT only / BOTH
+        for f in [
             "attendance_clock_in_date",
             "attendance_clock_in",
             "attendance_clock_out_date",
             "attendance_clock_out",
         ]:
-            self.update_worked_hour_hx_fields(field)
-        self.fields["attendance_date"].widget.attrs.update(
-            {
-                "onchange": "attendanceDateChange($(this))",
-            }
-        )
-        self.fields["work_type_id"].widget.attrs.update({"id": str(uuid.uuid4())})
-        self.fields["batch_attendance_id"].choices = list(
-            self.fields["batch_attendance_id"].choices
-        ) + [("dynamic_create", "Dynamic create")]
-        self.fields["batch_attendance_id"].widget.attrs.update(
-            {
-                "onchange": "dynamicBatchAttendance($(this))",
-            }
-        )
+            if f in self.fields:
+                self.fields[f].required = False
+
+        # Shift / worked hour / minimum hour should not be chosen/typed by user
+        for f in ["shift_id", "attendance_worked_hour", "minimum_hour"]:
+            if f in self.fields:
+                self.fields[f].required = False
+                self.fields[f].widget = forms.HiddenInput()
+
+        if 'minimum_hour' in self.fields:
+            self.fields['minimum_hour'].initial = '00:00'
+        if 'attendance_worked_hour' in self.fields:
+            self.fields['attendance_worked_hour'].initial = '00:00'
+
+        if 'attendance_date' in self.fields:
+            self.fields['attendance_date'].widget.attrs.update({
+                'onchange': 'attendanceDateChange($(this))',
+            })
+        if 'work_type_id' in self.fields:
+            self.fields['work_type_id'].widget.attrs.update({'id': str(uuid.uuid4())})
+
+        if 'batch_attendance_id' in self.fields:
+            self.fields['batch_attendance_id'].choices = list(self.fields['batch_attendance_id'].choices) + [("dynamic_create", "Dynamic create")]
+            self.fields['batch_attendance_id'].widget.attrs.update({
+                'onchange': 'dynamicBatchAttendance($(this))',
+            })
 
     class Meta:
         """
@@ -686,9 +687,7 @@ class NewRequestForm(AttendanceRequestForm):
                 widget=forms.Select(
                     attrs={
                         "class": "oh-select oh-select-2 w-100",
-                        "hx-target": "#id_shift_id_div",
-                        "hx-get": "/attendance/get-employee-shift?bulk=False",
-                    }
+                                            }
                 ),
                 initial=view_initial.get("employee_id"),
             ),
@@ -723,50 +722,110 @@ class NewRequestForm(AttendanceRequestForm):
     def clean(self) -> Dict[str, Any]:
         super().clean()
 
-        employee = self.cleaned_data["employee_id"]
-        attendance_date = self.cleaned_data["attendance_date"]
-        attendances = Attendance.objects.filter(
-            employee_id=employee, attendance_date=attendance_date
-        )
-        if employee and not hasattr(employee, "employee_work_info"):
+        employee = self.cleaned_data.get('employee_id')
+        attendance_date = self.cleaned_data.get('attendance_date')
+
+        if employee and not hasattr(employee, 'employee_work_info'):
             raise ValidationError(_("Employee work info not found"))
+
+        # Must provide at least one time (IN / OUT / BOTH)
+        in_time = self.cleaned_data.get('attendance_clock_in')
+        out_time = self.cleaned_data.get('attendance_clock_out')
+        if not in_time and not out_time:
+            raise ValidationError({
+                'attendance_clock_in': _("Provide Check-In and/or Check-Out time"),
+            })
+
+        in_date = self.cleaned_data.get('attendance_clock_in_date')
+        out_date = self.cleaned_data.get('attendance_clock_out_date')
+
+        if in_time and not in_date:
+            in_date = attendance_date
+            self.cleaned_data['attendance_clock_in_date'] = in_date
+        if out_time and not out_date:
+            out_date = attendance_date
+            self.cleaned_data['attendance_clock_out_date'] = out_date
+
+        # Default shift from employee work info if not provided
+        shift = self.cleaned_data.get('shift_id')
+        if not shift and employee and hasattr(employee, 'employee_work_info'):
+            shift = employee.employee_work_info.shift_id
+            self.cleaned_data['shift_id'] = shift
+
+        # Default work type from employee work info if not provided
+        work_type = self.cleaned_data.get('work_type_id')
+        if not work_type and employee and hasattr(employee, 'employee_work_info'):
+            work_type = employee.employee_work_info.work_type_id
+            self.cleaned_data['work_type_id'] = work_type
+
+        # Default minimum_hour
+        minimum_hour = (
+            self.cleaned_data.get('minimum_hour')
+            or self.data.get('minimum_hour')
+            or '00:00'
+        )
+        self.cleaned_data['minimum_hour'] = minimum_hour
+
+        # Compute worked hour when both IN & OUT are present
+        worked_hour = self.cleaned_data.get('attendance_worked_hour')
+        if not worked_hour:
+            worked_hour = '00:00'
+            if in_time and out_time and in_date and out_date:
+                try:
+                    import datetime as _dt
+                    in_dt = _dt.datetime.combine(in_date, in_time)
+                    out_dt = _dt.datetime.combine(out_date, out_time)
+                    if out_dt < in_dt:
+                        out_dt = out_dt + _dt.timedelta(days=1)
+                    mins = int((out_dt - in_dt).total_seconds() // 60)
+                    h = mins // 60
+                    m = mins % 60
+                    worked_hour = f"{h:02d}:{m:02d}"
+                except Exception:
+                    worked_hour = '00:00'
+        self.cleaned_data['attendance_worked_hour'] = worked_hour
+
+        # Check if attendance exists for the employee and date
+        attendances = Attendance.objects.filter(employee_id=employee, attendance_date=attendance_date)
+
         data = {
-            "employee_id": employee,
-            "attendance_date": attendance_date,
-            "attendance_clock_in_date": self.cleaned_data["attendance_clock_in_date"],
-            "attendance_clock_in": self.cleaned_data["attendance_clock_in"],
-            "attendance_clock_out": self.cleaned_data["attendance_clock_out"],
-            "attendance_clock_out_date": self.cleaned_data["attendance_clock_out_date"],
-            "shift_id": self.cleaned_data["shift_id"],
-            "work_type_id": self.cleaned_data["work_type_id"],
-            "attendance_worked_hour": self.cleaned_data["attendance_worked_hour"],
-            "minimum_hour": self.data["minimum_hour"],
+            'employee_id': employee,
+            'attendance_date': attendance_date,
+            'attendance_clock_in_date': in_date,
+            'attendance_clock_in': in_time,
+            'attendance_clock_out': out_time,
+            'attendance_clock_out_date': out_date,
+            'shift_id': shift,
+            'work_type_id': work_type,
+            'attendance_worked_hour': worked_hour,
+            'minimum_hour': minimum_hour,
         }
+
         if attendances.exists():
-            data["employee_id"] = employee.id
-            data["attendance_date"] = str(attendance_date)
-            data["attendance_clock_in_date"] = self.data["attendance_clock_in_date"]
-            data["attendance_clock_in"] = self.data["attendance_clock_in"]
-            data["attendance_clock_out"] = (
-                None
-                if data["attendance_clock_out"] == "None"
-                else data["attendance_clock_out"]
+            # update_request: store requested_data on existing record
+            data['employee_id'] = employee.id
+            data['attendance_date'] = str(attendance_date)
+            data['attendance_clock_in_date'] = self.data.get('attendance_clock_in_date') or (str(in_date) if in_date else None)
+            data['attendance_clock_in'] = self.data.get('attendance_clock_in') or (in_time.strftime('%H:%M') if in_time else None)
+            data['attendance_clock_out'] = (
+                None if (self.data.get('attendance_clock_out') in (None, '', 'None')) else self.data.get('attendance_clock_out')
             )
-            data["attendance_clock_out_date"] = (
-                None
-                if data["attendance_clock_out_date"] == "None"
-                else data["attendance_clock_out_date"]
+            data['attendance_clock_out_date'] = (
+                None if (self.data.get('attendance_clock_out_date') in (None, '', 'None')) else self.data.get('attendance_clock_out_date')
             )
-            data["work_type_id"] = self.data["work_type_id"]
-            data["shift_id"] = self.data["shift_id"]
+            data['work_type_id'] = self.data.get('work_type_id') or (str(getattr(work_type, 'id', '')) if work_type else '')
+            data['shift_id'] = self.data.get('shift_id') or (str(getattr(shift, 'id', '')) if shift else '')
+            data['attendance_worked_hour'] = self.data.get('attendance_worked_hour') or worked_hour
+            data['minimum_hour'] = self.data.get('minimum_hour') or minimum_hour
+
             attendance = attendances.first()
-            for key, value in data.items():
+            for key, value in list(data.items()):
                 data[key] = str(value)
             attendance.requested_data = json.dumps(data)
             attendance.is_validate_request = True
-            if attendance.request_type != "create_request":
-                attendance.request_type = "update_request"
-            attendance.request_description = self.data["request_description"]
+            if attendance.request_type != 'create_request':
+                attendance.request_type = 'update_request'
+            attendance.request_description = self.data.get('request_description')
             attendance.save()
             self.new_instance = None
             return
@@ -774,8 +833,8 @@ class NewRequestForm(AttendanceRequestForm):
         new_instance = Attendance(**data)
         new_instance.is_validate_request = True
         new_instance.attendance_validated = False
-        new_instance.request_description = self.data["request_description"]
-        new_instance.request_type = "create_request"
+        new_instance.request_description = self.data.get('request_description')
+        new_instance.request_type = 'create_request'
         self.new_instance = new_instance
         return
 
@@ -1043,9 +1102,7 @@ class BulkAttendanceRequestForm(BaseModelForm):
         queryset=Employee.objects.filter(is_active=True),
         widget=forms.Select(
             attrs={
-                "hx-target": "#id_shift_id_div",
-                "hx-get": "/attendance/get-employee-shift?bulk=True",
-            }
+                            }
         ),
         label=_("Employee"),
     )
@@ -1116,14 +1173,19 @@ class BulkAttendanceRequestForm(BaseModelForm):
         request = getattr(horilla_middlewares._thread_locals, "request", None)
         employee = request.user.employee_get
         super().__init__(*args, **kwargs)
+        # Shift / worked hour / minimum hour should not be chosen/typed by user
+        for f in ["shift_id", "attendance_worked_hour", "minimum_hour"]:
+            if f in self.fields:
+                self.fields[f].required = False
+                self.fields[f].widget = forms.HiddenInput()
+        if 'minimum_hour' in self.fields:
+            self.fields['minimum_hour'].initial = '00:00'
+        if 'attendance_worked_hour' in self.fields:
+            self.fields['attendance_worked_hour'].initial = '00:00'
+
         if employee and hasattr(employee, "employee_work_info"):
             shift = employee.employee_work_info.shift_id
             self.fields["shift_id"].initial = shift
-        for field in [
-            "attendance_clock_in",
-            "attendance_clock_out",
-        ]:
-            self.update_worked_hour_hx_fields(field)
         if request.user.has_perm("attendance.add_attendance") or is_reportingmanager(
             request
         ):
@@ -1145,8 +1207,8 @@ class BulkAttendanceRequestForm(BaseModelForm):
         cleaned_data = self.cleaned_data
         from_date = cleaned_data.get("from_date")
         to_date = cleaned_data.get("to_date")
-        attendance_worked_hour = cleaned_data.get("attendance_worked_hour")
-        minimum_hour = cleaned_data.get("minimum_hour")
+        attendance_worked_hour = cleaned_data.get("attendance_worked_hour") or "00:00"
+        minimum_hour = cleaned_data.get("minimum_hour") or "00:00"
         attendance_clock_out = cleaned_data.get("attendance_clock_out")
         employee_id = cleaned_data.get("employee_id")
         now = datetime.datetime.now().time()
@@ -1182,12 +1244,12 @@ class BulkAttendanceRequestForm(BaseModelForm):
         employee_id = cleaned_data.get("employee_id")
         from_date = cleaned_data.get("from_date")
         to_date = cleaned_data.get("to_date")
-        shift_id = cleaned_data.get("shift_id")
+        shift_id = cleaned_data.get("shift_id") or employee_id.employee_work_info.shift_id
         attendance_clock_in = cleaned_data.get("attendance_clock_in")
         attendance_clock_out = cleaned_data.get("attendance_clock_out")
         request_description = cleaned_data.get("request_description")
-        attendance_worked_hour = cleaned_data.get("attendance_worked_hour")
-        minimum_hour = cleaned_data.get("minimum_hour")
+        attendance_worked_hour = cleaned_data.get("attendance_worked_hour") or "00:00"
+        minimum_hour = cleaned_data.get("minimum_hour") or "00:00"
         work_type_id = employee_id.employee_work_info.work_type_id
         date_list = get_date_list(employee_id, from_date, to_date)
         batch = (
