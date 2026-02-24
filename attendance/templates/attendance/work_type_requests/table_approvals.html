@@ -31,6 +31,7 @@
             {% if sort_app == 'start_date' %}{% if dir_app == 'asc' %} ▲{% else %} ▼{% endif %}{% endif %}
           </a>
         </div>
+        <div class="oh-sticky-table__th">{% trans "Status" %}</div>
         <div class="oh-sticky-table__th">{% trans "Attachments" %}</div>
         <div class="oh-sticky-table__th">{% trans "Note" %}</div>
         <div class="oh-sticky-table__th oh-sticky-table__right">{% trans "Actions" %}</div>
@@ -64,6 +65,18 @@
               {% endif %}
             </div>
             <div class="oh-sticky-table__td">
+              {% if r.status == 'waiting_for_approval' %}
+                <span class="oh-badge oh-badge--success oh-badge--small oh-badge--round">{% trans "Waiting" %}</span>
+              {% elif r.status == 'pending' %}
+                <span class="oh-badge oh-badge--warning oh-badge--small oh-badge--round">{% trans "Pending" %}</span>
+                {% if r.mode == 'on_duty' and not r.files.count %}
+                  <div class="text-muted" style="font-size: 11px; margin-top: 2px;">{% trans "Waiting for letter" %}</div>
+                {% endif %}
+              {% else %}
+                <span class="oh-badge oh-badge--secondary oh-badge--small oh-badge--round">{{ r.status|upper }}</span>
+              {% endif %}
+            </div>
+            <div class="oh-sticky-table__td">
               {% with c=r.files.count %}
                 {% if c %}
                   <div class="d-flex align-items-center gap-2">
@@ -93,9 +106,15 @@
             </div>
             <div class="oh-sticky-table__td oh-sticky-table__right">
               <div class="d-flex gap-2 justify-content-end">
-                <button class="oh-btn oh-btn--success" hx-post="{% url 'attendance-work-type-request-approve' r.id %}" hx-target="#ohMessages" hx-swap="innerHTML" onclick="event.preventDefault()">
-                  <ion-icon name="checkmark-circle-outline"></ion-icon>
-                </button>
+                {% if r.status == 'waiting_for_approval' %}
+                  <button class="oh-btn oh-btn--success" hx-post="{% url 'attendance-work-type-request-approve' r.id %}" hx-target="#ohMessages" hx-swap="innerHTML" onclick="event.preventDefault()">
+                    <ion-icon name="checkmark-circle-outline"></ion-icon>
+                  </button>
+                {% else %}
+                  <button class="oh-btn oh-btn--success" disabled title="{% trans 'Only waiting requests can be approved' %}">
+                    <ion-icon name="checkmark-circle-outline"></ion-icon>
+                  </button>
+                {% endif %}
 
                 <button class="oh-btn oh-btn--danger" data-toggle="oh-modal-toggle" data-target="#objectDetailsModal"
                   hx-get="{% url 'attendance-work-type-request-reject' r.id %}" hx-target="#objectDetailsModalTarget" onclick="event.preventDefault()">
