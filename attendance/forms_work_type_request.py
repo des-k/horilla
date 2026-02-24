@@ -13,6 +13,7 @@ from typing import Optional
 
 from django import forms
 from django.core.exceptions import ValidationError
+from django.utils import timezone
 
 from attendance.models import (
     AttendanceWorkMode,
@@ -71,7 +72,7 @@ class WorkTypeRequestCreateForm(forms.ModelForm):
 
     reason = forms.CharField(
         label="Note",
-        required=True,
+        required=False,
         widget=forms.Textarea(attrs={"class": "oh-input w-100", "rows": 3}),
     )
 
@@ -84,6 +85,14 @@ class WorkTypeRequestCreateForm(forms.ModelForm):
     def __init__(self, *args, employee=None, **kwargs):
         super().__init__(*args, **kwargs)
         self._employee = employee
+
+        # UX: prevent picking past dates in the browser (server-side validation still applies).
+        today = timezone.localdate().isoformat()
+        try:
+            self.fields["start_date"].widget.attrs.setdefault("min", today)
+            self.fields["end_date"].widget.attrs.setdefault("min", today)
+        except Exception:
+            pass
 
         # Default end_date = start_date (single-day scopes will sync via JS too)
         if self.initial.get("start_date") and not self.initial.get("end_date"):
