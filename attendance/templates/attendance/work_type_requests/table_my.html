@@ -71,7 +71,18 @@
               {% else %}
                 <span class="oh-badge oh-badge--secondary oh-badge--small oh-badge--round">PENDING</span>
               {% endif %}
-            </div>
+            
+
+              {% if r.status == 'approved' or r.status == 'rejected' %}
+                {% if r.approved_by %}
+                  <div class="text-muted" style="font-size: 12px; margin-top: 4px;">
+                    {% if r.status == 'approved' %}{% trans "Approved by" %}{% else %}{% trans "Rejected by" %}{% endif %}:
+                    {{ r.approved_by.employee_first_name }} {{ r.approved_by.employee_last_name }}
+                    {% if r.approved_at %} • {{ r.approved_at|date:"Y-m-d H:i" }}{% endif %}
+                  </div>
+                {% endif %}
+              {% endif %}
+</div>
             <div class="oh-sticky-table__td">
               {% with c=r.files.count %}
                 {% if c %}
