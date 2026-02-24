@@ -35,6 +35,7 @@ from typing import Optional, Tuple
 from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.db.models import Q
+from django.utils import timezone
 
 from attendance.models import (
     Attendance,
@@ -206,6 +207,13 @@ def validate_work_type_request(
     instance_id: Optional[int] = None,
 ) -> None:
     """Validate payload for create/update against business rules."""
+
+    # Disallow backdated requests (creation only).
+    # NOTE: allow editing existing records (attachments/note) even if they're in the past.
+    if instance_id is None:
+        today = timezone.localdate()
+        if start_date < today:
+            raise ValidationError("Start date cannot be in the past.")
 
     if mode not in (AttendanceWorkMode.WFA, AttendanceWorkMode.ON_DUTY):
         raise ValidationError("Work Type Request only supports WFA and ON DUTY.")
