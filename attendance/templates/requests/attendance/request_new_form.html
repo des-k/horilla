@@ -12,6 +12,7 @@
         <div class="oh-general__tab-target oh-profile-section" id="personal">
             <form hx-post="{% url 'request-new-attendance' %}?bulk={{bulk}}" hx-target="#objectCreateModalTarget" id="attendanceRequestForm">
                 {% csrf_token %}
+                {% for hf in form.hidden_fields %}{{ hf }}{% endfor %}
                 <div class="oh-profile-section__card">
                     <div class="row">
                         <div class="col-12">{{form.non_field_errors}}</div>
