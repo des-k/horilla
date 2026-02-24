@@ -1905,7 +1905,12 @@ class WorkModeRequestView(APIView):
 
 
 class WorkModeRequestApprovalsView(APIView):
-    """List requests awaiting approval (WAITING_FOR_APPROVAL only)."""
+    """List requests for managers/admins.
+
+    Includes:
+    - WAITING_FOR_APPROVAL (approvable)
+    - ON_DUTY PENDING (not yet approvable, usually waiting for letter upload)
+    """
 
     permission_classes = [IsAuthenticated]
 
@@ -1962,7 +1967,11 @@ class WorkModeRequestApprovalsView(APIView):
         except Exception:
             pass
 
-        qs = WorkModeRequest.objects.filter(status=WorkModeRequestStatus.WAITING_FOR_APPROVAL)
+        from django.db.models import Q
+        qs = WorkModeRequest.objects.filter(
+            Q(status=WorkModeRequestStatus.WAITING_FOR_APPROVAL)
+            | Q(status=WorkModeRequestStatus.PENDING, mode=AttendanceWorkMode.ON_DUTY)
+        )
 
         if request.user.has_perm("attendance.change_workmoderequest"):
             pass
