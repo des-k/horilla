@@ -34,7 +34,8 @@ from attendance.models import (
 )
 from attendance.services.work_type_request_rules import apply_rejection_to_attendance, has_attachments
 from attendance.methods.utils import paginator_qry
-from base.methods import filtersubordinates, is_reportingmanager
+from base.methods import filtersubordinates
+from employee.models import EmployeeWorkInformation
 from horilla.decorators import hx_request_required, login_required
 
 
@@ -186,10 +187,20 @@ def work_type_request_view(request):
     # Apply sorting
     my_qs = _apply_sort(my_qs, sort_field=allowed_sort_my[sort_my], direction=dir_my)
 
-    # Approvals: only WAITING_FOR_APPROVAL + exclude self
-    can_approve = request.user.has_perm("attendance.change_workmoderequest") or is_reportingmanager(request)
+    # Approvals: managers/admins can see WAITING, and also ON_DUTY PENDING (needs letter)
+    # so they understand why it is not yet approvable.
+    is_manager = False
+    try:
+        is_manager = EmployeeWorkInformation.objects.filter(reporting_manager_id=employee).exists()
+    except Exception:
+        is_manager = False
+    can_approve = request.user.has_perm("attendance.change_workmoderequest") or is_manager
 
-    approvals_qs = WorkModeRequest.objects.filter(status=WorkModeRequestStatus.WAITING_FOR_APPROVAL)
+    from django.db.models import Q
+    approvals_qs = WorkModeRequest.objects.filter(
+        Q(status=WorkModeRequestStatus.WAITING_FOR_APPROVAL)
+        | Q(status=WorkModeRequestStatus.PENDING, mode=AttendanceWorkMode.ON_DUTY)
+    )
     approvals_qs = filtersubordinates(
         request=request,
         queryset=approvals_qs,
