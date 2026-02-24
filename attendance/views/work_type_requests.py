@@ -187,9 +187,7 @@ def work_type_request_view(request):
     my_qs = _apply_sort(my_qs, sort_field=allowed_sort_my[sort_my], direction=dir_my)
 
     # Approvals: only WAITING_FOR_APPROVAL + exclude self
-    can_approve = request.user.has_perm("attendance.change_workmoderequest") or is_reportingmanager(
-        request.user
-    )
+    can_approve = request.user.has_perm("attendance.change_workmoderequest") or is_reportingmanager(request)
 
     approvals_qs = WorkModeRequest.objects.filter(status=WorkModeRequestStatus.WAITING_FOR_APPROVAL)
     approvals_qs = filtersubordinates(
@@ -309,9 +307,7 @@ def work_type_request_attachments(request, obj_id: int):
 
     req = get_object_or_404(WorkModeRequest, id=obj_id)
 
-    can_approve = request.user.has_perm("attendance.change_workmoderequest") or is_reportingmanager(
-        request.user
-    )
+    can_approve = request.user.has_perm("attendance.change_workmoderequest") or is_reportingmanager(request)
 
     if req.employee_id_id != employee.id and not can_approve:
         return HttpResponseForbidden("Not allowed")
@@ -445,9 +441,7 @@ def work_type_request_approve(request, obj_id: int):
     if employee is None:
         return HttpResponseForbidden("Employee profile required")
 
-    can_approve = request.user.has_perm("attendance.change_workmoderequest") or is_reportingmanager(
-        request.user
-    )
+    can_approve = request.user.has_perm("attendance.change_workmoderequest") or is_reportingmanager(request)
     if not can_approve:
         return HttpResponseForbidden("No approval permission")
 
@@ -473,9 +467,7 @@ def work_type_request_reject(request, obj_id: int):
     if employee is None:
         return HttpResponseForbidden("Employee profile required")
 
-    can_approve = request.user.has_perm("attendance.change_workmoderequest") or is_reportingmanager(
-        request.user
-    )
+    can_approve = request.user.has_perm("attendance.change_workmoderequest") or is_reportingmanager(request)
     if not can_approve:
         return HttpResponseForbidden("No approval permission")
 
