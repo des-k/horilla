@@ -71,7 +71,7 @@ class WorkTypeRequestCreateForm(forms.ModelForm):
 
     reason = forms.CharField(
         label="Note",
-        required=False,
+        required=True,
         widget=forms.Textarea(attrs={"class": "oh-input w-100", "rows": 3}),
     )
 
