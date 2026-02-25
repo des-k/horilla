@@ -13,7 +13,7 @@ Business rules (FINAL spec):
     earliest = shift_end - early_checkout_grace_minutes
     latest   = cutoff_out_dt (if provided) else shift_end + max_late_checkout_hours
 - Check-out window (ON_DUTY presence-only):
-    earliest = cutoff_in_dt
+    earliest = cutoff_in_dt + 1 minute
     latest   = cutoff_out_dt (if provided) else shift_end + max_late_checkout_hours
 
 Reject reasons (Option B):
@@ -92,7 +92,7 @@ def compute_checkout_window_on_duty(
     cfg: Optional[WindowConfig] = None,
 ) -> Tuple[Optional[datetime], Optional[datetime]]:
     cfg_n = normalize_config(cfg)
-    start = cutoff_in_dt
+    start = (cutoff_in_dt + timedelta(minutes=1)) if cutoff_in_dt else None
     if cutoff_out_dt:
         end = cutoff_out_dt
     elif shift_end_dt:
