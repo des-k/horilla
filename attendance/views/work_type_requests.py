@@ -34,8 +34,7 @@ from attendance.models import (
 )
 from attendance.services.work_type_request_rules import apply_rejection_to_attendance, has_attachments
 from attendance.methods.utils import paginator_qry
-from base.methods import filtersubordinates
-from employee.models import EmployeeWorkInformation
+from base.methods import filtersubordinates, is_reportingmanager
 from horilla.decorators import hx_request_required, login_required
 
 
@@ -84,8 +83,20 @@ def _apply_sort(qs, *, sort_field: str, direction: str, secondary: str = "-id"):
 
 @login_required
 def work_type_request_view(request):
+    """Main page: My Requests + Approvals.
+
+    Some deployments have admin/superuser accounts that are not linked to an
+    Employee profile (employee_get=None). For those users, we still want the
+    page (especially Approvals) to work when they have global permission or are
+    a Django superuser.
+    """
+
     employee = getattr(request.user, "employee_get", None)
-    if employee is None:
+    is_super = bool(getattr(request.user, "is_superuser", False))
+    has_global_perm = request.user.has_perm("attendance.change_workmoderequest")
+
+    # Only forbid when the user is not a superuser/global approver AND has no employee.
+    if employee is None and not (is_super or has_global_perm):
         return HttpResponseForbidden("Employee profile required")
 
     search = (request.GET.get("search") or "").strip()
@@ -158,7 +169,8 @@ def work_type_request_view(request):
     if dir_app not in ("asc", "desc"):
         dir_app = "desc"
 
-    my_qs = WorkModeRequest.objects.filter(employee_id=employee)
+    # My Requests table requires an employee profile.
+    my_qs = WorkModeRequest.objects.none() if employee is None else WorkModeRequest.objects.filter(employee_id=employee)
 
     # Apply shared quick filters
     mode_value = allowed_mode_filter.get(mode_filter)
@@ -187,26 +199,23 @@ def work_type_request_view(request):
     # Apply sorting
     my_qs = _apply_sort(my_qs, sort_field=allowed_sort_my[sort_my], direction=dir_my)
 
-    # Approvals: managers/admins can see WAITING, and also ON_DUTY PENDING (needs letter)
-    # so they understand why it is not yet approvable.
-    is_manager = False
-    try:
-        is_manager = EmployeeWorkInformation.objects.filter(reporting_manager_id=employee).exists()
-    except Exception:
-        is_manager = False
-    can_approve = request.user.has_perm("attendance.change_workmoderequest") or is_manager
+    # Approvals: only WAITING_FOR_APPROVAL.
+    # - Global approver (permission) / superuser => see all.
+    # - Reporting manager => see subordinates.
+    can_approve = bool(is_super or has_global_perm or is_reportingmanager(request))
 
-    from django.db.models import Q
-    approvals_qs = WorkModeRequest.objects.filter(
-        Q(status=WorkModeRequestStatus.WAITING_FOR_APPROVAL)
-        | Q(status=WorkModeRequestStatus.PENDING, mode=AttendanceWorkMode.ON_DUTY)
-    )
-    approvals_qs = filtersubordinates(
-        request=request,
-        queryset=approvals_qs,
-        perm="attendance.change_workmoderequest",
-        field="employee_id",
-    ).exclude(employee_id=employee)
+    approvals_qs = WorkModeRequest.objects.filter(status=WorkModeRequestStatus.WAITING_FOR_APPROVAL)
+    if not (is_super or has_global_perm):
+        approvals_qs = filtersubordinates(
+            request=request,
+            queryset=approvals_qs,
+            perm="attendance.change_workmoderequest",
+            field="employee_id",
+        )
+
+    # Exclude own requests (if we have an employee profile)
+    if employee is not None:
+        approvals_qs = approvals_qs.exclude(employee_id=employee)
 
     # Apply shared quick filters
     if mode_value:
@@ -313,14 +322,20 @@ def work_type_request_attachments(request, obj_id: int):
     - approver/manager can view
     """
     employee = getattr(request.user, "employee_get", None)
-    if employee is None:
+    is_super = bool(getattr(request.user, "is_superuser", False))
+    has_global_perm = request.user.has_perm("attendance.change_workmoderequest")
+    if employee is None and not (is_super or has_global_perm):
         return HttpResponseForbidden("Employee profile required")
 
     req = get_object_or_404(WorkModeRequest, id=obj_id)
 
-    can_approve = request.user.has_perm("attendance.change_workmoderequest") or is_reportingmanager(request)
+    can_approve = bool(is_super or has_global_perm or is_reportingmanager(request))
 
-    if req.employee_id_id != employee.id and not can_approve:
+    if employee is not None and req.employee_id_id != employee.id and not can_approve:
+        return HttpResponseForbidden("Not allowed")
+
+    # If employee is None (superuser/global approver without profile), rely on can_approve only.
+    if employee is None and not can_approve:
         return HttpResponseForbidden("Not allowed")
 
     files = req.files.all()
@@ -449,10 +464,12 @@ def work_type_request_cancel(request, obj_id: int):
 @hx_request_required
 def work_type_request_approve(request, obj_id: int):
     employee = getattr(request.user, "employee_get", None)
-    if employee is None:
+    is_super = bool(getattr(request.user, "is_superuser", False))
+    has_global_perm = request.user.has_perm("attendance.change_workmoderequest")
+    if employee is None and not (is_super or has_global_perm):
         return HttpResponseForbidden("Employee profile required")
 
-    can_approve = request.user.has_perm("attendance.change_workmoderequest") or is_reportingmanager(request)
+    can_approve = bool(is_super or has_global_perm or is_reportingmanager(request))
     if not can_approve:
         return HttpResponseForbidden("No approval permission")
 
@@ -463,7 +480,7 @@ def work_type_request_approve(request, obj_id: int):
         return HttpResponse("<script>location.reload();</script>")
 
     req.status = WorkModeRequestStatus.APPROVED
-    req.approved_by = employee
+    req.approved_by = employee if employee is not None else None
     req.approved_at = timezone.now()
     req.save(update_fields=["status", "approved_by", "approved_at"])
 
@@ -475,10 +492,12 @@ def work_type_request_approve(request, obj_id: int):
 @hx_request_required
 def work_type_request_reject(request, obj_id: int):
     employee = getattr(request.user, "employee_get", None)
-    if employee is None:
+    is_super = bool(getattr(request.user, "is_superuser", False))
+    has_global_perm = request.user.has_perm("attendance.change_workmoderequest")
+    if employee is None and not (is_super or has_global_perm):
         return HttpResponseForbidden("Employee profile required")
 
-    can_approve = request.user.has_perm("attendance.change_workmoderequest") or is_reportingmanager(request)
+    can_approve = bool(is_super or has_global_perm or is_reportingmanager(request))
     if not can_approve:
         return HttpResponseForbidden("No approval permission")
 
@@ -501,7 +520,7 @@ def work_type_request_reject(request, obj_id: int):
             req.status = WorkModeRequestStatus.REJECTED
             req.reason_code = form.cleaned_data.get("reason_code")
             req.reason = (form.cleaned_data.get("reason") or "").strip() or req.reason
-            req.approved_by = employee
+            req.approved_by = employee if employee is not None else None
             req.approved_at = timezone.now()
             req.save(update_fields=["status", "reason_code", "reason", "approved_by", "approved_at"])
 
