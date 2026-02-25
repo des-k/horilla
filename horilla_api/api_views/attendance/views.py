@@ -2718,6 +2718,7 @@ class CheckingStatus(APIView):
         # Worked hours calculation
         worked_seconds = 0
         is_working = False
+        in_dt = None
         if attendance and not is_presensi_only:
             if clock_in_t:
                 in_date = getattr(attendance, "attendance_clock_in_date", None) or attendance_date
@@ -2788,12 +2789,35 @@ class CheckingStatus(APIView):
         in_window_start = check_in_window_start_dt
         in_window_end = check_in_window_end_dt
 
+        # Window end is fixed at cutoff_out when available (per spec); fallback to helper-computed end.
+        out_window_end = cutoff_out_dt or check_out_window_end_dt
+
         if out_mode == AttendanceWorkMode.ON_DUTY:
             # ON_DUTY: start checkout AFTER check-in cutoff (avoid overlap at exact cutoff)
             out_window_start = (cutoff_in_dt + timedelta(minutes=1)) if cutoff_in_dt else check_out_window_start_dt
         else:
+            # WFO/WFA: dynamic checkout start follows actual check-in time, but clamped:
+            # - if checked-in earlier than shift start -> use shift start
+            # - if checked-in later than shift start + grace -> cap to shift start + grace
             out_window_start = check_out_window_start_dt
-        out_window_end = check_out_window_end_dt
+            try:
+                if in_dt and shift_start_dt and shift_end_dt:
+                    grace_sec = int(grace_seconds or 0)
+                    min_start = shift_start_dt
+                    max_start = shift_start_dt + timedelta(seconds=grace_sec)
+                    eff_in = in_dt
+                    if eff_in < min_start:
+                        eff_in = min_start
+                    elif grace_sec > 0 and eff_in > max_start:
+                        eff_in = max_start
+
+                    shift_duration = shift_end_dt - shift_start_dt
+                    dyn_end = eff_in + shift_duration
+
+                    early_grace_min = int(((rules or {}).get("window_config") or {}).get("early_checkout_grace_minutes") or 0)
+                    out_window_start = dyn_end - timedelta(minutes=early_grace_min)
+            except Exception:
+                pass
 
         def _in_window_ok(start_dt, end_dt) -> bool:
             if start_dt and dt_now < start_dt:
