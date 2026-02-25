@@ -1791,14 +1791,11 @@ class WorkModeRequestView(APIView):
         return uploaded
 
     def _attach_files(self, obj: WorkModeRequest, uploaded_files):
-        try:
-            from attendance.models import AttendanceRequestFile
+        from attendance.models import AttendanceRequestFile
 
-            for up in uploaded_files:
-                arf = AttendanceRequestFile.objects.create(file=up)
-                obj.files.add(arf)
-        except Exception:
-            pass
+        for up in uploaded_files:
+            arf = AttendanceRequestFile.objects.create(file=up)
+            obj.files.add(arf)
 
     @transaction.atomic
     def post(self, request):
@@ -1839,6 +1836,17 @@ class WorkModeRequestView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # IMPORTANT: For multipart/form-data, DRF includes uploaded files inside request.data.
+        # Our serializer expects `files` to be a list of PKs (M2M), not raw uploaded files.
+        # Attachments are handled separately from request.FILES (see _collect_uploaded_files).
+        for _k in ("files", "file", "files[]"):
+            try:
+                if hasattr(data, "pop"):
+                    data.pop(_k, None)
+            except Exception:
+                pass
+
+
         serializer = self.serializer_class(data=data)
         if not serializer.is_valid():
             return Response(serializer.errors, status=400)
@@ -1848,7 +1856,14 @@ class WorkModeRequestView(APIView):
 
         uploaded = self._collect_uploaded_files(request)
         if uploaded:
-            self._attach_files(obj, uploaded)
+            try:
+                self._attach_files(obj, uploaded)
+            except Exception as e:
+                transaction.set_rollback(True)
+                return Response(
+                    {"error": "Attachment upload failed.", "detail": str(e)},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
 
         # FINAL status rules
         if obj.mode == AttendanceWorkMode.WFA:
@@ -1911,7 +1926,17 @@ class WorkModeRequestView(APIView):
         # Attach files
         uploaded = self._collect_uploaded_files(request)
         if uploaded:
-            self._attach_files(obj, uploaded)
+            try:
+                self._attach_files(obj, uploaded)
+            except Exception as e:
+                try:
+                    transaction.set_rollback(True)
+                except Exception:
+                    pass
+                return Response(
+                    {"error": "Attachment upload failed.", "detail": str(e)},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
 
         # ON_DUTY: if PENDING and now has attachments => WAITING_FOR_APPROVAL
         if obj.mode == AttendanceWorkMode.ON_DUTY and obj.status == WorkModeRequestStatus.PENDING:
