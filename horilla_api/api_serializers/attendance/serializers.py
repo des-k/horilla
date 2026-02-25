@@ -228,8 +228,12 @@ class WorkModeRequestSerializer(serializers.ModelSerializer):
 
     def to_internal_value(self, data):
         # Allow clients to send `work_type` instead of legacy `mode`.
+        # NOTE: For multipart requests, DRF passes a QueryDict; calling dict(QueryDict)
+        # turns values into lists (e.g. {"mode": ["wfa"]}) and breaks ChoiceField.
+        # Use `.dict()` to get single values.
         try:
-            _mode, new_data = coerce_work_type_payload(dict(data))
+            raw = data.dict() if hasattr(data, "dict") else dict(data)
+            _mode, new_data = coerce_work_type_payload(raw)
             data = new_data
         except Exception:
             pass
