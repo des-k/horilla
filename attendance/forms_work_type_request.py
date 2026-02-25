@@ -37,7 +37,8 @@ class MultipleFileField(forms.FileField):
         if data in (None, "", []):
             return super().clean(None, initial)
         if isinstance(data, (list, tuple)):
-            return [super().clean(d, initial) for d in data]
+            parent_clean = super(MultipleFileField, self).clean
+            return [parent_clean(d, initial) for d in data]
         return super().clean(data, initial)
 
 
