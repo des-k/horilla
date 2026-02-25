@@ -71,8 +71,8 @@ class WorkTypeRequestCreateForm(forms.ModelForm):
     )
 
     reason = forms.CharField(
-        label="Note",
-        required=False,
+        label="Reason / Note",
+        required=True,
         widget=forms.Textarea(attrs={"class": "oh-input w-100", "rows": 3}),
     )
 
@@ -114,6 +114,12 @@ class WorkTypeRequestCreateForm(forms.ModelForm):
         start_date: Optional[date] = cleaned.get("start_date")
         end_date: Optional[date] = cleaned.get("end_date")
 
+        # Require non-empty reason (avoid whitespace-only submissions).
+        reason = (cleaned.get("reason") or "").strip()
+        if not reason:
+            raise ValidationError({"reason": "Reason / Note is required"})
+        cleaned["reason"] = reason
+
         if not start_date:
             return cleaned
 
@@ -143,7 +149,7 @@ class WorkTypeRequestUpdateForm(forms.Form):
     """Limited edit: add attachments + update note."""
 
     reason = forms.CharField(
-        label="Note",
+        label="Reason / Note",
         required=False,
         widget=forms.Textarea(attrs={"class": "oh-input w-100", "rows": 3}),
     )
