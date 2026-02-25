@@ -679,6 +679,34 @@ def clock_in_attendance_and_activity(
         defaults=attendance_defaults,
     )
 
+    # Dynamic earliest checkout (WFO/WFA): follow actual check-in time (clamped) instead of static shift_end.
+    # Window END stays governed by cutoff_out elsewhere; here we only compute the earliest allowed OUT time.
+    if not is_presensi_only:
+        try:
+            clock_in_t2 = getattr(attendance, "attendance_clock_in", None)
+            in_date2 = getattr(attendance, "attendance_clock_in_date", None) or attendance_date
+            shift_end_dt = rules.get("shift_end_dt")
+            if clock_in_t2 and shift_start_dt and shift_end_dt:
+                in_dt2 = _combine_local_datetime(in_date2, clock_in_t2)
+
+                grace_sec = int(rules.get("grace_seconds") or 0)
+                min_start = shift_start_dt
+                max_start = shift_start_dt + timedelta(seconds=grace_sec)
+
+                eff_in = in_dt2
+                if eff_in < min_start:
+                    eff_in = min_start
+                elif grace_sec > 0 and eff_in > max_start:
+                    eff_in = max_start
+
+                shift_duration = shift_end_dt - shift_start_dt
+                dyn_end = eff_in + shift_duration
+
+                early_grace_min = int(((rules.get("window_config") or {}).get("early_checkout_grace_minutes")) or 0)
+                earliest_checkout_dt = dyn_end - timedelta(minutes=early_grace_min)
+        except Exception:
+            pass
+
     # Self-healing / metadata update (DO NOT overwrite check-in time/date)
     att_updates = []
     if not attendance.attendance_day_id or attendance.attendance_day_id != day.id:
