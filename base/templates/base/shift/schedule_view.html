@@ -1,15 +1,73 @@
 {% load i18n %}
 
+<style>
+  /*
+   * Page-specific fixes for Settings → Shift Schedule
+   * - Make the left "Shift" sticky column narrower
+   * - Let the "Days" column breathe and prevent content overflow
+   */
+  .oh-shift-schedule-table .oh-sticky-table__sd,
+  .oh-shift-schedule-table .oh-sticky-table__thead .oh-sticky-table__th:first-child {
+    width: 200px;
+    max-width: 200px;
+  }
+
+  .oh-shift-schedule-table .oh-permission-table__user {
+    display: block;
+    max-width: 150px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* Keep schedule rows inside the cell */
+  .oh-shift-schedule-table .oh-user-panel.oh-collapse-panel {
+    flex-wrap: wrap;
+    gap: 8px;
+    overflow: hidden;
+  }
+
+  .oh-shift-schedule-table .shift-schedule-day {
+    flex: 0 1 200px;
+    min-width: 160px;
+  }
+
+  /* IMPORTANT: min-width:0 allows flex children to shrink instead of overflowing */
+  .oh-shift-schedule-table .shift-schedule-summary {
+    flex: 1 1 320px;
+    min-width: 0;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+
+  .oh-shift-schedule-table .shift-schedule-summary span {
+    white-space: normal;
+  }
+
+  .oh-shift-schedule-table .shift-schedule-actions {
+    flex: 0 0 96px;
+  }
+
+  @media (max-width: 575.98px) {
+    .oh-shift-schedule-table .oh-permission-table__user {
+      max-width: 100%;
+    }
+    .oh-shift-schedule-table .shift-schedule-actions {
+      flex: 1 1 auto;
+    }
+  }
+</style>
+
 <div class="row">
   <div class="col-12 col-sm-12 col-md-12 col-lg-12">
     <div class="oh-card p-4">
       <div class="oh-card__body">
-        <div class="oh-sticky-table oh-sticky-table--no-highlight">
+        <div class="oh-sticky-table oh-sticky-table--no-highlight oh-shift-schedule-table">
           <div class="oh-sticky-table__table">
             <div class="oh-sticky-table__thead">
               <div class="oh-sticky-table__tr">
                 <div class="oh-sticky-table__th">{% trans "Shift" %}</div>
-                <div class="oh-sticky-table__th" style="width:236px;">{% trans "Days" %}</div>
+                <div class="oh-sticky-table__th">{% trans "Days" %}</div>
               </div>
             </div>
 
@@ -27,7 +85,7 @@
                         <ion-icon class="oh-permission-table__collapse-up"
                                   title="{% trans 'Collapse' %}" name="chevron-up-outline"></ion-icon>
                       </button>
-                      <span class="oh-permission-table__user">{{ shift }}</span>
+                      <span class="oh-permission-table__user" title="{{ shift }}">{{ shift }}</span>
                     </div>
                   </div>
 
@@ -42,7 +100,7 @@
                         <span class="oh-user-panel oh-collapse-panel" style="align-items:flex-start;">
 
                           <!-- LEFT: DAY -->
-                          <div class="oh-profile oh-profile--md" style="min-width:220px;">
+                          <div class="oh-profile oh-profile--md shift-schedule-day">
                             <div class="oh-profile__avatar mr-1">
                               <img
                                 src="https://ui-avatars.com/api/?name={{ schedule.day }}&background=random"
@@ -73,7 +131,7 @@
                           </div>
 
                           <!-- MIDDLE: CONFIG SUMMARY -->
-                          <div class="flex-grow-1 px-3" style="min-width:360px;">
+                          <div class="flex-grow-1 px-3 shift-schedule-summary">
                             <div class="d-flex flex-wrap align-items-center"
                                  style="gap:16px; font-size:12px; line-height:1.2;">
 
@@ -102,7 +160,7 @@
                           </div>
 
                           <!-- RIGHT: ACTIONS -->
-                          <div style="min-width:90px;">
+                          <div class="shift-schedule-actions">
                             <div class="d-flex">
                               {% if perms.base.change_employeeshiftschedule %}
                                 <div class="m-2">
