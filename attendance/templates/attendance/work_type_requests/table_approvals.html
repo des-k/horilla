@@ -33,7 +33,7 @@
         </div>
         <div class="oh-sticky-table__th">{% trans "Status" %}</div>
         <div class="oh-sticky-table__th">{% trans "Attachments" %}</div>
-        <div class="oh-sticky-table__th">{% trans "Note" %}</div>
+        <div class="oh-sticky-table__th">{% trans "Reason / Note" %}</div>
         <div class="oh-sticky-table__th oh-sticky-table__right">{% trans "Actions" %}</div>
       </div>
     </div>
@@ -106,20 +106,29 @@
             </div>
             <div class="oh-sticky-table__td oh-sticky-table__right">
               <div class="d-flex gap-2 justify-content-end">
-                {% if r.status == 'waiting_for_approval' %}
-                  <button class="oh-btn oh-btn--success" hx-post="{% url 'attendance-work-type-request-approve' r.id %}" hx-target="#ohMessages" hx-swap="innerHTML" onclick="event.preventDefault()">
+                {% if r.employee_id.employee_user_id.id == current_user_id %}
+                  <button class="oh-btn oh-btn--success" disabled title="{% trans 'You cannot approve your own request' %}">
                     <ion-icon name="checkmark-circle-outline"></ion-icon>
+                  </button>
+                  <button class="oh-btn oh-btn--danger" disabled title="{% trans 'Use cancel for your own request' %}">
+                    <ion-icon name="close-circle-outline"></ion-icon>
                   </button>
                 {% else %}
-                  <button class="oh-btn oh-btn--success" disabled title="{% trans 'Only waiting requests can be approved' %}">
-                    <ion-icon name="checkmark-circle-outline"></ion-icon>
+                  {% if r.status == 'waiting_for_approval' %}
+                    <button class="oh-btn oh-btn--success" hx-post="{% url 'attendance-work-type-request-approve' r.id %}" hx-target="#ohMessages" hx-swap="innerHTML" onclick="event.preventDefault()">
+                      <ion-icon name="checkmark-circle-outline"></ion-icon>
+                    </button>
+                  {% else %}
+                    <button class="oh-btn oh-btn--success" disabled title="{% trans 'Only waiting requests can be approved' %}">
+                      <ion-icon name="checkmark-circle-outline"></ion-icon>
+                    </button>
+                  {% endif %}
+
+                  <button class="oh-btn oh-btn--danger" data-toggle="oh-modal-toggle" data-target="#objectDetailsModal"
+                    hx-get="{% url 'attendance-work-type-request-reject' r.id %}" hx-target="#objectDetailsModalTarget" onclick="event.preventDefault()">
+                    <ion-icon name="close-circle-outline"></ion-icon>
                   </button>
                 {% endif %}
-
-                <button class="oh-btn oh-btn--danger" data-toggle="oh-modal-toggle" data-target="#objectDetailsModal"
-                  hx-get="{% url 'attendance-work-type-request-reject' r.id %}" hx-target="#objectDetailsModalTarget" onclick="event.preventDefault()">
-                  <ion-icon name="close-circle-outline"></ion-icon>
-                </button>
               </div>
             </div>
           </div>
