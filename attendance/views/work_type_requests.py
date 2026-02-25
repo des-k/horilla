@@ -266,8 +266,10 @@ def work_type_request_view(request):
             field="employee_id",
         )
 
-    # Exclude own requests (if we have an employee profile)
-    if employee is not None:
+    # Exclude own requests for non-global approvers (to avoid self-approval UX).
+    # Global approvers/superusers can still *see* their own requests for visibility,
+    # but approve/reject is still blocked in the action endpoints.
+    if employee is not None and not (is_super or has_global_perm):
         approvals_qs = approvals_qs.exclude(employee_id=employee)
 
     # Apply shared quick filters
@@ -315,6 +317,7 @@ def work_type_request_view(request):
         "my_requests": paginator_qry(my_qs, request.GET.get("page_my")),
         "approvals": paginator_qry(approvals_qs, request.GET.get("page_app")),
         "can_approve": bool(can_approve),
+        "current_user_id": getattr(request.user, "id", None),
         "search": search,
         "status_my": status_my,
         "mode_filter": mode_filter,
@@ -522,13 +525,9 @@ def work_type_request_approve(request, obj_id: int):
 
     req = get_object_or_404(WorkModeRequest, id=obj_id)
 
-    # Owner cannot approve unless admin/global.
+    # Never allow self-approval (use cancel instead).
     try:
-        if (
-            getattr(req.employee_id, "employee_user_id", None) == request.user
-            and not has_global_perm
-            and not is_super
-        ):
+        if getattr(req.employee_id, "employee_user_id", None) == request.user:
             return HttpResponseForbidden("You cannot approve your own request")
     except Exception:
         pass
@@ -560,13 +559,9 @@ def work_type_request_reject(request, obj_id: int):
 
     req = get_object_or_404(WorkModeRequest, id=obj_id)
 
-    # Owner cannot reject unless admin/global.
+    # Never allow self-reject (use cancel instead).
     try:
-        if (
-            getattr(req.employee_id, "employee_user_id", None) == request.user
-            and not has_global_perm
-            and not is_super
-        ):
+        if getattr(req.employee_id, "employee_user_id", None) == request.user:
             return HttpResponseForbidden("Use cancel for your own request")
     except Exception:
         pass
