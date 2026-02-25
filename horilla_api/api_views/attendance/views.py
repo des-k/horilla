@@ -193,8 +193,26 @@ def _parse_location_payload(request) -> dict | None:
 
 
 def _is_admin_with_perm(request, perm_codename: str) -> bool:
+    """Admin permission helper.
+
+    Backward compatibility:
+    - Superuser is always treated as allowed.
+    - Treat `attendance.change_attendance` as an admin approval permission for
+      work-type requests too (many installs grant this to admins).
+    """
     try:
-        return bool(request.user and request.user.has_perm(perm_codename))
+        user = getattr(request, "user", None)
+        if not user:
+            return False
+        if getattr(user, "is_superuser", False):
+            return True
+        if user.has_perm(perm_codename):
+            return True
+        if perm_codename == "attendance.change_workmoderequest" and user.has_perm(
+            "attendance.change_attendance"
+        ):
+            return True
+        return False
     except Exception:
         return False
 
@@ -1856,7 +1874,7 @@ class WorkModeRequestView(APIView):
     def _patch_or_put(self, request, pk):
         obj = get_object_or_404(WorkModeRequest.objects.select_for_update(), pk=pk)
 
-        is_admin = request.user.has_perm("attendance.change_workmoderequest")
+        is_admin = _is_admin_with_perm(request, "attendance.change_workmoderequest")
         is_owner = False
         try:
             is_owner = obj.employee_id.employee_user_id == request.user
@@ -1921,7 +1939,7 @@ class WorkModeRequestApprovalsView(APIView):
         try:
             # auto reject for current user and subordinates (lightweight per employee)
             emp_ids = []
-            if request.user.has_perm("attendance.change_workmoderequest"):
+            if _is_admin_with_perm(request, "attendance.change_workmoderequest"):
                 emp_ids = list(WorkModeRequest.objects.filter(
                     mode=AttendanceWorkMode.WFA,
                     status=WorkModeRequestStatus.WAITING_FOR_APPROVAL,
@@ -1973,7 +1991,7 @@ class WorkModeRequestApprovalsView(APIView):
             | Q(status=WorkModeRequestStatus.PENDING, mode=AttendanceWorkMode.ON_DUTY)
         )
 
-        if request.user.has_perm("attendance.change_workmoderequest"):
+        if _is_admin_with_perm(request, "attendance.change_workmoderequest"):
             pass
         else:
             sub_ids = get_subordinate_employee_ids(request, nested=True)
@@ -1996,18 +2014,18 @@ class WorkModeRequestApproveView(APIView):
         obj = get_object_or_404(WorkModeRequest.objects.select_for_update(), pk=pk)
         emp_id = getattr(obj, "employee_id_id", None) or obj.employee_id.id
 
-        # Owner cannot approve unless admin
+        # Owner cannot approve their own request (even if admin).
         try:
-            if (
-                obj.employee_id.employee_user_id == request.user
-                and not request.user.has_perm("attendance.change_workmoderequest")
-            ):
+            if obj.employee_id.employee_user_id == request.user:
                 return Response(
-                    {"error": "You cannot approve your own request."},
+                    {
+                        "error": "You cannot approve your own request. Ask another approver or use cancel."
+                    },
                     status=status.HTTP_403_FORBIDDEN,
                 )
         except Exception:
             pass
+
 
         if not _can_act_on_employee(request, emp_id, "attendance.change_workmoderequest", allow_owner=False):
             return Response(
@@ -2037,12 +2055,9 @@ class WorkModeRequestRejectView(APIView):
         obj = get_object_or_404(WorkModeRequest.objects.select_for_update(), pk=pk)
         emp_id = getattr(obj, "employee_id_id", None) or obj.employee_id.id
 
-        # Owner cannot reject unless admin
+        # Owner cannot reject their own request (use cancel), even if admin.
         try:
-            if (
-                obj.employee_id.employee_user_id == request.user
-                and not request.user.has_perm("attendance.change_workmoderequest")
-            ):
+            if obj.employee_id.employee_user_id == request.user:
                 return Response(
                     {"error": "Use cancel for your own request."},
                     status=status.HTTP_403_FORBIDDEN,
@@ -2050,13 +2065,14 @@ class WorkModeRequestRejectView(APIView):
         except Exception:
             pass
 
+
         if not _can_act_on_employee(request, emp_id, "attendance.change_workmoderequest", allow_owner=False):
             return Response(
                 {"error": "You do not have permission to perform this action."},
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        is_admin = request.user.has_perm("attendance.change_workmoderequest")
+        is_admin = _is_admin_with_perm(request, "attendance.change_workmoderequest")
         if obj.status not in (WorkModeRequestStatus.WAITING_FOR_APPROVAL, WorkModeRequestStatus.PENDING):
             return Response({"error": "Request cannot be rejected in this status."}, status=400)
         if obj.status == WorkModeRequestStatus.PENDING and not is_admin:
@@ -2095,7 +2111,7 @@ class WorkModeRequestCancelView(APIView):
     def put(self, request, pk):
         obj = get_object_or_404(WorkModeRequest.objects.select_for_update(), pk=pk)
 
-        is_admin = request.user.has_perm("attendance.change_workmoderequest")
+        is_admin = _is_admin_with_perm(request, "attendance.change_workmoderequest")
         is_owner = False
         try:
             is_owner = obj.employee_id.employee_user_id == request.user
