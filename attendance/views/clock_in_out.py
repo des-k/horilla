@@ -803,7 +803,11 @@ def clock_out_attendance_and_activity(
 
     shift_start_dt = rules.get("shift_start_dt")
     cutoff_in_dt = rules.get("cutoff_in_dt")
-    earliest_checkout_dt = cutoff_in_dt if is_presensi_only else rules.get("check_out_window_start_dt")
+    if is_presensi_only:
+        # ON_DUTY: earliest check-out starts AFTER check-in cutoff (avoid overlap at exact cutoff)
+        earliest_checkout_dt = (cutoff_in_dt + timedelta(minutes=1)) if cutoff_in_dt else None
+    else:
+        earliest_checkout_dt = rules.get("check_out_window_start_dt")
 
     # 1) Ensure Attendance exists (skeleton allowed)
     attendance_defaults = {
@@ -985,7 +989,7 @@ def clock_out_attendance_and_activity(
     # EARLY CHECK-OUT REJECT (FINAL spec)
     # Store OUT for audit, but mark as REJECTED when outside the allowed window.
     # - WFO/WFA: earliest = shift_end - grace
-    # - ON_DUTY: earliest = cutoff_in_dt
+    # - ON_DUTY: earliest = cutoff_in_dt + 1 minute
     # -----------------------------------------------------------------
     is_early_checkout = False
     try:
