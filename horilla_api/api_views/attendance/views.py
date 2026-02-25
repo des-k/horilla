@@ -2788,7 +2788,11 @@ class CheckingStatus(APIView):
         in_window_start = check_in_window_start_dt
         in_window_end = check_in_window_end_dt
 
-        out_window_start = cutoff_in_dt if (out_mode == AttendanceWorkMode.ON_DUTY) else check_out_window_start_dt
+        if out_mode == AttendanceWorkMode.ON_DUTY:
+            # ON_DUTY: start checkout AFTER check-in cutoff (avoid overlap at exact cutoff)
+            out_window_start = (cutoff_in_dt + timedelta(minutes=1)) if cutoff_in_dt else check_out_window_start_dt
+        else:
+            out_window_start = check_out_window_start_dt
         out_window_end = check_out_window_end_dt
 
         def _in_window_ok(start_dt, end_dt) -> bool:
