@@ -1393,7 +1393,7 @@ class AttendanceRequestView(APIView):
 
                 uploaded = []
                 if hasattr(request, "FILES"):
-                    uploaded = request.FILES.getlist("files") or []
+                    uploaded = request.FILES.getlist("files") or request.FILES.getlist("files[]") or []
                     if not uploaded:
                         f_single = request.FILES.get("file")
                         if f_single:
@@ -1462,7 +1462,7 @@ class AttendanceRequestView(APIView):
                 from attendance.models import AttendanceRequestFile, AttendanceRequestComment
                 uploaded = []
                 if hasattr(request, "FILES"):
-                    uploaded = request.FILES.getlist("files") or []
+                    uploaded = request.FILES.getlist("files") or request.FILES.getlist("files[]") or []
                     if not uploaded:
                         f_single = request.FILES.get("file")
                         if f_single:
@@ -1783,7 +1783,7 @@ class WorkModeRequestView(APIView):
     def _collect_uploaded_files(self, request):
         uploaded = []
         if hasattr(request, "FILES"):
-            uploaded = request.FILES.getlist("files") or []
+            uploaded = request.FILES.getlist("files") or request.FILES.getlist("files[]") or []
             if not uploaded:
                 f_single = request.FILES.get("file")
                 if f_single:
@@ -1878,6 +1878,7 @@ class WorkModeRequestView(APIView):
 
         return Response(self.serializer_class(obj).data, status=200)
 
+    @transaction.atomic
     def patch(self, request, pk):
         return self._patch_or_put(request, pk)
 
