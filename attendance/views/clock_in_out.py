@@ -656,7 +656,7 @@ def clock_in_attendance_and_activity(
         activity.work_mode_request_id = work_mode_request
         act_updates.append("work_mode_request_id")
 
-    if act_updates and not created:
+    if act_updates:
         activity.save(update_fields=list(dict.fromkeys(act_updates)))  # de-dup
 
     # 2) Attendance summary: create once
@@ -754,7 +754,7 @@ def clock_in_attendance_and_activity(
             attendance.is_presensi_only = True
             att_updates.append("is_presensi_only")
 
-    if att_updates and not attendance_created:
+    if att_updates:
         attendance.save(update_fields=list(dict.fromkeys(att_updates)))  # de-dup
 
     # Late come only once on first Attendance creation (and not presence-only)
@@ -959,7 +959,7 @@ def clock_out_attendance_and_activity(
         activity.work_mode_request_id = work_mode_request
         act_updates.append("work_mode_request_id")
 
-    if act_updates and not created:
+    if act_updates:
         activity.save(update_fields=list(dict.fromkeys(act_updates)))
 
     # 3) Last punch wins: ignore older punches (when updates allowed)
