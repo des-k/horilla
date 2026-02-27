@@ -2850,7 +2850,10 @@ class CheckingStatus(APIView):
                     eff_in = in_dt
                     if eff_in < min_start:
                         eff_in = min_start
-                    elif grace_sec > 0 and eff_in > max_start:
+                    # Cap check-in used for OUT-window math at shift_start + grace.
+                    # IMPORTANT: grace can be 0, in which case max_start == shift_start.
+                    # We still need to cap (otherwise checkout window would drift later).
+                    elif eff_in > max_start:
                         eff_in = max_start
 
                     shift_duration = shift_end_dt - shift_start_dt
