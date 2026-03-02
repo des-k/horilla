@@ -19,6 +19,10 @@ class AttendanceSerializer(serializers.ModelSerializer):
     shift_name = serializers.CharField(source="shift_id.employee_shift", read_only=True)
     badge_id = serializers.CharField(source="employee_id.badge_id", read_only=True)
     employee_profile_url = serializers.SerializerMethodField(read_only=True)
+    # Attachments uploaded via AttendanceRequestComment.files
+    attachment_urls = serializers.SerializerMethodField(read_only=True)
+    # Alias for UI parity with Work Type Requests
+    file_urls = serializers.SerializerMethodField(read_only=True)
     work_type = serializers.CharField(source="work_type_id.work_type", read_only=True)
 
     class Meta:
@@ -50,6 +54,32 @@ class AttendanceSerializer(serializers.ModelSerializer):
             )
         return data
 
+    def get_attachment_urls(self, obj):
+        """Return list of attachment URLs for an attendance correction request.
+        Files are stored via AttendanceRequestComment.files (ManyToMany -> AttendanceRequestFile).
+        """
+        try:
+            from attendance.models import AttendanceRequestComment
+            urls = []
+            seen = set()
+            qs = AttendanceRequestComment.objects.filter(request_id=obj).prefetch_related('files')
+            for c in qs:
+                for f in c.files.all():
+                    try:
+                        u = getattr(getattr(f, 'file', None), 'url', None)
+                        if u and u not in seen:
+                            seen.add(u)
+                            urls.append(u)
+                    except Exception:
+                        continue
+            return urls
+        except Exception:
+            return []
+
+    def get_file_urls(self, obj):
+        # Backward/UX compatibility with WorkModeRequestSerializer
+        return self.get_attachment_urls(obj)
+
     def get_employee_profile_url(self, obj):
         try:
             employee_profile = obj.employee_id.employee_profile
@@ -68,6 +98,10 @@ class AttendanceRequestSerializer(serializers.ModelSerializer):
     shift_name = serializers.CharField(source="shift_id.employee_shift", read_only=True)
     badge_id = serializers.CharField(source="employee_id.badge_id", read_only=True)
     employee_profile_url = serializers.SerializerMethodField(read_only=True)
+    # Attachments uploaded via AttendanceRequestComment.files
+    attachment_urls = serializers.SerializerMethodField(read_only=True)
+    # Alias for UI parity with Work Type Requests
+    file_urls = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = Attendance
@@ -143,6 +177,32 @@ class AttendanceRequestSerializer(serializers.ModelSerializer):
             validated_data.pop("employee_id")
         return super().update(instance, validated_data)
 
+    def get_attachment_urls(self, obj):
+        """Return list of attachment URLs for an attendance correction request.
+        Files are stored via AttendanceRequestComment.files (ManyToMany -> AttendanceRequestFile).
+        """
+        try:
+            from attendance.models import AttendanceRequestComment
+            urls = []
+            seen = set()
+            qs = AttendanceRequestComment.objects.filter(request_id=obj).prefetch_related('files')
+            for c in qs:
+                for f in c.files.all():
+                    try:
+                        u = getattr(getattr(f, 'file', None), 'url', None)
+                        if u and u not in seen:
+                            seen.add(u)
+                            urls.append(u)
+                    except Exception:
+                        continue
+            return urls
+        except Exception:
+            return []
+
+    def get_file_urls(self, obj):
+        # Backward/UX compatibility with WorkModeRequestSerializer
+        return self.get_attachment_urls(obj)
+
     def get_employee_profile_url(self, obj):
         try:
             employee_profile = obj.employee_id.employee_profile
@@ -160,6 +220,10 @@ class AttendanceOverTimeSerializer(serializers.ModelSerializer):
         source="employee_id.employee_last_name", read_only=True
     )
     employee_profile_url = serializers.SerializerMethodField(read_only=True)
+    # Attachments uploaded via AttendanceRequestComment.files
+    attachment_urls = serializers.SerializerMethodField(read_only=True)
+    # Alias for UI parity with Work Type Requests
+    file_urls = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = AttendanceOverTime
@@ -176,6 +240,32 @@ class AttendanceOverTimeSerializer(serializers.ModelSerializer):
             "pending_hours",
             "overtime",
         ]
+
+    def get_attachment_urls(self, obj):
+        """Return list of attachment URLs for an attendance correction request.
+        Files are stored via AttendanceRequestComment.files (ManyToMany -> AttendanceRequestFile).
+        """
+        try:
+            from attendance.models import AttendanceRequestComment
+            urls = []
+            seen = set()
+            qs = AttendanceRequestComment.objects.filter(request_id=obj).prefetch_related('files')
+            for c in qs:
+                for f in c.files.all():
+                    try:
+                        u = getattr(getattr(f, 'file', None), 'url', None)
+                        if u and u not in seen:
+                            seen.add(u)
+                            urls.append(u)
+                    except Exception:
+                        continue
+            return urls
+        except Exception:
+            return []
+
+    def get_file_urls(self, obj):
+        # Backward/UX compatibility with WorkModeRequestSerializer
+        return self.get_attachment_urls(obj)
 
     def get_employee_profile_url(self, obj):
         try:
@@ -220,6 +310,10 @@ class WorkModeRequestSerializer(serializers.ModelSerializer):
     )
     badge_id = serializers.CharField(source="employee_id.badge_id", read_only=True)
     employee_profile_url = serializers.SerializerMethodField(read_only=True)
+    # Attachments uploaded via AttendanceRequestComment.files
+    attachment_urls = serializers.SerializerMethodField(read_only=True)
+    # Alias for UI parity with Work Type Requests
+    file_urls = serializers.SerializerMethodField(read_only=True)
     file_urls = serializers.SerializerMethodField(read_only=True)
     approved_by_name = serializers.SerializerMethodField(read_only=True)
 
@@ -281,6 +375,32 @@ class WorkModeRequestSerializer(serializers.ModelSerializer):
     class Meta:
         model = WorkModeRequest
         fields = "__all__"
+
+    def get_attachment_urls(self, obj):
+        """Return list of attachment URLs for an attendance correction request.
+        Files are stored via AttendanceRequestComment.files (ManyToMany -> AttendanceRequestFile).
+        """
+        try:
+            from attendance.models import AttendanceRequestComment
+            urls = []
+            seen = set()
+            qs = AttendanceRequestComment.objects.filter(request_id=obj).prefetch_related('files')
+            for c in qs:
+                for f in c.files.all():
+                    try:
+                        u = getattr(getattr(f, 'file', None), 'url', None)
+                        if u and u not in seen:
+                            seen.add(u)
+                            urls.append(u)
+                    except Exception:
+                        continue
+            return urls
+        except Exception:
+            return []
+
+    def get_file_urls(self, obj):
+        # Backward/UX compatibility with WorkModeRequestSerializer
+        return self.get_attachment_urls(obj)
 
     def get_employee_profile_url(self, obj):
         try:
