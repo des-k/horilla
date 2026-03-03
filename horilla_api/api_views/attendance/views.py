@@ -4,6 +4,7 @@ import json
 from django import template
 from django.conf import settings
 from django.core.mail import EmailMessage
+from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.db.models import Case, CharField, F, Value, When, Q
 from django.http import QueryDict
@@ -352,11 +353,15 @@ def _format_minimum_hour(value):
 
 
 def _normalize_requested_data(requested_data: dict) -> dict:
-    """Normalize JSON-requested_data so it can be used safely in queryset.update()."""
+    """Normalize JSON-requested_data so it can be used safely in queryset.update().
+
+    Note: requested_data may contain non-model keys (e.g., "__meta").
+    We *must* filter to model fields only before using queryset.update().
+    """
     if not requested_data:
         return requested_data
 
-    for key in (
+    allowed = (
         "attendance_date",
         "attendance_clock_in_date",
         "attendance_clock_out_date",
@@ -367,11 +372,14 @@ def _normalize_requested_data(requested_data: dict) -> dict:
         "batch_attendance_id",
         "shift_id",
         "work_type_id",
-    ):
-        if key in requested_data:
-            requested_data[key] = _normalize_none(requested_data[key])
+    )
+    cleaned = {k: requested_data.get(k) for k in allowed if k in requested_data}
 
-    return requested_data
+    for key in allowed:
+        if key in cleaned:
+            cleaned[key] = _normalize_none(cleaned[key])
+
+    return cleaned
 
 
 def _api_resolve_attendance_date_and_day(shift, dt_now: datetime):
@@ -1516,7 +1524,40 @@ class AttendanceRequestView(APIView):
             if not WorkType.objects.filter(pk=getattr(work_type, "pk", None)).exists():
                 form.cleaned_data["work_type_id"] = None
             if attendance.request_type != "create_request":
-                attendance.requested_data = json.dumps(instance.serialize())
+                # Preserve approved-scope meta and validate against already-approved scopes.
+                try:
+                    from attendance.services.attendance_correction_scope_rules import (
+                        infer_scope_from_values,
+                        get_approved_scopes,
+                        build_requested_data_for_save,
+                        validate_new_request_scope,
+                    )
+
+                    serialized = instance.serialize()
+                    incoming_scope = infer_scope_from_values(
+                        serialized.get("attendance_clock_in"),
+                        serialized.get("attendance_clock_out"),
+                    )
+                    approved_scopes = get_approved_scopes(getattr(attendance, "requested_data", None))
+
+                    # Editing an existing request is allowed; we only block overlaps with approved scopes.
+                    validate_new_request_scope(
+                        existing_waiting_scope="",
+                        approved_scopes=approved_scopes,
+                        incoming_scope=incoming_scope,
+                    )
+
+                    wrapped = build_requested_data_for_save(
+                        new_payload=serialized,
+                        existing_requested_data=getattr(attendance, "requested_data", None),
+                        incoming_scope=incoming_scope,
+                        keep_existing_fields=True,
+                    )
+                    attendance.requested_data = json.dumps(wrapped)
+                except ValidationError as ve:
+                    return Response(ve.message_dict, status=400)
+                except Exception:
+                    attendance.requested_data = json.dumps(instance.serialize())
                 attendance.request_description = instance.request_description
                 # set the user level validation here
                 attendance.is_validate_request = True
@@ -1620,6 +1661,19 @@ class AttendanceRequestApproveView(APIView):
             attendance.save()
 
             if attendance.requested_data is not None:
+                # Record approved scope in requested_data.__meta so future requests can enforce
+                # one-approval-per-scope per day.
+                try:
+                    from attendance.services.attendance_correction_scope_rules import (
+                        record_approved_scope_on_requested_data,
+                    )
+                    new_req_data = record_approved_scope_on_requested_data(attendance.requested_data)
+                    if new_req_data and new_req_data != attendance.requested_data:
+                        attendance.requested_data = new_req_data
+                        Attendance.objects.filter(id=pk).update(requested_data=new_req_data)
+                except Exception:
+                    pass
+
                 requested_data = _normalize_requested_data(json.loads(attendance.requested_data))
                 Attendance.objects.filter(id=pk).update(**requested_data)
                 attendance.refresh_from_db()
@@ -1688,7 +1742,7 @@ class AttendanceRequestCancelView(APIView):
 
     Behavior aligned with Work Type Request:
     - Request stays in history list (status=CANCEL)
-    - Only waiting requests can be canceled
+    - Only pending requests can be canceled
     - For create_request, remove derived daily artifacts, but keep the Attendance row for history.
     """
 
@@ -1696,56 +1750,76 @@ class AttendanceRequestCancelView(APIView):
 
     @transaction.atomic
     def put(self, request, pk):
-        attendance = get_object_or_404(Attendance.objects.select_for_update(), id=pk)
-
-        # Cancel is an owner-only action (align with Work Type Request)
         try:
-            if attendance.employee_id.employee_user_id != request.user:
+            attendance = Attendance.objects.select_for_update().get(id=pk)
+
+            # Cancel is an owner-only action (align with Work Type Request)
+
+
+            try:
+
+
+                if attendance.employee_id.employee_user_id != request.user:
+
+
+                    return Response(
+
+
+                        {"error": "Only the requester can cancel this request."},
+
+
+                        status=status.HTTP_403_FORBIDDEN,
+
+
+                    )
+
+
+            except Exception:
+
+
                 return Response(
-                    {"error": "Only the requester can cancel this request."},
+
+
+                    {"error": "You do not have permission to perform this action."},
+
+
                     status=status.HTTP_403_FORBIDDEN,
+
+
                 )
-        except Exception:
-            return Response(
-                {"error": "You do not have permission to perform this action."},
-                status=status.HTTP_403_FORBIDDEN,
-            )
 
-        # Prevent double-cancel and only allow cancel while still waiting
-        if getattr(attendance, "request_type", None) == "cancel_request":
-            return Response({"error": "Request already canceled."}, status=400)
+            if not getattr(attendance, "is_validate_request", False):
+                return Response({"error": "Only pending requests can be canceled."}, status=400)
 
-        if not getattr(attendance, "is_validate_request", False):
-            return Response({"error": "Only waiting requests can be canceled."}, status=400)
+            req_type = attendance.request_type
+            req_date = attendance.attendance_date
+            req_employee = attendance.employee_id
 
-        req_type = attendance.request_type
-        req_date = attendance.attendance_date
-        req_employee = attendance.employee_id
+            attendance.is_validate_request_approved = False
+            attendance.is_validate_request = False
+            # Keep request_description for history, but discard pending payload
+            attendance.requested_data = None
+            attendance.request_type = "cancel_request"
+            try:
+                attendance.approved_by = request.user.employee_get
+            except Exception:
+                attendance.approved_by = None
+            attendance.save()
 
-        attendance.is_validate_request_approved = False
-        attendance.is_validate_request = False
-        # Keep request_description for history, but discard pending payload
-        attendance.requested_data = None
-        attendance.request_type = "cancel_request"
-        try:
-            attendance.approved_by = request.user.employee_get
-        except Exception:
-            attendance.approved_by = None
-        attendance.save()
+            # For create_request, remove created daily artifacts so it won't affect reporting.
+            if req_type == "create_request":
+                AttendanceActivity.objects.filter(
+                    employee_id=req_employee,
+                    attendance_date=req_date,
+                ).delete()
+                AttendanceLateComeEarlyOut.objects.filter(attendance_id=attendance).delete()
 
-        # For create_request, remove created daily artifacts so it won't affect reporting.
-        if req_type == "create_request":
-            AttendanceActivity.objects.filter(
-                employee_id=req_employee,
-                attendance_date=req_date,
-            ).delete()
-            AttendanceLateComeEarlyOut.objects.filter(attendance_id=attendance).delete()
+        except Exception as E:
+            return Response({"error": str(E)}, status=400)
 
-        serializer = AttendanceRequestSerializer(
-            instance=attendance,
-            context={"request": request},
-        )
-        return Response(serializer.data, status=200)
+        return Response({"status": "success"}, status=200)
+
+
 class AttendanceRequestRejectView(APIView):
     """Reject an attendance request (admin/supervisor action).
 
