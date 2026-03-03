@@ -1688,7 +1688,7 @@ class AttendanceRequestCancelView(APIView):
 
     Behavior aligned with Work Type Request:
     - Request stays in history list (status=CANCEL)
-    - Only pending requests can be canceled
+    - Only waiting requests can be canceled
     - For create_request, remove derived daily artifacts, but keep the Attendance row for history.
     """
 
@@ -1696,76 +1696,56 @@ class AttendanceRequestCancelView(APIView):
 
     @transaction.atomic
     def put(self, request, pk):
+        attendance = get_object_or_404(Attendance.objects.select_for_update(), id=pk)
+
+        # Cancel is an owner-only action (align with Work Type Request)
         try:
-            attendance = Attendance.objects.select_for_update().get(id=pk)
-
-            # Cancel is an owner-only action (align with Work Type Request)
-
-
-            try:
-
-
-                if attendance.employee_id.employee_user_id != request.user:
-
-
-                    return Response(
-
-
-                        {"error": "Only the requester can cancel this request."},
-
-
-                        status=status.HTTP_403_FORBIDDEN,
-
-
-                    )
-
-
-            except Exception:
-
-
+            if attendance.employee_id.employee_user_id != request.user:
                 return Response(
-
-
-                    {"error": "You do not have permission to perform this action."},
-
-
+                    {"error": "Only the requester can cancel this request."},
                     status=status.HTTP_403_FORBIDDEN,
-
-
                 )
+        except Exception:
+            return Response(
+                {"error": "You do not have permission to perform this action."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
 
-            if not getattr(attendance, "is_validate_request", False):
-                return Response({"error": "Only pending requests can be canceled."}, status=400)
+        # Prevent double-cancel and only allow cancel while still waiting
+        if getattr(attendance, "request_type", None) == "cancel_request":
+            return Response({"error": "Request already canceled."}, status=400)
 
-            req_type = attendance.request_type
-            req_date = attendance.attendance_date
-            req_employee = attendance.employee_id
+        if not getattr(attendance, "is_validate_request", False):
+            return Response({"error": "Only waiting requests can be canceled."}, status=400)
 
-            attendance.is_validate_request_approved = False
-            attendance.is_validate_request = False
-            # Keep request_description for history, but discard pending payload
-            attendance.requested_data = None
-            attendance.request_type = "cancel_request"
-            try:
-                attendance.approved_by = request.user.employee_get
-            except Exception:
-                attendance.approved_by = None
-            attendance.save()
+        req_type = attendance.request_type
+        req_date = attendance.attendance_date
+        req_employee = attendance.employee_id
 
-            # For create_request, remove created daily artifacts so it won't affect reporting.
-            if req_type == "create_request":
-                AttendanceActivity.objects.filter(
-                    employee_id=req_employee,
-                    attendance_date=req_date,
-                ).delete()
-                AttendanceLateComeEarlyOut.objects.filter(attendance_id=attendance).delete()
+        attendance.is_validate_request_approved = False
+        attendance.is_validate_request = False
+        # Keep request_description for history, but discard pending payload
+        attendance.requested_data = None
+        attendance.request_type = "cancel_request"
+        try:
+            attendance.approved_by = request.user.employee_get
+        except Exception:
+            attendance.approved_by = None
+        attendance.save()
 
-        except Exception as E:
-            return Response({"error": str(E)}, status=400)
+        # For create_request, remove created daily artifacts so it won't affect reporting.
+        if req_type == "create_request":
+            AttendanceActivity.objects.filter(
+                employee_id=req_employee,
+                attendance_date=req_date,
+            ).delete()
+            AttendanceLateComeEarlyOut.objects.filter(attendance_id=attendance).delete()
 
-        return Response({"status": "success"}, status=200)
-
-
+        serializer = AttendanceRequestSerializer(
+            instance=attendance,
+            context={"request": request},
+        )
+        return Response(serializer.data, status=200)
 class AttendanceRequestRejectView(APIView):
     """Reject an attendance request (admin/supervisor action).
 
