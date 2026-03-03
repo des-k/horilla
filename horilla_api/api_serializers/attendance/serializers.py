@@ -23,6 +23,12 @@ class AttendanceSerializer(serializers.ModelSerializer):
     attachment_urls = serializers.SerializerMethodField(read_only=True)
     # Alias for UI parity with Work Type Requests
     file_urls = serializers.SerializerMethodField(read_only=True)
+
+    # Status label for mobile UI (WAITING / APPROVED / REJECTED / CANCEL)
+    status = serializers.SerializerMethodField(read_only=True)
+    request_status = serializers.SerializerMethodField(read_only=True)
+    action_by_name = serializers.SerializerMethodField(read_only=True)
+
     work_type = serializers.CharField(source="work_type_id.work_type", read_only=True)
 
     class Meta:
@@ -98,10 +104,16 @@ class AttendanceRequestSerializer(serializers.ModelSerializer):
     shift_name = serializers.CharField(source="shift_id.employee_shift", read_only=True)
     badge_id = serializers.CharField(source="employee_id.badge_id", read_only=True)
     employee_profile_url = serializers.SerializerMethodField(read_only=True)
+
     # Attachments uploaded via AttendanceRequestComment.files
     attachment_urls = serializers.SerializerMethodField(read_only=True)
     # Alias for UI parity with Work Type Requests
     file_urls = serializers.SerializerMethodField(read_only=True)
+
+    # Status label for mobile/web UI (WAITING / APPROVED / REJECTED / CANCEL)
+    status = serializers.SerializerMethodField(read_only=True)
+    request_status = serializers.SerializerMethodField(read_only=True)
+    action_by_name = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = Attendance
@@ -130,9 +142,7 @@ class AttendanceRequestSerializer(serializers.ModelSerializer):
             "attendance_clock_in_date": validated_data.get("attendance_clock_in_date"),
             "attendance_clock_in": validated_data.get("attendance_clock_in"),
             "attendance_clock_out": validated_data.get("attendance_clock_out"),
-            "attendance_clock_out_date": validated_data.get(
-                "attendance_clock_out_date"
-            ),
+            "attendance_clock_out_date": validated_data.get("attendance_clock_out_date"),
             "shift_id": validated_data.get("shift_id"),
             "work_type_id": validated_data.get("work_type_id"),
             "attendance_worked_hour": validated_data.get("attendance_worked_hour"),
@@ -144,14 +154,10 @@ class AttendanceRequestSerializer(serializers.ModelSerializer):
             data["attendance_clock_in_date"] = self.data["attendance_clock_in_date"]
             data["attendance_clock_in"] = self.data["attendance_clock_in"]
             data["attendance_clock_out"] = (
-                None
-                if data["attendance_clock_out"] == "None"
-                else data["attendance_clock_out"]
+                None if data["attendance_clock_out"] == "None" else data["attendance_clock_out"]
             )
             data["attendance_clock_out_date"] = (
-                None
-                if data["attendance_clock_out_date"] == "None"
-                else data["attendance_clock_out_date"]
+                None if data["attendance_clock_out_date"] == "None" else data["attendance_clock_out_date"]
             )
             data["work_type_id"] = self.data["work_type_id"]
             data["shift_id"] = self.data["shift_id"]
@@ -163,7 +169,9 @@ class AttendanceRequestSerializer(serializers.ModelSerializer):
             if attendance.request_type != "create_request":
                 attendance.request_type = "update_request"
             attendance.request_description = self.data["request_description"]
-            return attendance.save()
+            attendance.save()
+            return attendance
+
         new_instance = Attendance(**data)
         new_instance.is_validate_request = True
         new_instance.attendance_validated = False
@@ -183,13 +191,14 @@ class AttendanceRequestSerializer(serializers.ModelSerializer):
         """
         try:
             from attendance.models import AttendanceRequestComment
+
             urls = []
             seen = set()
-            qs = AttendanceRequestComment.objects.filter(request_id=obj).prefetch_related('files')
+            qs = AttendanceRequestComment.objects.filter(request_id=obj).prefetch_related("files")
             for c in qs:
                 for f in c.files.all():
                     try:
-                        u = getattr(getattr(f, 'file', None), 'url', None)
+                        u = getattr(getattr(f, "file", None), "url", None)
                         if u and u not in seen:
                             seen.add(u)
                             urls.append(u)
@@ -207,7 +216,42 @@ class AttendanceRequestSerializer(serializers.ModelSerializer):
         try:
             employee_profile = obj.employee_id.employee_profile
             return employee_profile.url
-        except:
+        except Exception:
+            return None
+
+    def _compute_status(self, obj):
+        """Stable status label for mobile/web UI."""
+        try:
+            rt = getattr(obj, "request_type", None)
+            if rt == "cancel_request":
+                return "CANCEL"
+            if rt == "reject_request":
+                return "REJECTED"
+            if getattr(obj, "is_validate_request", False):
+                return "WAITING"
+            if getattr(obj, "is_validate_request_approved", False) or getattr(obj, "attendance_validated", False):
+                return "APPROVED"
+        except Exception:
+            pass
+        return None
+
+    def get_status(self, obj):
+        return self._compute_status(obj)
+
+    def get_request_status(self, obj):
+        # Alias used by some mobile builds
+        return self._compute_status(obj)
+
+    def get_action_by_name(self, obj):
+        ab = getattr(obj, "approved_by", None)
+        if not ab:
+            return None
+        try:
+            first = getattr(ab, "employee_first_name", "") or ""
+            last = getattr(ab, "employee_last_name", "") or ""
+            name = (first + " " + last).strip()
+            return name or str(ab)
+        except Exception:
             return None
 
 
