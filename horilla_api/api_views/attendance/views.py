@@ -2208,6 +2208,9 @@ class WorkModeRequestApprovalsView(APIView):
             | Q(status=WorkModeRequestStatus.PENDING, mode=AttendanceWorkMode.ON_DUTY)
         )
 
+        # Never show own requests in approvals list (admin can still view them in My Requests).
+        qs = qs.exclude(employee_id__employee_user_id=request.user)
+
         if _is_admin_with_perm(request, "attendance.change_workmoderequest"):
             pass
         else:
