@@ -5,7 +5,7 @@ from django import template
 from django.conf import settings
 from django.core.mail import EmailMessage
 from django.db import transaction
-from django.db.models import Case, CharField, F, Value, When
+from django.db.models import Case, CharField, F, Value, When, Q
 from django.http import QueryDict
 from django.shortcuts import get_object_or_404
 from django.utils import timezone as dj_timezone
@@ -227,16 +227,28 @@ def _is_supervisor_of(request, employee_id: int) -> bool:
 
 
 def _can_act_on_employee(request, employee_id: int, perm_codename: str, allow_owner: bool = False) -> bool:
-    """Admin (has perm) OR supervisor of employee. Optionally allow owner."""
+    """Admin (has perm) OR supervisor of employee. Optionally allow owner.
+
+    IMPORTANT: Even if user is admin with perm, disallow acting on their own request unless allow_owner=True.
+    """
+    my_emp_id = None
+    try:
+        my_emp = request.user.employee_get
+        my_emp_id = int(getattr(my_emp, "id", 0) or 0)
+    except Exception:
+        my_emp_id = None
+
+    is_owner = my_emp_id is not None and int(my_emp_id) == int(employee_id)
+
+    # Block self-action unless explicitly allowed
+    if is_owner and not allow_owner:
+        return False
+
     if _is_admin_with_perm(request, perm_codename):
         return True
 
-    try:
-        my_emp = request.user.employee_get
-        if allow_owner and my_emp and int(my_emp.id) == int(employee_id):
-            return True
-    except Exception:
-        pass
+    if allow_owner and is_owner:
+        return True
 
     return _is_supervisor_of(request, employee_id)
 
@@ -1323,36 +1335,75 @@ class AttendanceRequestView(APIView):
     serializer_class = AttendanceRequestSerializer
     permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser, JSONParser]
-
     def get(self, request, pk=None):
+        # Detail
         if pk:
-            attendance = Attendance.objects.get(id=pk)
-            serializer = AttendanceRequestSerializer(instance=attendance)
+            attendance = get_object_or_404(Attendance, id=pk)
+            emp_id = getattr(attendance, "employee_id_id", None) or attendance.employee_id.id
+
+            # Allow: owner OR admin/supervisor with view/change attendance perms (similar to Work Type Request).
+            if not _can_act_on_employee(
+                request,
+                emp_id,
+                "attendance.view_attendance",
+                allow_owner=True,
+            ) and not _can_act_on_employee(
+                request,
+                emp_id,
+                "attendance.change_attendance",
+                allow_owner=True,
+            ):
+                return Response(
+                    {"error": "You do not have permission to view this request."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+            serializer = AttendanceRequestSerializer(
+                instance=attendance,
+                context={"request": request},
+            )
             return Response(serializer.data, status=200)
 
-        requests = Attendance.objects.filter(
-            is_validate_request=True,
-        )
-        requests = filtersubordinates(
+        # List
+        # 1) Approvals: pending requests that the current user can act on (admin/supervisor/manager)
+        approvals_qs = Attendance.objects.filter(is_validate_request=True)
+        approvals_qs = filtersubordinates(
             request=request,
-            perm="attendance.view_attendance",
-            queryset=requests,
+            perm="attendance.change_attendance",
+            queryset=approvals_qs,
         )
-        requests = requests | Attendance.objects.filter(
-            employee_id__employee_user_id=request.user,
-            is_validate_request=True,
+
+        # Never include own requests in approvals list (cannot self-approve)
+        approvals_qs = approvals_qs.exclude(employee_id__employee_user_id=request.user)
+
+        # 2) My requests: history (pending/approved/rejected/canceled) but not all attendance rows
+        my_qs = Attendance.objects.filter(employee_id__employee_user_id=request.user).filter(
+            Q(is_validate_request=True)
+            | Q(is_validate_request_approved=True)
+            | Q(request_type__in=[
+                "create_request",
+                "update_request",
+                "revalidate_request",
+                "cancel_request",
+                "reject_request",
+            ])
+            | Q(request_description__isnull=False)
+            | Q(requested_data__isnull=False)
         )
+
+        requests = (approvals_qs | my_qs).distinct()
+
         request_filtered_queryset = AttendanceFilters(request.GET, requests).qs
         field_name = request.GET.get("groupby_field", None)
         if field_name:
-            # groupby workflow
             url = request.build_absolute_uri()
             return groupby_queryset(request, url, field_name, request_filtered_queryset)
 
         pagenation = PageNumberPagination()
-        page = pagenation.paginate_queryset(request_filtered_queryset, request)
-        serializer = self.serializer_class(page, many=True)
+        page = pagenation.paginate_queryset(request_filtered_queryset.order_by("-id"), request)
+        serializer = self.serializer_class(page, many=True, context={"request": request})
         return pagenation.get_paginated_response(serializer.data)
+
 
     def post(self, request):
         from attendance.forms import NewRequestForm
@@ -1529,6 +1580,17 @@ class AttendanceRequestApproveView(APIView):
         try:
             attendance = Attendance.objects.select_for_update().get(id=pk)
 
+            # Disallow approving your own request (even if admin)
+            try:
+                if attendance.employee_id.employee_user_id == request.user:
+                    return Response(
+                        {"error": "You cannot approve your own request."},
+                        status=status.HTTP_403_FORBIDDEN,
+                    )
+            except Exception:
+                pass
+
+
             # Admin (permission) OR supervisor in reporting chain can approve.
             if not _can_act_on_employee(
                 request,
@@ -1541,12 +1603,20 @@ class AttendanceRequestApproveView(APIView):
                     status=status.HTTP_403_FORBIDDEN,
                 )
 
+
+            if not getattr(attendance, "is_validate_request", False):
+                return Response({"error": "Request is not waiting for approval."}, status=400)
+
             prev_attendance_date = attendance.attendance_date
 
             attendance.attendance_validated = True
             attendance.is_validate_request_approved = True
             attendance.is_validate_request = False
             attendance.request_description = None
+            try:
+                attendance.approved_by = request.user.employee_get
+            except Exception:
+                attendance.approved_by = None
             attendance.save()
 
             if attendance.requested_data is not None:
@@ -1612,13 +1682,14 @@ class AttendanceRequestApproveView(APIView):
         return Response({"status": "approved"}, status=200)
 
 
-class AttendanceRequestCancelView(APIView):
-    """
-    Cancels an attendance request.
 
-    Fix:
-    - Preserve request_type before clearing it
-    - If it was a create_request, remove attendance + daily activity rows
+class AttendanceRequestCancelView(APIView):
+    """Cancels an attendance request (owner action).
+
+    Behavior aligned with Work Type Request:
+    - Request stays in history list (status=CANCEL)
+    - Only pending requests can be canceled
+    - For create_request, remove derived daily artifacts, but keep the Attendance row for history.
     """
 
     permission_classes = [IsAuthenticated]
@@ -1627,39 +1698,81 @@ class AttendanceRequestCancelView(APIView):
     def put(self, request, pk):
         try:
             attendance = Attendance.objects.select_for_update().get(id=pk)
-            if _can_act_on_employee(
-                request,
-                getattr(attendance, "employee_id_id", None) or attendance.employee_id.id,
-                "attendance.change_attendance",
-                allow_owner=True,
-            ):
-                req_type = attendance.request_type
-                req_date = attendance.attendance_date
-                req_employee = attendance.employee_id
 
-                attendance.is_validate_request_approved = False
-                attendance.is_validate_request = False
-                attendance.request_description = None
-                attendance.requested_data = None
-                attendance.request_type = None
-                attendance.save()
+            # Cancel is an owner-only action (align with Work Type Request)
 
-                if req_type == "create_request":
-                    AttendanceActivity.objects.filter(
-                        employee_id=req_employee,
-                        attendance_date=req_date,
-                    ).delete()
-                    AttendanceLateComeEarlyOut.objects.filter(attendance_id=attendance).delete()
-                    attendance.delete()
+
+            try:
+
+
+                if attendance.employee_id.employee_user_id != request.user:
+
+
+                    return Response(
+
+
+                        {"error": "Only the requester can cancel this request."},
+
+
+                        status=status.HTTP_403_FORBIDDEN,
+
+
+                    )
+
+
+            except Exception:
+
+
+                return Response(
+
+
+                    {"error": "You do not have permission to perform this action."},
+
+
+                    status=status.HTTP_403_FORBIDDEN,
+
+
+                )
+
+            if not getattr(attendance, "is_validate_request", False):
+                return Response({"error": "Only pending requests can be canceled."}, status=400)
+
+            req_type = attendance.request_type
+            req_date = attendance.attendance_date
+            req_employee = attendance.employee_id
+
+            attendance.is_validate_request_approved = False
+            attendance.is_validate_request = False
+            # Keep request_description for history, but discard pending payload
+            attendance.requested_data = None
+            attendance.request_type = "cancel_request"
+            try:
+                attendance.approved_by = request.user.employee_get
+            except Exception:
+                attendance.approved_by = None
+            attendance.save()
+
+            # For create_request, remove created daily artifacts so it won't affect reporting.
+            if req_type == "create_request":
+                AttendanceActivity.objects.filter(
+                    employee_id=req_employee,
+                    attendance_date=req_date,
+                ).delete()
+                AttendanceLateComeEarlyOut.objects.filter(attendance_id=attendance).delete()
+
         except Exception as E:
             return Response({"error": str(E)}, status=400)
+
         return Response({"status": "success"}, status=200)
 
 
 class AttendanceRequestRejectView(APIView):
     """Reject an attendance request (admin/supervisor action).
 
-    Note: This differs from *cancel* (owner action). Reject clears the pending request.
+    Behavior aligned with Work Type Request:
+    - Owner cannot reject own request (use cancel)
+    - Request stays in history list (status=REJECTED)
+    - Only pending requests can be rejected
     """
 
     permission_classes = [IsAuthenticated]
@@ -1668,15 +1781,11 @@ class AttendanceRequestRejectView(APIView):
     def put(self, request, pk):
         try:
             attendance = Attendance.objects.select_for_update().get(id=pk)
-
             employee_id = getattr(attendance, "employee_id_id", None) or attendance.employee_id.id
 
-            # Owner cannot reject (use cancel) unless admin.
+            # Owner cannot reject their own request (use cancel), even if admin.
             try:
-                if (
-                    attendance.employee_id.employee_user_id == request.user
-                    and not request.user.has_perm("attendance.change_attendance")
-                ):
+                if attendance.employee_id.employee_user_id == request.user:
                     return Response(
                         {"error": "Use cancel for your own request."},
                         status=status.HTTP_403_FORBIDDEN,
@@ -1694,6 +1803,9 @@ class AttendanceRequestRejectView(APIView):
                     {"error": "You do not have permission to perform this action."},
                     status=status.HTTP_403_FORBIDDEN,
                 )
+
+            if not getattr(attendance, "is_validate_request", False):
+                return Response({"error": "Request is not waiting for approval."}, status=400)
 
             # Optional rejection comment (saved as AttendanceRequestComment)
             comment_text = (
@@ -1719,9 +1831,13 @@ class AttendanceRequestRejectView(APIView):
 
             attendance.is_validate_request_approved = False
             attendance.is_validate_request = False
-            attendance.request_description = None
+            # Keep request_description for history, but discard pending payload
             attendance.requested_data = None
-            attendance.request_type = None
+            attendance.request_type = "reject_request"
+            try:
+                attendance.approved_by = request.user.employee_get
+            except Exception:
+                attendance.approved_by = None
             attendance.save()
 
             if req_type == "create_request":
@@ -1730,13 +1846,11 @@ class AttendanceRequestRejectView(APIView):
                     attendance_date=req_date,
                 ).delete()
                 AttendanceLateComeEarlyOut.objects.filter(attendance_id=attendance).delete()
-                attendance.delete()
 
         except Exception as E:
             return Response({"error": str(E)}, status=400)
 
         return Response({"status": "rejected"}, status=200)
-
 
 class WorkModeRequestView(APIView):
     """CRUD for WorkModeRequest (WFA / ON_DUTY).
