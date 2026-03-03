@@ -788,6 +788,40 @@ class NewRequestForm(AttendanceRequestForm):
         # Check if attendance exists for the employee and date
         attendances = Attendance.objects.filter(employee_id=employee, attendance_date=attendance_date)
 
+        # -----------------------------------------------------------------
+        # -----------------------------------------------------------------
+        # Scope rules (IN / OUT / FULL) to prevent duplicates/overlaps.
+        # - A session that is WAITING blocks another request overlapping that session.
+        # - A session that is APPROVED blocks another request overlapping that session.
+        # - If there is an existing WAITING request and the incoming scope is disjoint,
+        #   we merge values into the existing WAITING requested_data (e.g., add OUT after IN).
+        # -----------------------------------------------------------------
+        from attendance.services.attendance_correction_scope_rules import (
+            infer_scope_from_values,
+            get_approved_scopes,
+            get_current_scope,
+            build_requested_data_for_save,
+            validate_new_request_scope,
+        )
+
+        incoming_scope = infer_scope_from_values(in_time, out_time)
+
+        approved_scopes = []
+        existing_waiting_scope = ""
+        keep_existing_fields = False
+        existing_attendance = attendances.first() if attendances.exists() else None
+        if existing_attendance is not None:
+            existing_req = getattr(existing_attendance, 'requested_data', None)
+            approved_scopes = get_approved_scopes(existing_req)
+            if bool(getattr(existing_attendance, 'is_validate_request', False)):
+                existing_waiting_scope = get_current_scope(existing_req)
+                keep_existing_fields = True
+
+        validate_new_request_scope(
+            existing_waiting_scope=existing_waiting_scope,
+            approved_scopes=approved_scopes,
+            incoming_scope=incoming_scope,
+        )
         data = {
             'employee_id': employee,
             'attendance_date': attendance_date,
@@ -819,9 +853,22 @@ class NewRequestForm(AttendanceRequestForm):
             data['minimum_hour'] = self.data.get('minimum_hour') or minimum_hour
 
             attendance = attendances.first()
-            for key, value in list(data.items()):
-                data[key] = str(value)
-            attendance.requested_data = json.dumps(data)
+
+            # Build requested_data with __meta (approved_scopes + current_scope).
+            meta_wrapped = build_requested_data_for_save(
+                new_payload=data,
+                existing_requested_data=getattr(attendance, 'requested_data', None),
+                incoming_scope=incoming_scope,
+                keep_existing_fields=keep_existing_fields,
+            )
+
+            # Keep legacy behavior: stringify values for requested_data fields.
+            for key, value in list(meta_wrapped.items()):
+                if key == '__meta':
+                    continue
+                meta_wrapped[key] = str(value)
+
+            attendance.requested_data = json.dumps(meta_wrapped)
             attendance.is_validate_request = True
             if attendance.request_type != 'create_request':
                 attendance.request_type = 'update_request'
@@ -830,11 +877,32 @@ class NewRequestForm(AttendanceRequestForm):
             self.new_instance = None
             return
 
+        # New create_request row
+        # Add meta to requested_data so approval can record approved scopes.
+        meta_wrapped = build_requested_data_for_save(
+            new_payload={
+                'employee_id': employee.id,
+                'attendance_date': str(attendance_date),
+                'attendance_clock_in_date': self.data.get('attendance_clock_in_date') or (str(in_date) if in_date else None),
+                'attendance_clock_in': self.data.get('attendance_clock_in') or (in_time.strftime('%H:%M') if in_time else None),
+                'attendance_clock_out': None if (self.data.get('attendance_clock_out') in (None, '', 'None')) else self.data.get('attendance_clock_out'),
+                'attendance_clock_out_date': None if (self.data.get('attendance_clock_out_date') in (None, '', 'None')) else self.data.get('attendance_clock_out_date'),
+                'work_type_id': self.data.get('work_type_id') or (str(getattr(work_type, 'id', '')) if work_type else ''),
+                'shift_id': self.data.get('shift_id') or (str(getattr(shift, 'id', '')) if shift else ''),
+                'attendance_worked_hour': self.data.get('attendance_worked_hour') or worked_hour,
+                'minimum_hour': self.data.get('minimum_hour') or minimum_hour,
+            },
+            existing_requested_data=None,
+            incoming_scope=incoming_scope,
+            keep_existing_fields=False,
+        )
+
         new_instance = Attendance(**data)
         new_instance.is_validate_request = True
         new_instance.attendance_validated = False
         new_instance.request_description = self.data.get('request_description')
         new_instance.request_type = 'create_request'
+        new_instance.requested_data = json.dumps(meta_wrapped)
         self.new_instance = new_instance
         return
 
