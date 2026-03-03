@@ -1,495 +1,1317 @@
-from rest_framework import serializers
+"""
+models.py
 
-from attendance.models import *
-from base.models import HorillaMailTemplate
+This module is used to register models for attendance app
 
-from attendance.services.work_type_request_rules import (
-    coerce_work_type_payload,
-    validate_work_type_request,
+"""
+
+import contextlib
+import datetime as dt
+import json
+from datetime import date, datetime, timedelta
+
+from django.apps import apps
+from django.core.exceptions import ValidationError
+from django.db import models
+from django.db.models import Q
+from django.utils import timezone
+from django.utils.translation import gettext_lazy as _
+
+from attendance.methods.utils import (
+    MONTH_MAPPING,
+    attendance_date_validate,
+    format_time,
+    get_diff_dict,
+    strtime_seconds,
+    validate_hh_mm_ss_format,
+    validate_time_format,
+    validate_time_in_minutes,
 )
+from base.horilla_company_manager import HorillaCompanyManager
+from base.methods import is_company_leave, is_holiday
+from base.models import Company, EmployeeShift, EmployeeShiftDay, WorkType
+from employee.models import Employee
+from horilla.methods import get_horilla_model_class
+from horilla.models import HorillaModel, upload_path
+from horilla_audit.models import HorillaAuditInfo, HorillaAuditLog
+
+# to skip the migration issue with the old migrations
+_validate_time_in_minutes = validate_time_in_minutes
 
 
-class AttendanceSerializer(serializers.ModelSerializer):
-    employee_first_name = serializers.CharField(
-        source="employee_id.employee_first_name", read_only=True
+# Create your models here.
+
+
+class AttendanceWorkMode(models.TextChoices):
+    """Work mode used for attendance punches."""
+    WFO = "wfo", _("WFO")
+    WFA = "wfa", _("WFA")
+    ON_DUTY = "on_duty", _("On Duty")
+
+
+class WorkModeRequestScope(models.TextChoices):
+    """Scope of a work-mode request."""
+    IN = "in", _("IN")
+    OUT = "out", _("OUT")
+    FULL = "full", _("FULL (IN & OUT)")
+
+
+class WorkModeRequestStatus(models.TextChoices):
+    """Approval status for a work-mode request."""
+    PENDING = "pending", _("Pending")
+    WAITING_FOR_APPROVAL = "waiting_for_approval", _("Waiting For Approval")
+    APPROVED = "approved", _("Approved")
+    REJECTED = "rejected", _("Rejected")
+    CANCELED = "canceled", _("Canceled")
+
+
+
+class WorkModeRequestRejectReasonCode(models.TextChoices):
+    """Reason code for REJECTED WorkModeRequest."""
+    MANUAL_REJECT = "MANUAL_REJECT", _("Manual Reject")
+    AUTO_REJECT_CUTOFF_IN_PASSED = "AUTO_REJECT_CUTOFF_IN_PASSED", _("Auto Reject: Cutoff IN Passed")
+    AUTO_REJECT_CUTOFF_OUT_PASSED = "AUTO_REJECT_CUTOFF_OUT_PASSED", _("Auto Reject: Cutoff OUT Passed")
+    AUTO_REJECT_CUTOFF_FULL_PASSED = "AUTO_REJECT_CUTOFF_FULL_PASSED", _("Auto Reject: Cutoff FULL Passed")
+
+    # Attendance punch reject reasons (Option B)
+    EARLY_CHECKOUT_BEFORE_SHIFT_END = (
+        "EARLY_CHECKOUT_BEFORE_SHIFT_END",
+        _("Early check-out before shift end"),
     )
-    employee_last_name = serializers.CharField(
-        source="employee_id.employee_last_name", read_only=True
+    EARLY_CHECKOUT_BEFORE_CUTOFF_IN = (
+        "EARLY_CHECKOUT_BEFORE_CUTOFF_IN",
+        _("Early check-out before cutoff-in"),
     )
-    shift_name = serializers.CharField(source="shift_id.employee_shift", read_only=True)
-    badge_id = serializers.CharField(source="employee_id.badge_id", read_only=True)
-    employee_profile_url = serializers.SerializerMethodField(read_only=True)
-    # Attachments uploaded via AttendanceRequestComment.files
-    attachment_urls = serializers.SerializerMethodField(read_only=True)
-    # Alias for UI parity with Work Type Requests
-    file_urls = serializers.SerializerMethodField(read_only=True)
 
-    # Status label for mobile UI (WAITING / APPROVED / REJECTED / CANCEL)
-    status = serializers.SerializerMethodField(read_only=True)
-    request_status = serializers.SerializerMethodField(read_only=True)
-    action_by_name = serializers.SerializerMethodField(read_only=True)
 
-    work_type = serializers.CharField(source="work_type_id.work_type", read_only=True)
+class AttendancePunchStatus(models.TextChoices):
+    """Audit status for a punch (IN/OUT) after request decision."""
+    VALID = "VALID", _("Valid")
+    REJECTED = "REJECTED", _("Rejected")
+
+class AttendanceActivity(HorillaModel):
+    """
+    AttendanceActivity model
+    """
+
+    employee_id = models.ForeignKey(
+        Employee,
+        on_delete=models.PROTECT,
+        related_name="employee_attendance_activities",
+        verbose_name=_("Employee"),
+    )
+    attendance_date = models.DateField(
+        null=True,
+        validators=[attendance_date_validate],
+        verbose_name=_("Attendance Date"),
+    )
+    shift_day = models.ForeignKey(
+        EmployeeShiftDay,
+        null=True,
+        on_delete=models.DO_NOTHING,
+        verbose_name=_("Shift Day"),
+    )
+    in_datetime = models.DateTimeField(null=True)
+    clock_in_date = models.DateField(null=True, verbose_name=_("In Date"))
+    clock_in = models.TimeField(verbose_name=_("Check In"))
+    clock_out_date = models.DateField(null=True, verbose_name=_("Out Date"))
+    out_datetime = models.DateTimeField(null=True)
+    clock_out = models.TimeField(null=True, verbose_name=_("Check Out"))
+    objects = HorillaCompanyManager(
+        related_company_field="employee_id__employee_work_info__company_id"
+    )
+    clock_in_image = models.ImageField(upload_to=upload_path, null=True, blank=True)
+    clock_out_image = models.ImageField(upload_to=upload_path, null=True, blank=True)
+
+    clock_in_mode = models.CharField(
+        max_length=20,
+        null=True,
+        blank=True,
+        choices=AttendanceWorkMode.choices,
+        default=AttendanceWorkMode.WFO,
+        verbose_name=_("Clock-In Mode"),
+    )
+    clock_out_mode = models.CharField(
+        max_length=20,
+        null=True,
+        blank=True,
+        choices=AttendanceWorkMode.choices,
+        default=AttendanceWorkMode.WFO,
+        verbose_name=_("Clock-Out Mode"),
+    )
+
+    # Location payload stored for audit purposes (no geofencing).
+    # Expected keys (example): {"lat": 0.0, "lng": 0.0, "accuracy": 10, "provider": "gps", "captured_at": "..."}
+    clock_in_location = models.JSONField(null=True, blank=True, verbose_name=_("Clock-In Location"))
+    clock_out_location = models.JSONField(null=True, blank=True, verbose_name=_("Clock-Out Location"))
+
+    # Which request enabled this punch (if any).
+    work_mode_request_id = models.ForeignKey(
+        "attendance.WorkModeRequest",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="attendance_activities",
+        verbose_name=_("Work Mode Request"),
+    )
 
     class Meta:
-        model = Attendance
-        exclude = [
-            "overtime_second",
-            "at_work_second",
-            "attendance_day",
-            "request_description",
-            "approved_overtime_second",
-            "request_type",
-            "requested_data",
-            "is_validate_request",
-            "is_validate_request_approved",
-            "attendance_overtime",
+        """
+        Meta class to add some additional options
+        """
+
+        ordering = ["-attendance_date", "employee_id__employee_first_name", "clock_in"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["employee_id", "attendance_date"],
+                name="uniq_activity_employee_date",
+            )
         ]
-
-    def validate(self, data):
-        # Check if attendance exists for the employee on the current date
-        if self.instance:
-            return data
-        employee_id = data.get("employee_id")
-        attendance_date = data.get("attendance_date", date.today())
-        if Attendance.objects.filter(
-            employee_id=employee_id, attendance_date=attendance_date
-        ).exists():
-            raise ValidationError(
-                ("Attendance for this employee on the current date already exists.")
-            )
-        return data
-
-    def get_attachment_urls(self, obj):
-        """Return list of attachment URLs for an attendance correction request.
-        Files are stored via AttendanceRequestComment.files (ManyToMany -> AttendanceRequestFile).
+    def duration(self):
         """
-        try:
-            from attendance.models import AttendanceRequestComment
-            urls = []
-            seen = set()
-            qs = AttendanceRequestComment.objects.filter(request_id=obj).prefetch_related('files')
-            for c in qs:
-                for f in c.files.all():
-                    try:
-                        u = getattr(getattr(f, 'file', None), 'url', None)
-                        if u and u not in seen:
-                            seen.add(u)
-                            urls.append(u)
-                    except Exception:
-                        continue
-            return urls
-        except Exception:
-            return []
+        Duration calc b/w in-out method
+        """
 
-    def get_file_urls(self, obj):
-        # Backward/UX compatibility with WorkModeRequestSerializer
-        return self.get_attachment_urls(obj)
+        if not self.clock_out or not self.clock_out_date:
+            self.clock_out_date = datetime.today().date()
+            self.clock_out = datetime.now().time()
 
-    def get_employee_profile_url(self, obj):
-        try:
-            employee_profile = obj.employee_id.employee_profile
-            return employee_profile.url
-        except:
-            return None
+        clock_in_datetime = datetime.combine(self.clock_in_date, self.clock_in)
+        clock_out_datetime = datetime.combine(self.clock_out_date, self.clock_out)
+
+        time_difference = clock_out_datetime - clock_in_datetime
+
+        return time_difference.total_seconds()
+
+    def __str__(self):
+        return f"{self.employee_id} - {self.attendance_date} - {self.clock_in} - {self.clock_out}"
 
 
-class AttendanceRequestSerializer(serializers.ModelSerializer):
-    employee_first_name = serializers.CharField(
-        source="employee_id.employee_first_name", read_only=True
+class BatchAttendance(HorillaModel):
+    """
+    Batch attendance model
+    """
+
+    title = models.CharField(max_length=150, verbose_name=_("Title"))
+
+    def __str__(self):
+        return f"{self.title}-{self.id}"
+
+
+
+class WorkModeRequest(HorillaModel):
+    """
+    Work mode request used to control whether an employee may punch from mobile.
+
+    Notes:
+    - WFA requires APPROVED status before punch is allowed.
+    - ON_DUTY may allow punching while PENDING (business rule enforced in API layer).
+    - WFO is not expected to be requested (WFO comes from biometric device), but the choice
+      is kept for completeness and data consistency.
+    """
+
+    employee_id = models.ForeignKey(
+        Employee,
+        on_delete=models.PROTECT,
+        related_name="work_mode_requests",
+        verbose_name=_("Employee"),
     )
-    employee_last_name = serializers.CharField(
-        source="employee_id.employee_last_name", read_only=True
+
+    mode = models.CharField(
+        max_length=20,
+        choices=AttendanceWorkMode.choices,
+        verbose_name=_("Mode"),
     )
-    shift_name = serializers.CharField(source="shift_id.employee_shift", read_only=True)
-    badge_id = serializers.CharField(source="employee_id.badge_id", read_only=True)
-    employee_profile_url = serializers.SerializerMethodField(read_only=True)
 
-    # Attachments uploaded via AttendanceRequestComment.files
-    attachment_urls = serializers.SerializerMethodField(read_only=True)
-    # Alias for UI parity with Work Type Requests
-    file_urls = serializers.SerializerMethodField(read_only=True)
+    scope = models.CharField(
+        max_length=10,
+        choices=WorkModeRequestScope.choices,
+        default=WorkModeRequestScope.FULL,
+        verbose_name=_("Scope"),
+    )
 
-    # Status label for mobile/web UI (WAITING / APPROVED / REJECTED / CANCEL)
-    status = serializers.SerializerMethodField(read_only=True)
-    request_status = serializers.SerializerMethodField(read_only=True)
-    action_by_name = serializers.SerializerMethodField(read_only=True)
+    start_date = models.DateField(verbose_name=_("Start Date"))
+    end_date = models.DateField(verbose_name=_("End Date"))
+
+    status = models.CharField(
+        max_length=32,
+        choices=WorkModeRequestStatus.choices,
+        default=WorkModeRequestStatus.PENDING,
+        verbose_name=_("Status"),
+    )
+
+    reason_code = models.CharField(
+        max_length=64,
+        null=True,
+        blank=True,
+        choices=WorkModeRequestRejectReasonCode.choices,
+        verbose_name=_("Reject Reason Code"),
+    )
+
+    reason = models.TextField(null=True, blank=True, verbose_name=_("Reason"))
+
+    files = models.ManyToManyField(
+        "attendance.AttendanceRequestFile",
+        blank=True,
+        related_name="work_mode_requests",
+        verbose_name=_("Files"),
+    )
+
+    approved_by = models.ForeignKey(
+        Employee,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="approved_work_mode_requests",
+        verbose_name=_("Approved By"),
+    )
+    approved_at = models.DateTimeField(null=True, blank=True, verbose_name=_("Approved At"))
+
+    objects = HorillaCompanyManager(
+        related_company_field="employee_id__employee_work_info__company_id"
+    )
 
     class Meta:
-        model = Attendance
-        exclude = [
-            "attendance_overtime",
-            "attendance_overtime_approve",
-            "attendance_validated",
-            "approved_overtime_second",
-            "is_validate_request",
-            "is_validate_request_approved",
-            "request_type",
-            "created_at",
+        ordering = ["-start_date", "-id"]
+        verbose_name = _("Work Mode Request")
+        verbose_name_plural = _("Work Mode Requests")
+
+    def __str__(self) -> str:
+        return f"{self.employee_id} - {self.mode} ({self.scope}) - {self.start_date} to {self.end_date}"
+
+    @property
+    def requires_pre_approval(self) -> bool:
+        return self.mode == AttendanceWorkMode.WFA
+
+    def is_active_for_date(self, target_date: date) -> bool:
+        """Returns True if the request covers the date and is not canceled."""
+        if self.status == WorkModeRequestStatus.CANCELED:
+            return False
+        return self.start_date <= target_date <= self.end_date
+
+    def covers_in(self) -> bool:
+        return self.scope in (WorkModeRequestScope.IN, WorkModeRequestScope.FULL)
+
+    def covers_out(self) -> bool:
+        return self.scope in (WorkModeRequestScope.OUT, WorkModeRequestScope.FULL)
+
+    def clean(self):
+        super().clean()
+        if self.end_date and self.start_date and self.end_date < self.start_date:
+            raise ValidationError({"end_date": _("End date cannot be earlier than start date.")})
+
+        # WFO should not be requested; keep it invalid at model level to prevent UI misuse.
+        if self.mode == AttendanceWorkMode.WFO:
+            raise ValidationError({"mode": _("WFO should not be requested. Use WFA or On Duty.")})
+
+
+
+class Attendance(HorillaModel):
+    """
+    Attendance model
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+    status = [
+        ("create_request", _("Create Request")),
+        ("update_request", _("Update Request")),
+        ("revalidate_request", _("Re-validate Request")),
+        ("cancel_request", _("Cancel Request")),
+        ("reject_request", _("Reject Request")),
+    ]
+
+    employee_id = models.ForeignKey(
+        Employee,
+        on_delete=models.PROTECT,
+        null=True,
+        related_name="employee_attendances",
+        verbose_name=_("Employee"),
+    )
+    attendance_date = models.DateField(
+        null=False,
+        validators=[attendance_date_validate],
+        verbose_name=_("Attendance date"),
+    )
+    shift_id = models.ForeignKey(
+        EmployeeShift, on_delete=models.SET_NULL, null=True, verbose_name=_("Shift")
+    )
+    work_type_id = models.ForeignKey(
+        WorkType,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,  # 796
+        verbose_name=_("Work Type"),
+    )
+    attendance_day = models.ForeignKey(
+        EmployeeShiftDay,
+        on_delete=models.DO_NOTHING,
+        null=True,
+        verbose_name=_("Attendance day"),
+    )
+    attendance_clock_in_date = models.DateField(
+        null=True, verbose_name=_("Check-In Date")
+    )
+    attendance_clock_in = models.TimeField(
+        null=True, verbose_name=_("Check-In"), help_text=_("First Check-In Time")
+    )
+    attendance_clock_out_date = models.DateField(
+        null=True, verbose_name=_("Check-Out Date")
+    )
+    attendance_clock_out = models.TimeField(
+        null=True, verbose_name=_("Check-Out"), help_text=_("Last Check-Out Time")
+    )
+    attendance_worked_hour = models.CharField(
+        null=True,
+        default="00:00",
+        max_length=10,
+        validators=[validate_time_format],
+        verbose_name=_("Worked Hours"),
+    )
+    minimum_hour = models.CharField(
+        max_length=10,
+        default="00:00",
+        validators=[validate_time_format],
+        verbose_name=_("Minimum hour"),
+    )
+    batch_attendance_id = models.ForeignKey(
+        BatchAttendance,
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        verbose_name=_("Batch Attendance"),
+    )
+    attendance_overtime = models.CharField(
+        default="00:00",
+        validators=[validate_time_format],
+        max_length=10,
+        verbose_name=_("Overtime"),
+    )
+    attendance_overtime_approve = models.BooleanField(
+        default=False, verbose_name=_("Overtime Approve")
+    )
+    attendance_validated = models.BooleanField(
+        default=False, verbose_name=_("Attendance Validate")
+    )
+    at_work_second = models.IntegerField(null=True, blank=True)
+    overtime_second = models.IntegerField(
+        null=True, blank=True, verbose_name=_("Overtime In Second")
+    )
+    approved_overtime_second = models.IntegerField(default=0)
+    is_validate_request = models.BooleanField(
+        default=False, verbose_name=_("Is validate request")
+    )
+    is_bulk_request = models.BooleanField(default=False, editable=False)
+    is_validate_request_approved = models.BooleanField(
+        default=False, verbose_name=_("Is validate request approved")
+    )
+    request_description = models.TextField(
+        null=True, verbose_name=_("Request Description")
+    )
+    request_type = models.CharField(
+        max_length=18, null=True, choices=status, default="update_request"
+    )
+    is_holiday = models.BooleanField(default=False)
+    requested_data = models.JSONField(null=True, editable=False)
+    approved_by = models.ForeignKey(
+        Employee,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        verbose_name=_("Approved By"),
+        editable=False,
+    )
+    objects = HorillaCompanyManager(
+        related_company_field="employee_id__employee_work_info__company_id"
+    )
+    history = HorillaAuditLog(
+        related_name="history_set",
+        bases=[
+            HorillaAuditInfo,
+        ],
+    )
+    attendance_clock_in_image = models.ImageField(upload_to=upload_path, null=True, blank=True)
+    attendance_clock_out_image = models.ImageField(upload_to=upload_path, null=True, blank=True)
+
+    # Hybrid work mode + audit data
+    attendance_clock_in_mode = models.CharField(
+        max_length=20,
+        null=True,
+        blank=True,
+        choices=AttendanceWorkMode.choices,
+        default=AttendanceWorkMode.WFO,
+        verbose_name=_("Check-In Mode"),
+    )
+    attendance_clock_out_mode = models.CharField(
+        max_length=20,
+        null=True,
+        blank=True,
+        choices=AttendanceWorkMode.choices,
+        default=AttendanceWorkMode.WFO,
+        verbose_name=_("Check-Out Mode"),
+    )
+
+    # Audit status per punch (Option B)
+    in_attendance_status = models.CharField(
+        max_length=16,
+        null=True,
+        blank=True,
+        choices=AttendancePunchStatus.choices,
+        verbose_name=_("IN Attendance Status"),
+    )
+    out_attendance_status = models.CharField(
+        max_length=16,
+        null=True,
+        blank=True,
+        choices=AttendancePunchStatus.choices,
+        verbose_name=_("OUT Attendance Status"),
+    )
+
+    in_attendance_reject_reason_code = models.CharField(
+        max_length=64,
+        null=True,
+        blank=True,
+        choices=WorkModeRequestRejectReasonCode.choices,
+        verbose_name=_("IN Reject Reason Code"),
+    )
+    out_attendance_reject_reason_code = models.CharField(
+        max_length=64,
+        null=True,
+        blank=True,
+        choices=WorkModeRequestRejectReasonCode.choices,
+        verbose_name=_("OUT Reject Reason Code"),
+    )
+
+    # Related request IDs used for punch decisions (per IN/OUT)
+    in_related_work_type_request_id = models.IntegerField(null=True, blank=True)
+    out_related_work_type_request_id = models.IntegerField(null=True, blank=True)
+
+    attendance_clock_in_location = models.JSONField(
+        null=True, blank=True, verbose_name=_("Check-In Location")
+    )
+    attendance_clock_out_location = models.JSONField(
+        null=True, blank=True, verbose_name=_("Check-Out Location")
+    )
+
+    # On Duty punches are presence-only; they should not affect worked hours / overtime.
+    is_presensi_only = models.BooleanField(
+        default=False,
+        verbose_name=_("Presence Only"),
+        help_text=_("If enabled, worked hours and overtime are not calculated for this attendance."),
+    )
+
+    # Which work-mode request applied to this attendance (if any).
+    work_mode_request_id = models.ForeignKey(
+        "attendance.WorkModeRequest",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="attendances",
+        verbose_name=_("Work Mode Request"),
+    )
+
+
+    class Meta:
+        """
+        Meta class to add some additional options
+        """
+
+        unique_together = ("employee_id", "attendance_date")
+        permissions = [
+            ("change_validateattendance", "Validate Attendance"),
+            ("change_approveovertime", "Change Approve Overtime"),
         ]
-
-    def create(self, validated_data):
-        # Extract relevant data from validated_data
-        employee_id = validated_data.get("employee_id")
-        attendance_date = validated_data.get("attendance_date")
-        # Check if attendance exists for the employee and date
-        attendances = Attendance.objects.filter(
-            employee_id=employee_id, attendance_date=attendance_date
-        )
-        data = {
-            "employee_id": validated_data.get("employee_id"),
-            "attendance_date": validated_data.get("attendance_date"),
-            "attendance_clock_in_date": validated_data.get("attendance_clock_in_date"),
-            "attendance_clock_in": validated_data.get("attendance_clock_in"),
-            "attendance_clock_out": validated_data.get("attendance_clock_out"),
-            "attendance_clock_out_date": validated_data.get("attendance_clock_out_date"),
-            "shift_id": validated_data.get("shift_id"),
-            "work_type_id": validated_data.get("work_type_id"),
-            "attendance_worked_hour": validated_data.get("attendance_worked_hour"),
-            "minimum_hour": validated_data.get("minimum_hour"),
-        }
-        if attendances.exists():
-            data["employee_id"] = employee_id.id
-            data["attendance_date"] = str(attendance_date)
-            data["attendance_clock_in_date"] = self.data["attendance_clock_in_date"]
-            data["attendance_clock_in"] = self.data["attendance_clock_in"]
-            data["attendance_clock_out"] = (
-                None if data["attendance_clock_out"] == "None" else data["attendance_clock_out"]
-            )
-            data["attendance_clock_out_date"] = (
-                None if data["attendance_clock_out_date"] == "None" else data["attendance_clock_out_date"]
-            )
-            data["work_type_id"] = self.data["work_type_id"]
-            data["shift_id"] = self.data["shift_id"]
-            attendance = attendances.first()
-            for key, value in data.items():
-                data[key] = str(value)
-            attendance.requested_data = json.dumps(data)
-            attendance.is_validate_request = True
-            if attendance.request_type != "create_request":
-                attendance.request_type = "update_request"
-            attendance.request_description = self.data["request_description"]
-            attendance.save()
-            return attendance
-
-        new_instance = Attendance(**data)
-        new_instance.is_validate_request = True
-        new_instance.attendance_validated = False
-        new_instance.request_description = self.data["request_description"]
-        new_instance.request_type = "create_request"
-        new_instance.save()
-        return new_instance
-
-    def update(self, instance, validated_data):
-        if "employee_id" in validated_data:
-            validated_data.pop("employee_id")
-        return super().update(instance, validated_data)
-
-    def get_attachment_urls(self, obj):
-        """Return list of attachment URLs for an attendance correction request.
-        Files are stored via AttendanceRequestComment.files (ManyToMany -> AttendanceRequestFile).
-        """
-        try:
-            from attendance.models import AttendanceRequestComment
-
-            urls = []
-            seen = set()
-            qs = AttendanceRequestComment.objects.filter(request_id=obj).prefetch_related("files")
-            for c in qs:
-                for f in c.files.all():
-                    try:
-                        u = getattr(getattr(f, "file", None), "url", None)
-                        if u and u not in seen:
-                            seen.add(u)
-                            urls.append(u)
-                    except Exception:
-                        continue
-            return urls
-        except Exception:
-            return []
-
-    def get_file_urls(self, obj):
-        # Backward/UX compatibility with WorkModeRequestSerializer
-        return self.get_attachment_urls(obj)
-
-    def get_employee_profile_url(self, obj):
-        try:
-            employee_profile = obj.employee_id.employee_profile
-            return employee_profile.url
-        except Exception:
-            return None
-
-    def _compute_status(self, obj):
-        """Stable status label for mobile/web UI."""
-        try:
-            rt = getattr(obj, "request_type", None)
-            if rt == "cancel_request":
-                return "CANCEL"
-            if rt == "reject_request":
-                return "REJECTED"
-            if getattr(obj, "is_validate_request", False):
-                return "WAITING"
-            if getattr(obj, "is_validate_request_approved", False) or getattr(obj, "attendance_validated", False):
-                return "APPROVED"
-        except Exception:
-            pass
-        return None
-
-    def get_status(self, obj):
-        return self._compute_status(obj)
-
-    def get_request_status(self, obj):
-        # Alias used by some mobile builds
-        return self._compute_status(obj)
-
-    def get_action_by_name(self, obj):
-        ab = getattr(obj, "approved_by", None)
-        if not ab:
-            return None
-        try:
-            first = getattr(ab, "employee_first_name", "") or ""
-            last = getattr(ab, "employee_last_name", "") or ""
-            name = (first + " " + last).strip()
-            return name or str(ab)
-        except Exception:
-            return None
-
-
-class AttendanceOverTimeSerializer(serializers.ModelSerializer):
-    badge_id = serializers.CharField(source="employee_id.badge_id", read_only=True)
-    employee_first_name = serializers.CharField(
-        source="employee_id.employee_first_name", read_only=True
-    )
-    employee_last_name = serializers.CharField(
-        source="employee_id.employee_last_name", read_only=True
-    )
-    employee_profile_url = serializers.SerializerMethodField(read_only=True)
-    # Attachments uploaded via AttendanceRequestComment.files
-    attachment_urls = serializers.SerializerMethodField(read_only=True)
-    # Alias for UI parity with Work Type Requests
-    file_urls = serializers.SerializerMethodField(read_only=True)
-
-    class Meta:
-        model = AttendanceOverTime
-        fields = [
-            "id",
-            "employee_first_name",
-            "employee_last_name",
-            "employee_profile_url",
-            "badge_id",
-            "employee_id",
-            "month",
-            "year",
-            "worked_hours",
-            "pending_hours",
-            "overtime",
-        ]
-
-    def get_attachment_urls(self, obj):
-        """Return list of attachment URLs for an attendance correction request.
-        Files are stored via AttendanceRequestComment.files (ManyToMany -> AttendanceRequestFile).
-        """
-        try:
-            from attendance.models import AttendanceRequestComment
-            urls = []
-            seen = set()
-            qs = AttendanceRequestComment.objects.filter(request_id=obj).prefetch_related('files')
-            for c in qs:
-                for f in c.files.all():
-                    try:
-                        u = getattr(getattr(f, 'file', None), 'url', None)
-                        if u and u not in seen:
-                            seen.add(u)
-                            urls.append(u)
-                    except Exception:
-                        continue
-            return urls
-        except Exception:
-            return []
-
-    def get_file_urls(self, obj):
-        # Backward/UX compatibility with WorkModeRequestSerializer
-        return self.get_attachment_urls(obj)
-
-    def get_employee_profile_url(self, obj):
-        try:
-            employee_profile = obj.employee_id.employee_profile
-            return employee_profile.url
-        except:
-            return None
-
-
-class AttendanceLateComeEarlyOutSerializer(serializers.ModelSerializer):
-    employee_first_name = serializers.CharField(
-        source="employee_id.employee_first_name", read_only=True
-    )
-    employee_last_name = serializers.CharField(
-        source="employee_id.employee_last_name", read_only=True
-    )
-
-    class Meta:
-        model = AttendanceLateComeEarlyOut
-        fields = "__all__"
-
-
-class AttendanceActivitySerializer(serializers.ModelSerializer):
-    employee_first_name = serializers.CharField(
-        source="employee_id.employee_first_name", read_only=True
-    )
-    employee_last_name = serializers.CharField(
-        source="employee_id.employee_last_name", read_only=True
-    )
-
-    class Meta:
-        model = AttendanceActivity
-        fields = "__all__"
-
-
-class WorkModeRequestSerializer(serializers.ModelSerializer):
-    employee_first_name = serializers.CharField(
-        source="employee_id.employee_first_name", read_only=True
-    )
-    employee_last_name = serializers.CharField(
-        source="employee_id.employee_last_name", read_only=True
-    )
-    badge_id = serializers.CharField(source="employee_id.badge_id", read_only=True)
-    employee_profile_url = serializers.SerializerMethodField(read_only=True)
-    # Attachments uploaded via AttendanceRequestComment.files
-    attachment_urls = serializers.SerializerMethodField(read_only=True)
-    # Alias for UI parity with Work Type Requests
-    file_urls = serializers.SerializerMethodField(read_only=True)
-    file_urls = serializers.SerializerMethodField(read_only=True)
-    approved_by_name = serializers.SerializerMethodField(read_only=True)
-
-    # UI/UX alias (read-only). Input alias is handled in to_internal_value().
-    work_type = serializers.CharField(source="mode", read_only=True)
-
-    def to_internal_value(self, data):
-        # Allow clients to send `work_type` instead of legacy `mode`.
-        # NOTE: For multipart requests, DRF passes a QueryDict; calling dict(QueryDict)
-        # turns values into lists (e.g. {"mode": ["wfa"]}) and breaks ChoiceField.
-        # Use `.dict()` to get single values.
-        try:
-            raw = data.dict() if hasattr(data, "dict") else dict(data)
-            _mode, new_data = coerce_work_type_payload(raw)
-            data = new_data
-        except Exception:
-            pass
-        return super().to_internal_value(data)
-
-    def validate(self, attrs):
-        attrs = super().validate(attrs)
-
-        # Reason/Notes is required on create, and must not be cleared on update.
-        # (Model field is blank=True for backward compatibility, but UX requires it.)
-        reason_in = attrs.get("reason")
-        if self.instance is None:
-            # Creating
-            if reason_in is None or str(reason_in).strip() == "":
-                raise serializers.ValidationError({"reason": "Reason / Notes is required."})
-        else:
-            # Updating via serializer (some endpoints may use serializer directly)
-            if "reason" in attrs and str(reason_in or "").strip() == "":
-                raise serializers.ValidationError({"reason": "Reason / Notes is required."})
-
-        employee = attrs.get("employee_id") or getattr(self.instance, "employee_id", None)
-        mode = attrs.get("mode") or getattr(self.instance, "mode", None)
-        scope = attrs.get("scope") or getattr(self.instance, "scope", None)
-        start_date = attrs.get("start_date") or getattr(self.instance, "start_date", None)
-        end_date = attrs.get("end_date") or getattr(self.instance, "end_date", None)
-
-        if employee and mode and scope and start_date and end_date:
-            validate_work_type_request(
-                employee=employee,
-                mode=mode,
-                scope=scope,
-                start_date=start_date,
-                end_date=end_date,
-                instance_id=getattr(self.instance, "id", None),
-            )
-
-        # If rejected, reason_code must exist (spec)
-        status_val = attrs.get("status") or getattr(self.instance, "status", None)
-        reason_code = attrs.get("reason_code") or getattr(self.instance, "reason_code", None)
-        if status_val == WorkModeRequestStatus.REJECTED and not reason_code:
-            raise serializers.ValidationError({"reason_code": "reason_code is required when status is REJECTED"})
-
-        return attrs
-
-    class Meta:
-        model = WorkModeRequest
-        fields = "__all__"
-
-    def get_attachment_urls(self, obj):
-        """Return list of attachment URLs for an attendance correction request.
-        Files are stored via AttendanceRequestComment.files (ManyToMany -> AttendanceRequestFile).
-        """
-        try:
-            from attendance.models import AttendanceRequestComment
-            urls = []
-            seen = set()
-            qs = AttendanceRequestComment.objects.filter(request_id=obj).prefetch_related('files')
-            for c in qs:
-                for f in c.files.all():
-                    try:
-                        u = getattr(getattr(f, 'file', None), 'url', None)
-                        if u and u not in seen:
-                            seen.add(u)
-                            urls.append(u)
-                    except Exception:
-                        continue
-            return urls
-        except Exception:
-            return []
-
-    def get_file_urls(self, obj):
-        # Backward/UX compatibility with WorkModeRequestSerializer
-        return self.get_attachment_urls(obj)
-
-    def get_employee_profile_url(self, obj):
-        try:
-            employee_profile = obj.employee_id.employee_profile
-            return employee_profile.url
-        except Exception:
-            return None
-
-    def get_file_urls(self, obj):
-        try:
-            urls = []
-            for f in obj.files.all():
-                if getattr(f, "file", None) and getattr(f.file, "url", None):
-                    urls.append(f.file.url)
-            return urls
-        except Exception:
-            return []
-
-    def get_approved_by_name(self, obj):
-        try:
-            if obj.approved_by:
-                return f"{obj.approved_by.employee_first_name} {obj.approved_by.employee_last_name}".strip()
-        except Exception:
-            pass
-        return None
-
-class MailTemplateSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = HorillaMailTemplate
-        fields = "__all__"
-
-
-class UserAttendanceListSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Attendance
-        fields = [
-            "id",
-            "attendance_date",
+        ordering = [
+            "-attendance_date",
+            "employee_id__employee_first_name",
             "attendance_clock_in",
-            "attendance_clock_out",
-            "attendance_worked_hour",
         ]
+        verbose_name = _("Attendance")
+        verbose_name_plural = _("Attendances")
+
+    def check_min_ot(self):
+        """
+        Method to check the min ot for the attendance
+        """
+
+    def is_night_shift(self):
+        """
+        check is night shift or not
+        """
+        day = self.attendance_day
+        if day is None:
+            return False
+        schedule = day.day_schedule.filter(shift_id=self.shift_id).first()
+        if not schedule:
+            return False
+        return schedule.is_night_shift
+
+    def __str__(self) -> str:
+        return f"{self.employee_id.employee_first_name} \
+            {self.employee_id.employee_last_name} - {self.attendance_date}"
+
+    def activities(self):
+        """
+        This method is used to return the activites and count of activites comes for an attendance
+        """
+        activities = AttendanceActivity.objects.filter(
+            attendance_date=self.attendance_date, employee_id=self.employee_id
+        )
+        return {"query": activities, "count": activities.count()}
+
+    def requested_fields(self):
+        """
+        This method will returns the value difference fields
+        """
+        keys = []
+        if self.requested_data is not None:
+            data = self.requested_data
+            if isinstance(data, str):
+                data = json.loads(data)
+            diffs = get_diff_dict(self.serialize(), data)
+            keys = diffs.keys()
+        return keys
+
+    def get_last_clock_out(self, null_activity=False):
+        """
+        This method is used to get the last attendance activity if exists
+        """
+        activities = AttendanceActivity.objects.filter(
+            employee_id=self.employee_id,
+            attendance_date=self.attendance_date,
+            clock_out__isnull=null_activity,
+        ).order_by("id")
+        return activities.last()
+
+    def get_at_work_from_activities(self):
+        """
+        This method is used to retun the at work calculated from the activities
+        """
+        activities = AttendanceActivity.objects.filter(
+            attendance_date=self.attendance_date, employee_id=self.employee_id
+        ).order_by("clock_in")
+        at_work_seconds = 0
+        now = datetime.now()
+        for activity in activities:
+            out_time = activity.clock_out
+            if out_time is None:
+                combined_out = datetime.combine(
+                    now, dt.time(hour=now.hour, minute=now.minute, second=now.second)
+                )
+            else:
+                combined_out = datetime.combine(activity.clock_out_date, out_time)
+            in_time = activity.clock_in
+            combined_in = datetime.combine(activity.clock_in_date, in_time)
+            diffs = combined_out - combined_in
+            at_work_seconds = at_work_seconds + diffs.total_seconds()
+        return at_work_seconds
+
+    def hours_pending(self):
+        """
+        This method will returns difference between minimum_hour and attendance_worked_hour
+        """
+        minimum_hours = strtime_seconds(self.minimum_hour)
+        worked_hour = strtime_seconds(self.attendance_worked_hour)
+        pending_seconds = minimum_hours - worked_hour
+        if pending_seconds < 0:
+            return "00:00"
+        pending_hours = format_time(pending_seconds)
+        return pending_hours
+
+    def adjust_minimum_hour(self):
+        """
+        Set minimum_hour to 00:00 if the attendance date falls on a holiday or company leave.
+        """
+        if is_holiday(self.attendance_date) or is_company_leave(self.attendance_date):
+            self.minimum_hour = "00:00"
+            self.is_holiday = True
+
+    def update_attendance_overtime(self):
+        """
+        Calculate and update attendance overtime and worked seconds.
+        """
+        self.attendance_overtime = format_time(
+            max(
+                0,
+                (
+                    strtime_seconds(self.attendance_worked_hour)
+                    - strtime_seconds(self.minimum_hour)
+                ),
+            )
+        )
+        self.at_work_second = strtime_seconds(self.attendance_worked_hour)
+        self.overtime_second = strtime_seconds(self.attendance_overtime)
+
+    def handle_overtime_conditions(self):
+        condition = AttendanceValidationCondition.objects.first()
+        if self.is_validate_request:
+            self.is_validate_request_approved = self.attendance_validated = False
+
+        if condition:
+            # Handle overtime cutoff
+            if condition.overtime_cutoff:
+                cutoff_seconds = strtime_seconds(condition.overtime_cutoff)
+                if self.overtime_second > cutoff_seconds:
+                    self.overtime_second = cutoff_seconds
+                    self.attendance_overtime = format_time(cutoff_seconds)
+
+            # Auto-approve overtime if conditions are met
+            if condition.auto_approve_ot and self.overtime_second >= strtime_seconds(
+                condition.minimum_overtime_to_approve
+            ):
+                self.attendance_overtime_approve = True
+
+    def save(self, *args, **kwargs):
+        if self.is_presensi_only:
+            # Presence-only attendances (e.g., On Duty) must not affect hour calculations.
+            self.attendance_worked_hour = "00:00"
+            self.minimum_hour = "00:00"
+
+        self.update_attendance_overtime()
+        self.attendance_day = EmployeeShiftDay.objects.get(
+            day=self.attendance_date.strftime("%A").lower()
+        )
+        prev_attendance_approved = False
+        self.adjust_minimum_hour()
+
+        # Handle overtime cutoff and auto-approval
+        self.handle_overtime_conditions()
+
+        if self.pk is not None:
+            # Get the previous values of the boolean field
+            prev_state = Attendance.objects.get(pk=self.pk)
+            prev_attendance_approved = prev_state.attendance_overtime_approve
+
+        # super().save(*args, **kwargs)  #commend this line, it take too much time to complete
+        employee_ot = self.employee_id.employee_overtime.filter(
+            month=self.attendance_date.strftime("%B").lower(),
+            year=self.attendance_date.year,
+        ).first()
+        if employee_ot:
+            # Update if exists
+            self.update_ot(employee_ot)
+        else:
+            # Create and update in one call
+            employee_ot = self.create_ot()
+            self.update_ot(employee_ot)
+        approved = self.attendance_overtime_approve
+        attendance_account = self.employee_id.employee_overtime.filter(
+            month=self.attendance_date.strftime("%B").lower(),
+            year=self.attendance_date.year,
+        ).first()
+        total_ot_seconds = attendance_account.overtime_second
+        if approved and prev_attendance_approved is False:
+            self.approved_overtime_second = self.overtime_second
+            total_ot_seconds = total_ot_seconds + self.approved_overtime_second
+        elif not approved:
+            total_ot_seconds = total_ot_seconds - self.approved_overtime_second
+            self.approved_overtime_second = 0
+        attendance_account.overtime = format_time(total_ot_seconds)
+        attendance_account.save()
+        super().save(*args, **kwargs)
+
+    def serialize(self):
+        """
+        Used to serialize attendance instance
+        """
+        # Return a dictionary containing the data you want to store
+        # strftime("%d %b %Y") date
+        # strftime("%I:%M %p") time
+        serialized_data = {
+            "employee_id": self.employee_id.id,
+            "attendance_date": str(self.attendance_date),
+            "attendance_clock_in_date": str(self.attendance_clock_in_date),
+            "attendance_clock_in": str(self.attendance_clock_in),
+            "attendance_clock_out": str(self.attendance_clock_out),
+            "attendance_clock_out_date": str(self.attendance_clock_out_date),
+            "attendance_clock_in_mode": self.attendance_clock_in_mode,
+            "attendance_clock_out_mode": self.attendance_clock_out_mode,
+            "attendance_clock_in_location": self.attendance_clock_in_location,
+            "attendance_clock_out_location": self.attendance_clock_out_location,
+            "is_presensi_only": self.is_presensi_only,
+            "work_mode_request_id": self.work_mode_request_id.id if self.work_mode_request_id else "",
+            "shift_id": self.shift_id.id if self.shift_id else "",
+            "work_type_id": self.work_type_id.id if self.work_type_id else "",
+            "attendance_worked_hour": self.attendance_worked_hour,
+            "minimum_hour": self.minimum_hour,
+            "batch_attendance_id": (
+                self.batch_attendance_id.id if self.batch_attendance_id else ""
+            ),
+            # Add other fields you want to store
+        }
+        return serialized_data
+
+    def delete(self, *args, **kwargs):
+        # Custom delete logic
+        # Perform additional operations before deleting the object
+        with contextlib.suppress(Exception):
+            AttendanceActivity.objects.filter(
+                attendance_date=self.attendance_date, employee_id=self.employee_id
+            ).delete()
+            employee_ot = self.employee_id.employee_overtime.filter(
+                month=self.attendance_date.strftime("%B").lower(),
+                year=self.attendance_date.strftime("%Y"),
+            )
+        if employee_ot.exists():
+            self.update_ot(employee_ot.first())
+        # Call the superclass delete() method to delete the object
+        super().delete(*args, **kwargs)
+
+        # Perform additional operations after deleting the object
+
+    def create_ot(self):
+        """
+        Create a new Hour Account instance if it doesn't exist for a specific month and year.
+        Returns:
+            AttendanceOverTime: The created or fetched AttendanceOverTime instance.
+        """
+        # Create or fetch the AttendanceOverTime instance
+        employee_ot, created = AttendanceOverTime.objects.get_or_create(
+            employee_id=self.employee_id,
+            month=self.attendance_date.strftime("%B").lower(),
+            year=self.attendance_date.year,
+        )
+
+        # Update only if the fields are available
+        if self.attendance_overtime_approve:
+            employee_ot.overtime = self.attendance_overtime
+
+        if self.attendance_validated:
+            employee_ot.hour_account = self.attendance_worked_hour
+
+        employee_ot.save()
+        return employee_ot
+
+    def update_ot(self, employee_ot):
+        """
+        Update the hour account for the given employee.
+
+        Args:
+            employee_ot (obj): AttendanceOverTime instance
+        """
+        if apps.is_installed("leave"):
+            approved_leave_requests = self.employee_id.leaverequest_set.filter(
+                start_date__lte=self.attendance_date,
+                end_date__gte=self.attendance_date,
+                status="approved",
+            )
+        else:
+            approved_leave_requests = []
+
+        # Create exclude condition using Q objects
+        exclude_condition = Q()
+        if approved_leave_requests:
+            # Combine multiple conditions for the exclude clause
+            for leave in approved_leave_requests:
+                exclude_condition |= Q(
+                    attendance_date__range=(leave.start_date, leave.end_date)
+                )
+
+        # Filter month attendances in a single query
+        month_attendances = (
+            Attendance.objects.filter(
+                employee_id=self.employee_id,
+                attendance_date__month=self.attendance_date.month,
+                attendance_date__year=self.attendance_date.year,
+                attendance_validated=True,
+            )
+            .exclude(exclude_condition)
+            .values("minimum_hour", "at_work_second")
+        )
+
+        # Calculate hour balance and hours pending in a single loop
+        hour_balance = 0
+        minimum_hour_second = 0
+        for attendance in month_attendances:
+            required_work_second = strtime_seconds(attendance["minimum_hour"])
+            at_work_second = min(required_work_second, attendance["at_work_second"])
+            hour_balance += at_work_second
+            minimum_hour_second += required_work_second
+
+        hours_pending = minimum_hour_second - hour_balance
+        employee_ot.worked_hours = format_time(hour_balance)
+        employee_ot.pending_hours = format_time(hours_pending)
+        employee_ot.save()
+
+        return employee_ot
+
+    def clean(self, *args, **kwargs):
+        super().clean(*args, **kwargs)
+        now = datetime.now().time()
+        today = datetime.today().date()
+
+        # Convert to time if it's a string
+        if isinstance(self.attendance_clock_out, str):
+            out_time = datetime.strptime(self.attendance_clock_out, "%H:%M:%S").time()
+        else:
+            out_time = self.attendance_clock_out
+
+        if self.attendance_clock_in_date and self.attendance_clock_in_date < self.attendance_date:
+            raise ValidationError(
+                {
+                    "attendance_clock_in_date": "Attendance check-in date cannot be earlier than attendance date"
+                }
+            )
+
+        if (
+            self.attendance_clock_out_date
+            and self.attendance_clock_in_date
+            and self.attendance_clock_out_date < self.attendance_clock_in_date
+        ):
+            raise ValidationError(
+                {
+                    "attendance_clock_out_date": "Attendance check-out date cannot be earlier than check-in date"
+                }
+            )
+
+        if self.attendance_clock_out_date and self.attendance_clock_out_date >= today and out_time is not None:
+            if out_time > now:
+                raise ValidationError(
+                    {"attendance_clock_out": "Check-out time cannot be in the future"}
+                )
 
 
-class UserAttendanceDetailedSerializer(serializers.ModelSerializer):
+class AttendanceRequestFile(HorillaModel):
+    file = models.FileField(upload_to=upload_path)
+
+
+class AttendanceRequestComment(HorillaModel):
+    """
+    AttendanceRequestComment Model
+    """
+
+    request_id = models.ForeignKey(Attendance, on_delete=models.CASCADE)
+    employee_id = models.ForeignKey(Employee, on_delete=models.CASCADE)
+    files = models.ManyToManyField(AttendanceRequestFile, blank=True)
+    comment = models.TextField(null=True, verbose_name=_("Comment"), max_length=255)
+
+    def __str__(self) -> str:
+        return f"{self.comment}"
+
+
+class AttendanceOverTime(HorillaModel):
+    """
+    AttendanceOverTime model
+    """
+
+    employee_id = models.ForeignKey(
+        Employee,
+        on_delete=models.PROTECT,
+        related_name="employee_overtime",
+        verbose_name=_("Employee"),
+    )
+    month = models.CharField(
+        max_length=10,
+        verbose_name=_("Month"),
+    )
+    month_sequence = models.PositiveSmallIntegerField(default=0)
+    year = models.CharField(
+        default=datetime.now().strftime("%Y"),
+        null=True,
+        max_length=10,
+        verbose_name=_("Year"),
+    )
+    worked_hours = models.CharField(
+        max_length=10,
+        default="00:00",
+        null=True,
+        validators=[validate_time_format],
+        verbose_name=_("Worked Hours"),
+    )
+    pending_hours = models.CharField(
+        max_length=10,
+        default="00:00",
+        null=True,
+        validators=[validate_time_format],
+        verbose_name=_("Pending Hours"),
+    )
+    overtime = models.CharField(
+        max_length=20,
+        default="00:00",
+        validators=[validate_time_format],
+        verbose_name=_("Overtime Hours"),
+    )
+    hour_account_second = models.IntegerField(
+        default=0,
+        null=True,
+        verbose_name=_("Worked Seconds"),
+    )
+    hour_pending_second = models.IntegerField(
+        default=0,
+        null=True,
+        verbose_name=_("Pending Seconds"),
+    )
+    overtime_second = models.IntegerField(
+        default=0,
+        null=True,
+        verbose_name=_("Overtime Seconds"),
+    )
+    objects = HorillaCompanyManager(
+        related_company_field="employee_id__employee_work_info__company_id"
+    )
+
     class Meta:
-        model = Attendance
-        fields = "__all__"
+        """
+        Meta class to add some additional options
+        """
+
+        unique_together = [("employee_id"), ("month"), ("year")]
+        ordering = ["-year", "-month_sequence"]
+        verbose_name = _("Hour Account")
+        verbose_name_plural = _("Hour Accounts")
+
+    def clean(self):
+        try:
+            year = int(self.year)
+            if not (1900 <= year <= 2100):
+                raise ValidationError(
+                    {"year": _("Year must be an integer value between 1900 and 2100")}
+                )
+        except (ValueError, TypeError):
+            raise ValidationError(
+                {"year": _("Year must be an integer value between 1900 and 2100")}
+            )
+
+    def month_days(self):
+        """
+        this method is used to create new AttendanceOvertime's instance if there
+        is no existing for a specific month and year
+        """
+        month = self.month_sequence + 1
+        year = int(self.year)
+        start_date = date(year, month, 1)
+        if month == 12:
+            end_date = date(year + 1, 1, 1) - timedelta(days=1)
+        else:
+            end_date = date(year, month + 1, 1) - timedelta(days=1)
+        return start_date, end_date
+
+    def not_validated_hrs(self):
+        """
+        This method will return not validated hours in a month
+        """
+        hrs_to_vlaidate = sum(
+            list(
+                Attendance.objects.filter(
+                    attendance_date__month=MONTH_MAPPING[self.month],
+                    attendance_date__year=self.year,
+                    employee_id=self.employee_id,
+                    attendance_validated=False,
+                ).values_list("at_work_second", flat=True)
+            )
+        )
+        return format_time(hrs_to_vlaidate)
+
+    def not_approved_ot_hrs(self):
+        """
+        This method will return the overtime hours to be approved
+        """
+        hrs_to_approve = sum(
+            list(
+                Attendance.objects.filter(
+                    attendance_date__month=MONTH_MAPPING[self.month],
+                    attendance_date__year=self.year,
+                    employee_id=self.employee_id,
+                    attendance_validated=True,
+                    attendance_overtime_approve=False,
+                ).values_list("overtime_second", flat=True)
+            )
+        )
+        return format_time(hrs_to_approve)
+
+    def get_month_index(self):
+        """
+        This method will return the index of the month
+        """
+        return MONTH_MAPPING[self.month]
+
+    def save(self, *args, **kwargs):
+        self.hour_account_second = strtime_seconds(self.worked_hours)
+        self.hour_pending_second = strtime_seconds(self.pending_hours)
+        self.overtime_second = strtime_seconds(self.overtime)
+        month_name = self.month.split("-")[0]
+        months = [
+            "january",
+            "february",
+            "march",
+            "april",
+            "may",
+            "june",
+            "july",
+            "august",
+            "september",
+            "october",
+            "november",
+            "december",
+        ]
+        self.month_sequence = months.index(month_name)
+        super().save(*args, **kwargs)
+
+
+class AttendanceLateComeEarlyOut(HorillaModel):
+    """
+    AttendanceLateComeEarlyOut model
+    """
+
+    choices = [
+        ("late_come", _("Late Come")),
+        ("early_out", _("Early Out")),
+    ]
+
+    attendance_id = models.ForeignKey(
+        Attendance,
+        on_delete=models.PROTECT,
+        related_name="late_come_early_out",
+        verbose_name=_("Attendance"),
+    )
+    employee_id = models.ForeignKey(
+        Employee,
+        on_delete=models.DO_NOTHING,
+        null=True,
+        related_name="late_come_early_out",
+        verbose_name=_("Employee"),
+        editable=False,
+    )
+    type = models.CharField(max_length=20, choices=choices, verbose_name=_("Type"))
+    objects = HorillaCompanyManager(
+        related_company_field="employee_id__employee_work_info__company_id"
+    )
+    created_at = models.DateTimeField(auto_now_add=True, null=True)
+
+    def get_penalties_count(self):
+        """
+        This method is used to return the total penalties in the late early instance
+        """
+        return self.penaltyaccounts_set.count()
+
+    def save(self, *args, **kwargs) -> None:
+        super().save(*args, **kwargs)
+        self.employee_id = self.attendance_id.employee_id
+        super().save(*args, **kwargs)
+
+    class Meta:
+        """
+        Meta class to add some additional options
+        """
+
+        unique_together = [("attendance_id"), ("type")]
+        ordering = ["-attendance_id__attendance_date"]
+
+    def __str__(self) -> str:
+        return f"{self.attendance_id.employee_id.employee_first_name} \
+            {self.attendance_id.employee_id.employee_last_name} - {self.type}"
+
+
+class AttendanceValidationCondition(HorillaModel):
+    """
+    AttendanceValidationCondition model
+    """
+
+    validation_at_work = models.CharField(
+        max_length=10,
+        validators=[validate_time_format],
+        verbose_name=_("Worked Hours Auto Approve Till"),
+    )
+    minimum_overtime_to_approve = models.CharField(
+        blank=True, null=True, max_length=10, validators=[validate_time_format]
+    )
+    overtime_cutoff = models.CharField(
+        blank=True, null=True, max_length=10, validators=[validate_time_format]
+    )
+    auto_approve_ot = models.BooleanField(
+        default=False, verbose_name=_("Auto Approve OT")
+    )
+    company_id = models.ManyToManyField(Company, blank=True, verbose_name=_("Company"))
+    objects = HorillaCompanyManager()
+
+    def clean(self):
+        """
+        This method is used to perform some custom validations
+        """
+        super().clean()
+        if not self.id and AttendanceValidationCondition.objects.exists():
+            raise ValidationError(_("You cannot add more conditions."))
+
+
+class GraceTime(HorillaModel):
+    """
+    Model for saving Grace time
+    """
+
+    allowed_time = models.CharField(
+        default="00:00:00",
+        validators=[validate_hh_mm_ss_format],
+        max_length=10,
+        verbose_name=_("Allowed Time"),
+    )
+    allowed_time_in_secs = models.IntegerField()
+    allowed_clock_in = models.BooleanField(
+        default=True,
+        help_text=_("Allcocate this grace time for Check-In Attendance"),
+        verbose_name=_("Allowed Clock-In"),
+    )
+    allowed_clock_out = models.BooleanField(
+        default=False,
+        help_text=_("Allcocate this grace time for Check-Out Attendance"),
+        verbose_name=_("Allowed Clock-Out"),
+    )
+    is_default = models.BooleanField(default=False)
+
+    company_id = models.ManyToManyField(Company, blank=True, verbose_name=_("Company"))
+    objects = HorillaCompanyManager()
+
+    def __str__(self) -> str:
+        return str(f"{self.allowed_time} - Hours")
+
+    def clean(self):
+        """
+        This method is used to perform some custom validations
+        """
+        super().clean()
+        if self.is_default:
+            if GraceTime.objects.filter(is_default=True).exclude(id=self.id).exists():
+                raise ValidationError(
+                    _("There is already a default grace time that exists.")
+                )
+
+        allowed_time = self.allowed_time
+        is_default = self.is_default
+        exclude_default = not is_default
+
+        if (
+            GraceTime.objects.filter(allowed_time=allowed_time)
+            .exclude(is_default=exclude_default)
+            .exclude(id=self.id)
+            .exists()
+        ):
+            raise ValidationError(
+                {
+                    "allowed_time": _(
+                        "There is already an existing grace time with this allowed time."
+                    )
+                }
+            )
+
+    def save(self, *args, **kwargs):
+        allowed_time = self.allowed_time
+        hours, minutes, secs = allowed_time.split(":")
+
+        hours_int = int(hours)
+        minutes_int = int(minutes)
+        secs_int = int(secs)
+
+        hours_str = f"{hours_int:02d}"
+        minutes_str = f"{minutes_int:02d}"
+        secs_str = f"{secs_int:02d}"
+
+        self.allowed_time = f"{hours_str}:{minutes_str}:{secs_str}"
+        self.allowed_time_in_secs = hours_int * 3600 + minutes_int * 60 + secs_int
+        super().save(*args, **kwargs)
+
+
+class AttendanceGeneralSetting(HorillaModel):
+    """
+    AttendanceGeneralSettings
+    """
+
+    time_runner = models.BooleanField(default=True)
+    enable_check_in = models.BooleanField(
+        default=True,
+        verbose_name=_("Enable Check in/Check out"),
+        help_text=_(
+            "Enabling this feature allows employees to record their attendance using the Check-In/Check-Out button."
+        ),
+    )
+    company_id = models.ForeignKey(Company, on_delete=models.CASCADE, null=True)
+    objects = HorillaCompanyManager()
+
+
+class WorkRecords(models.Model):
+    """
+    WorkRecord Model
+    """
+
+    choices = [
+        ("FDP", _("Present")),
+        ("HDP", _("Half Day Present")),
+        ("ABS", _("Absent")),
+        ("HD", _("Holiday/Company Leave")),
+        ("CONF", _("Conflict")),
+        ("DFT", _("Draft")),
+    ]
+
+    record_name = models.CharField(max_length=250, null=True, blank=True)
+    work_record_type = models.CharField(max_length=10, null=True, choices=choices)
+    employee_id = models.ForeignKey(
+        Employee, on_delete=models.CASCADE, verbose_name=_("Employee")
+    )
+    date = models.DateField(null=True, blank=True)
+    at_work = models.CharField(
+        null=True,
+        blank=True,
+        validators=[
+            validate_time_format,
+        ],
+        default="00:00",
+        max_length=10,
+    )  # 841
+    min_hour = models.CharField(
+        null=True,
+        blank=True,
+        validators=[
+            validate_time_format,
+        ],
+        default="00:00",
+        max_length=10,
+    )
+    at_work_second = models.IntegerField(null=True, blank=True, default=0)
+    min_hour_second = models.IntegerField(null=True, blank=True, default=0)
+    note = models.TextField(max_length=255)
+    message = models.CharField(max_length=30, null=True, blank=True)
+    is_attendance_record = models.BooleanField(default=False)
+    attendance_id = models.ForeignKey(
+        Attendance, on_delete=models.SET_NULL, blank=True, null=True
+    )
+    is_leave_record = models.BooleanField(default=False)
+    if apps.is_installed("leave"):
+        leave_request_id = models.ForeignKey(
+            "leave.LeaveRequest",
+            on_delete=models.SET_NULL,
+            blank=True,
+            null=True,
+        )
+    shift_id = models.ForeignKey(
+        EmployeeShift, on_delete=models.SET_NULL, blank=True, null=True
+    )
+    day_percentage = models.FloatField(default=0)
+    last_update = models.DateTimeField(null=True, blank=True)
+    objects = HorillaCompanyManager("employee_id__employee_work_info__company_id")
+
+    def title_message(self):
+        title_message = self.message
+        if title_message == "Leave":
+            if apps.is_installed("leave"):
+                title_message += f" | {self.leave_request_id.leave_type_id}"
+        return title_message
+
+    def save(self, *args, **kwargs):
+        self.last_update = timezone.now()
+
+        super().save(*args, **kwargs)
+
+    def clean(self):
+        super().clean()
+        if not 0.0 <= self.day_percentage <= 1.0:
+            raise ValidationError(_("Day percentage must be between 0.0 and 1.0"))
+
+    def __str__(self):
+        return (
+            self.record_name
+            if self.record_name is not None
+            else f"{self.work_record_type}-{self.date}-{self.employee_id}"
+        )
+
+    class Meta:
+        verbose_name = _("Work Record")
+        verbose_name_plural = _("Work Records")
+        # unique_together = ['date', 'employee_id']
