@@ -266,9 +266,10 @@ def work_type_request_view(request):
             field="employee_id",
         )
 
-    # always exclude own requests from approvals list 
+    # Exclude own requests from Approvals tab (admin can still view them in My Requests).
+    # Self-approve is also blocked in the action endpoints for safety.
     if employee is not None:
-      approvals_qs = approvals_qs.exclude(employee_id=employee)
+        approvals_qs = approvals_qs.exclude(employee_id=employee)
 
     # Apply shared quick filters
     if mode_value:
