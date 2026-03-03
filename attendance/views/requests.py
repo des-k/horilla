@@ -10,6 +10,7 @@ from datetime import date, datetime, time
 from urllib.parse import parse_qs
 
 from django.contrib import messages
+from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.db.models import ProtectedError, Q
 from django.http import HttpResponse, HttpResponseRedirect, JsonResponse
@@ -71,13 +72,15 @@ def _normalize_none(value):
 
 
 def _normalize_requested_data(requested_data: dict) -> dict:
-    """Ensure requested_data from JSON can be safely used in queryset.update()."""
+    """Ensure requested_data from JSON can be safely used in queryset.update().
+
+    Note: requested_data may contain non-model keys (e.g., "__meta").
+    We *must* filter to model fields only before using queryset.update().
+    """
     if not requested_data:
         return requested_data
 
-    # AttendanceRequestForm.serialize() returns strings for time/date fields.
-    # Some values may be the literal string "None".
-    for key in (
+    allowed = (
         "attendance_date",
         "attendance_clock_in_date",
         "attendance_clock_out_date",
@@ -88,11 +91,14 @@ def _normalize_requested_data(requested_data: dict) -> dict:
         "batch_attendance_id",
         "shift_id",
         "work_type_id",
-    ):
-        if key in requested_data:
-            requested_data[key] = _normalize_none(requested_data[key])
+    )
+    cleaned = {k: requested_data.get(k) for k in allowed if k in requested_data}
 
-    return requested_data
+    for key in allowed:
+        if key in cleaned:
+            cleaned[key] = _normalize_none(cleaned[key])
+
+    return cleaned
 
 
 def _get_shift_schedule(shift, day):
@@ -491,7 +497,48 @@ def attendance_request_changes(request, attendance_id):
             instance.employee_id = attendance.employee_id
             instance.id = attendance.id
             if attendance.request_type != "create_request":
-                attendance.requested_data = json.dumps(instance.serialize())
+                # Preserve approved-scope meta and validate against already-approved scopes.
+                try:
+                    from attendance.services.attendance_correction_scope_rules import (
+                        infer_scope_from_values,
+                        get_approved_scopes,
+                        build_requested_data_for_save,
+                        validate_new_request_scope,
+                    )
+                    serialized = instance.serialize()
+                    incoming_scope = infer_scope_from_values(
+                        serialized.get("attendance_clock_in"),
+                        serialized.get("attendance_clock_out"),
+                    )
+                    approved_scopes = get_approved_scopes(getattr(attendance, "requested_data", None))
+                    # Editing existing request is allowed; only block overlaps with approved scopes.
+                    validate_new_request_scope(
+                        existing_waiting_scope="",
+                        approved_scopes=approved_scopes,
+                        incoming_scope=incoming_scope,
+                    )
+
+                    wrapped = build_requested_data_for_save(
+                        new_payload=serialized,
+                        existing_requested_data=getattr(attendance, "requested_data", None),
+                        incoming_scope=incoming_scope,
+                        keep_existing_fields=True,
+                    )
+                    attendance.requested_data = json.dumps(wrapped)
+                except ValidationError as ve:
+                    # Attach error and re-render form.
+                    for k, v in ve.message_dict.items():
+                        try:
+                            form.add_error(k if k in form.fields else None, v)
+                        except Exception:
+                            form.add_error(None, v)
+                    return render(
+                        request,
+                        "requests/attendance/form.html",
+                        {"form": form, "attendance_id": attendance_id},
+                    )
+                except Exception:
+                    attendance.requested_data = json.dumps(instance.serialize())
                 attendance.request_description = instance.request_description
                 # set the user level validation here
                 attendance.is_validate_request = True
@@ -604,6 +651,19 @@ def approve_validate_attendance_request(request, attendance_id):
 
     # Apply requested field changes (if any)
     if attendance.requested_data:
+        # Record approved scope in requested_data.__meta so future requests can enforce
+        # one-approval-per-scope per day.
+        try:
+            from attendance.services.attendance_correction_scope_rules import (
+                record_approved_scope_on_requested_data,
+            )
+            new_req_data = record_approved_scope_on_requested_data(attendance.requested_data)
+            if new_req_data and new_req_data != attendance.requested_data:
+                attendance.requested_data = new_req_data
+                attendance.save(update_fields=["requested_data"])
+        except Exception:
+            pass
+
         requested_data = _normalize_requested_data(json.loads(attendance.requested_data))
         Attendance.objects.filter(id=attendance_id).update(**requested_data)
 
@@ -831,6 +891,18 @@ def bulk_approve_attendance_request(request):
 
         # Apply requested changes
         if attendance.requested_data is not None:
+            # Record approved scope in requested_data.__meta for future scope enforcement.
+            try:
+                from attendance.services.attendance_correction_scope_rules import (
+                    record_approved_scope_on_requested_data,
+                )
+                new_req_data = record_approved_scope_on_requested_data(attendance.requested_data)
+                if new_req_data and new_req_data != attendance.requested_data:
+                    attendance.requested_data = new_req_data
+                    attendance.save(update_fields=["requested_data"])
+            except Exception:
+                pass
+
             requested_data = _normalize_requested_data(json.loads(attendance.requested_data))
             Attendance.objects.filter(id=attendance_id).update(**requested_data)
             attendance.refresh_from_db()
