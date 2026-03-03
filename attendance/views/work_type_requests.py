@@ -266,11 +266,9 @@ def work_type_request_view(request):
             field="employee_id",
         )
 
-    # Exclude own requests for non-global approvers (to avoid self-approval UX).
-    # Global approvers/superusers can still *see* their own requests for visibility,
-    # but approve/reject is still blocked in the action endpoints.
-    if employee is not None and not (is_super or has_global_perm):
-        approvals_qs = approvals_qs.exclude(employee_id=employee)
+    # always exclude own requests from approvals list 
+    if employee is not None:
+      approvals_qs = approvals_qs.exclude(employee_id=employee)
 
     # Apply shared quick filters
     if mode_value:
