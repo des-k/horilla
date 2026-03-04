@@ -116,15 +116,59 @@ def _build_shift_info_map(attendances):
     info = {}
     for att in attendances or []:
         try:
+            att_id = getattr(att, "id", None)
+
+            # Shift may be missing on older create_request rows (kept only in requested_data).
             shift = getattr(att, "shift_id", None)
             if not shift:
-                info[getattr(att, "id", None)] = None
+                try:
+                    req_raw = getattr(att, "requested_data", None)
+                    req_json = json.loads(req_raw) if isinstance(req_raw, str) and req_raw else (req_raw or {})
+                    shift_id_val = req_json.get("shift_id")
+                    if isinstance(shift_id_val, dict):
+                        shift_id_val = shift_id_val.get("id") or shift_id_val.get("pk")
+                    if shift_id_val:
+                        shift = EmployeeShift.objects.filter(id=int(shift_id_val)).first()
+                except Exception:
+                    shift = None
+
+            # Fallback: employee default shift
+            if not shift:
+                try:
+                    emp = getattr(att, "employee_id", None)
+                    if emp and hasattr(emp, "employee_work_info"):
+                        shift = getattr(emp.employee_work_info, "shift_id", None)
+                except Exception:
+                    shift = None
+
+            if not shift:
+                info[att_id] = None
                 continue
+
+            # Attendance date may also be missing on some rows; recover from requested_data if needed.
+            att_date = getattr(att, "attendance_date", None)
+            if not att_date:
+                try:
+                    req_raw = getattr(att, "requested_data", None)
+                    req_json = json.loads(req_raw) if isinstance(req_raw, str) and req_raw else (req_raw or {})
+                    date_val = req_json.get("attendance_date")
+                    if date_val:
+                        att_date = date.fromisoformat(str(date_val))
+                except Exception:
+                    att_date = None
 
             day = getattr(att, "attendance_day", None)
             schedule = None
             try:
-                schedule = _get_shift_schedule(shift, day) if day else None
+                if day is not None:
+                    schedule = _get_shift_schedule(shift, day)
+                else:
+                    # Fallback: resolve day from attendance_date for older rows / create_request rows
+                    if att_date:
+                        day_key = att_date.strftime("%A").lower()
+                        schedule = EmployeeShiftSchedule.objects.filter(
+                            shift_id=shift, day__day=day_key
+                        ).first()
             except Exception:
                 schedule = None
 
@@ -142,7 +186,7 @@ def _build_shift_info_map(attendances):
             start_s = start_time.strftime("%H:%M") if start_time else "-"
             end_s = end_time.strftime("%H:%M") if end_time else "-"
 
-            info[getattr(att, "id", None)] = {
+            info[att_id] = {
                 "name": str(shift),
                 "start": start_s,
                 "end": end_s,
