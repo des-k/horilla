@@ -912,6 +912,24 @@ def validate_attendance_request(request, attendance_id):
         attachment_count = 0
 
     diff_data = get_diff_dict(first_dict, other_dict, Attendance)
+    # Ensure Attendance Date always shows in detail (even if unchanged), for mobile parity.
+    try:
+        _date_key = Attendance._meta.get_field("attendance_date").verbose_name
+        _cur_date = first_dict.get("attendance_date")
+        _req_date2 = other_dict.get("attendance_date")
+
+        def _fmt_date(_d):
+            try:
+                if _d and _d != "None" and isinstance(_d, str):
+                    return datetime.strptime(_d, "%Y-%m-%d").strftime("%d %b %Y")
+            except Exception:
+                return _d
+            return _d
+
+        if _cur_date or _req_date2:
+            diff_data.setdefault(_date_key, (_fmt_date(_cur_date), _fmt_date(_req_date2)))
+    except Exception:
+        pass
 
     # Attendance Correction Request (mobile parity): do not show worked hours / batch
     for _k in ("Employee", "Employee ID", "Employee Id", "Employee Name", "Employee name", "Worked Hours", "Worked Hour", "Minimum hour", "Minimum Hour", "Batch Attendance", "Work Type", "Work type", "Work Mode", "Work mode"):
@@ -925,6 +943,15 @@ def validate_attendance_request(request, attendance_id):
         shift_info = _build_shift_info_map([attendance]).get(attendance.id)
     except Exception:
         shift_info = None
+
+    # Ensure Shift always shows in detail (even if unchanged), for mobile parity.
+    try:
+        _shift_key = Attendance._meta.get_field("shift_id").verbose_name
+        if shift_info and _shift_key not in diff_data:
+            diff_data[_shift_key] = (shift_info.name, shift_info.name)
+    except Exception:
+        pass
+
 
     return render(
         request,
