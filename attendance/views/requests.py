@@ -108,6 +108,51 @@ def _get_shift_schedule(shift, day):
     return EmployeeShiftSchedule.objects.filter(shift_id=shift, day=day).first()
 
 
+def _build_shift_info_map(attendances):
+    """Build shift display info for a list of Attendance objects.
+
+    Output: {attendance_id: {name, start, end, flexi_minutes}}
+    """
+    info = {}
+    for att in attendances or []:
+        try:
+            shift = getattr(att, "shift_id", None)
+            if not shift:
+                info[getattr(att, "id", None)] = None
+                continue
+
+            day = getattr(att, "attendance_day", None)
+            schedule = None
+            try:
+                schedule = _get_shift_schedule(shift, day) if day else None
+            except Exception:
+                schedule = None
+
+            # Flexi In (minutes) resolves like clock_in_out: schedule.grace_time_id > shift.grace_time_id > default
+            flexi_minutes = 0
+            try:
+                grace = cio._resolve_grace_time(schedule, shift)
+                secs = int(getattr(grace, "allowed_time_in_secs", 0) or 0) if grace else 0
+                flexi_minutes = int(secs // 60)
+            except Exception:
+                flexi_minutes = 0
+
+            start_time = getattr(schedule, "start_time", None) if schedule else None
+            end_time = getattr(schedule, "end_time", None) if schedule else None
+            start_s = start_time.strftime("%H:%M") if start_time else "-"
+            end_s = end_time.strftime("%H:%M") if end_time else "-"
+
+            info[getattr(att, "id", None)] = {
+                "name": str(shift),
+                "start": start_s,
+                "end": end_s,
+                "flexi_minutes": flexi_minutes,
+            }
+        except Exception:
+            # Be defensive: never break the page because of shift metadata.
+            info[getattr(att, "id", None)] = None
+    return info
+
 def _ensure_single_session_activity(attendance: Attendance, prev_attendance_date=None) -> AttendanceActivity:
     """Sync AttendanceActivity to match Attendance for single-session mode.
 
@@ -340,6 +385,14 @@ def request_attendance_view(request):
         my_attach_counts = {}
         app_attach_counts = {}
 
+    # Shift info for current page (name + start/end + flexi in)
+    try:
+        my_shift_info = _build_shift_info_map(list(getattr(my_requests, 'object_list', []) or []))
+        app_shift_info = _build_shift_info_map(list(getattr(approvals, 'object_list', []) or []))
+    except Exception:
+        my_shift_info = {}
+        app_shift_info = {}
+
     can_approve = bool(
         request.user.has_perm("attendance.change_attendance") or is_reportingmanager(request)
     )
@@ -378,6 +431,8 @@ def request_attendance_view(request):
             "status_my_options": status_my_options,
             "my_attach_counts": my_attach_counts,
             "app_attach_counts": app_attach_counts,
+            "my_shift_info": my_shift_info,
+            "app_shift_info": app_shift_info,
             "pd_my": pd_my,
             "pd_app": pd_app,
         },
@@ -723,6 +778,7 @@ def validate_attendance_request(request, attendance_id):
         first_dict = empty_data
     else:
         other_dict = json.loads(attendance.requested_data)
+
     requests_ids_json = request.GET.get("requests_ids")
     previous_instance_id = next_instance_id = attendance.pk
     if requests_ids_json:
@@ -741,16 +797,32 @@ def validate_attendance_request(request, attendance_id):
     except Exception:
         attachment_count = 0
 
+    diff_data = get_diff_dict(first_dict, other_dict, Attendance)
+
+    # Attendance Correction Request (mobile parity): do not show worked hours / batch
+    for _k in ("Worked Hours", "Worked Hour", "Minimum hour", "Minimum Hour", "Batch Attendance"):
+        try:
+            diff_data.pop(_k, None)
+        except Exception:
+            pass
+
+    # Shift info (display only)
+    try:
+        shift_info = _build_shift_info_map([attendance]).get(attendance.id)
+    except Exception:
+        shift_info = None
+
     return render(
         request,
         "requests/attendance/individual_view.html",
         {
-            "data": get_diff_dict(first_dict, other_dict, Attendance),
+            "data": diff_data,
             "attendance": attendance,
             "previous": previous_instance_id,
             "next": next_instance_id,
             "requests_ids": requests_ids_json,
             "attachment_count": attachment_count,
+            "shift_info": shift_info,
         },
     )
 
