@@ -329,6 +329,16 @@ urlpatterns = [
         name="cancel-validate-attendance-request",
     ),
     path(
+        "reject-validate-attendance-request/<int:attendance_id>/",
+        attendance.views.requests.reject_validate_attendance_request,
+        name="reject-validate-attendance-request",
+    ),
+    path(
+        "attendance-request-attachments/<int:attendance_id>/",
+        attendance.views.requests.attendance_request_attachments,
+        name="attendance-request-attachments",
+    ),
+    path(
         "select-all-filter-attendance-request",
         attendance.views.requests.select_all_filter_attendance_request,
         name="select-all-filter-attendance-request",
