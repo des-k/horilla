@@ -449,31 +449,8 @@ def request_new(request):
     """
 
     if request.GET.get("bulk") and eval_validate(request.GET.get("bulk")):
-        employee = request.user.employee_get
-        if request.GET.get("employee_id"):
-            form = BulkAttendanceRequestForm(initial=request.GET)
-        else:
-            form = BulkAttendanceRequestForm(initial={"employee_id": employee})
-        if request.method == "POST":
-            form = BulkAttendanceRequestForm(request.POST)
-            form.instance.attendance_clock_in_date = request.POST.get("from_date")
-            form.instance.attendance_date = request.POST.get("from_date")
-            if form.is_valid():
-                instance = form.save(commit=False)
-                messages.success(request, _("Attendance request created"))
-                return HttpResponse(
-                    render(
-                        request,
-                        "requests/attendance/request_new_form.html",
-                        {"form": form},
-                    ).content.decode("utf-8")
-                    + "<script>location.reload();</script>"
-                )
-        return render(
-            request,
-            "requests/attendance/request_new_form.html",
-            {"form": form, "bulk": True},
-        )
+        # Attendance Correction Request (mobile parity): no bulk/batch create flow in this UI.
+        return HttpResponseForbidden(_("Bulk attendance request is not available here."))
     if request.GET.get("employee_id"):
         form = NewRequestForm(initial=request.GET.dict())
     else:
@@ -491,25 +468,65 @@ def request_new(request):
         form.fields["employee_id"].queryset = Employee.objects.filter(id=emp_id)
         form.fields["employee_id"].initial = emp_id
     if request.method == "POST":
-        form = NewRequestForm(request.POST)
+        form = NewRequestForm(request.POST, files=getattr(request, 'FILES', None))
         employees_qs = Employee.objects.filter(
             Q(id__in=form.fields["employee_id"].queryset.values_list("id", flat=True))
             | Q(employee_user_id=request.user)
         )
         form.fields["employee_id"].queryset = employees_qs.distinct()
         if form.is_valid():
+            # Save (create_request) or update existing attendance (update_request)
+            attendance_obj = None
+            is_created = False
+
             if form.new_instance is not None:
                 form.new_instance.save()
+                attendance_obj = form.new_instance
+                is_created = True
+            else:
+                # update_request style: attendance is already saved in form.clean()
+                try:
+                    emp = form.cleaned_data.get("employee_id")
+                    att_date = form.cleaned_data.get("attendance_date")
+                    attendance_obj = Attendance.objects.filter(employee_id=emp, attendance_date=att_date).first()
+                except Exception:
+                    attendance_obj = None
+
+            # Attach optional proof files (same as mobile/API: field name "files")
+            try:
+                from attendance.models import AttendanceRequestFile, AttendanceRequestComment
+
+                uploaded = []
+                if hasattr(request, "FILES"):
+                    uploaded = request.FILES.getlist("files") or request.FILES.getlist("files[]") or []
+                    if not uploaded:
+                        f_single = request.FILES.get("file")
+                        if f_single:
+                            uploaded = [f_single]
+
+                if attendance_obj and uploaded:
+                    try:
+                        actor_emp = request.user.employee_get
+                    except Exception:
+                        actor_emp = getattr(attendance_obj, "employee_id", None)
+
+                    comment_text = (request.POST.get("request_description") or request.POST.get("reason") or "").strip()
+                    c = AttendanceRequestComment.objects.create(
+                        request_id=attendance_obj,
+                        employee_id=actor_emp,
+                        comment=(comment_text[:255] if comment_text else None),
+                    )
+                    for up in uploaded:
+                        arf = AttendanceRequestFile.objects.create(file=up)
+                        c.files.add(arf)
+            except Exception:
+                pass
+
+            if is_created:
                 messages.success(request, _("New attendance request created"))
-                return HttpResponse(
-                    render(
-                        request,
-                        "requests/attendance/request_new_form.html",
-                        {"form": form},
-                    ).content.decode("utf-8")
-                    + "<script>location.reload();</script>"
-                )
-            messages.success(request, _("Update request updated"))
+            else:
+                messages.success(request, _("Update request updated"))
+
             return HttpResponse(
                 render(
                     request,
@@ -519,11 +536,84 @@ def request_new(request):
                 + "<script>location.reload();</script>"
             )
     return render(
-        request,
-        "requests/attendance/request_new_form.html",
-        {"form": form, "bulk": False},
-    )
+            request,
+            "requests/attendance/request_new_form.html",
+            {"form": form, "bulk": False},
+        )
 
+
+
+
+@login_required
+def attendance_request_shift_info(request):
+    """
+    AJAX helper for Web create Attendance Correction Request.
+    Returns shift name, start-end time, and flexi-in minutes (grace time) similar to mobile.
+    """
+    emp_id = (request.GET.get("employee_id") or request.POST.get("employee_id") or "").strip()
+    date_str = (request.GET.get("attendance_date") or request.GET.get("date") or request.POST.get("attendance_date") or "").strip()
+
+    if not emp_id or not date_str:
+        return JsonResponse({"shift_name": "", "shift_start": "", "shift_end": "", "flexi_in_minutes": ""}, status=200)
+
+    try:
+        from datetime import datetime as _dt
+        att_date = _dt.strptime(date_str, "%Y-%m-%d").date()
+    except Exception:
+        return JsonResponse({"shift_name": "", "shift_start": "", "shift_end": "", "flexi_in_minutes": ""}, status=200)
+
+    # Validate employee is selectable by current user (same as request_new)
+    try:
+        from attendance.forms import NewRequestForm
+        form = NewRequestForm()
+        form = choosesubordinates(request, form, "attendance.change_attendance")
+        employees_qs = Employee.objects.filter(
+            Q(id__in=form.fields["employee_id"].queryset.values_list("id", flat=True))
+            | Q(employee_user_id=request.user)
+        ).distinct()
+        if not employees_qs.filter(id=emp_id).exists():
+            return JsonResponse({"error": "Forbidden"}, status=403)
+        employee = employees_qs.filter(id=emp_id).first()
+    except Exception:
+        return JsonResponse({"error": "Forbidden"}, status=403)
+
+    shift_name = ""
+    shift_start = ""
+    shift_end = ""
+    flexi_min = ""
+
+    try:
+        shift = getattr(getattr(employee, "employee_work_info", None), "shift_id", None)
+        if shift:
+            shift_name = str(getattr(shift, "employee_shift", "")) or str(shift)
+
+            # Schedule start/end per day
+            from base.models import EmployeeShiftSchedule
+            day = att_date.strftime("%A").lower()
+            sched = EmployeeShiftSchedule.objects.filter(shift_id=shift, day__day=day).first()
+            if sched:
+                if getattr(sched, "start_time", None):
+                    shift_start = sched.start_time.strftime("%H:%M")
+                if getattr(sched, "end_time", None):
+                    shift_end = sched.end_time.strftime("%H:%M")
+
+            # Flexi-in minutes from grace time (clock-in)
+            grace = getattr(shift, "grace_time_id", None)
+            if grace and getattr(grace, "allowed_clock_in", False):
+                secs = int(getattr(grace, "allowed_time_in_secs", 0) or 0)
+                flexi_min = str(secs // 60)
+    except Exception:
+        pass
+
+    return JsonResponse(
+        {
+            "shift_name": shift_name,
+            "shift_start": shift_start,
+            "shift_end": shift_end,
+            "flexi_in_minutes": flexi_min,
+        },
+        status=200,
+    )
 
 @login_required
 def create_batch_attendance(request):
