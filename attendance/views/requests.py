@@ -951,21 +951,21 @@ def validate_attendance_request(request, attendance_id):
             diff_data[_shift_key] = (shift_info.name, shift_info.name)
     except Exception:
         pass
-# Reorder diff_data: Attendance Date first, then Shift (mobile parity / user request)
-try:
-    from collections import OrderedDict
-    _ordered = OrderedDict()
-    _date_key2 = Attendance._meta.get_field("attendance_date").verbose_name
-    if _date_key2 in diff_data:
-        _ordered[_date_key2] = diff_data.pop(_date_key2)
-    _shift_key2 = Attendance._meta.get_field("shift_id").verbose_name
-    if _shift_key2 in diff_data:
-        _ordered[_shift_key2] = diff_data.pop(_shift_key2)
-    for _k, _v in diff_data.items():
-        _ordered[_k] = _v
-    diff_data = _ordered
-except Exception:
-    pass
+    # Reorder diff_data: Attendance Date first, then Shift (mobile parity / user request)
+    try:
+        from collections import OrderedDict
+        _ordered = OrderedDict()
+        _date_key2 = Attendance._meta.get_field("attendance_date").verbose_name
+        if _date_key2 in diff_data:
+            _ordered[_date_key2] = diff_data.pop(_date_key2)
+        _shift_key2 = Attendance._meta.get_field("shift_id").verbose_name
+        if _shift_key2 in diff_data:
+            _ordered[_shift_key2] = diff_data.pop(_shift_key2)
+        for _k, _v in diff_data.items():
+            _ordered[_k] = _v
+        diff_data = _ordered
+    except Exception:
+        pass
 
 
 
