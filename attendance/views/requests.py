@@ -116,59 +116,15 @@ def _build_shift_info_map(attendances):
     info = {}
     for att in attendances or []:
         try:
-            att_id = getattr(att, "id", None)
-
-            # Shift may be missing on older create_request rows (kept only in requested_data).
             shift = getattr(att, "shift_id", None)
             if not shift:
-                try:
-                    req_raw = getattr(att, "requested_data", None)
-                    req_json = json.loads(req_raw) if isinstance(req_raw, str) and req_raw else (req_raw or {})
-                    shift_id_val = req_json.get("shift_id")
-                    if isinstance(shift_id_val, dict):
-                        shift_id_val = shift_id_val.get("id") or shift_id_val.get("pk")
-                    if shift_id_val:
-                        shift = EmployeeShift.objects.filter(id=int(shift_id_val)).first()
-                except Exception:
-                    shift = None
-
-            # Fallback: employee default shift
-            if not shift:
-                try:
-                    emp = getattr(att, "employee_id", None)
-                    if emp and hasattr(emp, "employee_work_info"):
-                        shift = getattr(emp.employee_work_info, "shift_id", None)
-                except Exception:
-                    shift = None
-
-            if not shift:
-                info[att_id] = None
+                info[getattr(att, "id", None)] = None
                 continue
-
-            # Attendance date may also be missing on some rows; recover from requested_data if needed.
-            att_date = getattr(att, "attendance_date", None)
-            if not att_date:
-                try:
-                    req_raw = getattr(att, "requested_data", None)
-                    req_json = json.loads(req_raw) if isinstance(req_raw, str) and req_raw else (req_raw or {})
-                    date_val = req_json.get("attendance_date")
-                    if date_val:
-                        att_date = date.fromisoformat(str(date_val))
-                except Exception:
-                    att_date = None
 
             day = getattr(att, "attendance_day", None)
             schedule = None
             try:
-                if day is not None:
-                    schedule = _get_shift_schedule(shift, day)
-                else:
-                    # Fallback: resolve day from attendance_date for older rows / create_request rows
-                    if att_date:
-                        day_key = att_date.strftime("%A").lower()
-                        schedule = EmployeeShiftSchedule.objects.filter(
-                            shift_id=shift, day__day=day_key
-                        ).first()
+                schedule = _get_shift_schedule(shift, day) if day else None
             except Exception:
                 schedule = None
 
@@ -186,7 +142,7 @@ def _build_shift_info_map(attendances):
             start_s = start_time.strftime("%H:%M") if start_time else "-"
             end_s = end_time.strftime("%H:%M") if end_time else "-"
 
-            info[att_id] = {
+            info[getattr(att, "id", None)] = {
                 "name": str(shift),
                 "start": start_s,
                 "end": end_s,
@@ -909,7 +865,31 @@ def validate_attendance_request(request, attendance_id):
     }
     if attendance.request_type == "create_request":
         other_dict = first_dict
-        first_dict = empty_data
+        # For create_request there is no "previous" attendance record, but the request still has a date.
+        # Keep attendance_date in "Current Value" for UI parity with mobile (so it doesn't look empty).
+        first_dict = copy.deepcopy(empty_data)
+        _req_date = other_dict.get("attendance_date")
+        if not _req_date:
+            # Fallback to requested_data payload (older / web-created records may store date there)
+            try:
+                if isinstance(attendance.requested_data, dict):
+                    _req_date = (
+                        attendance.requested_data.get("attendance_date")
+                        or attendance.requested_data.get("date")
+                        or _req_date
+                    )
+            except Exception:
+                pass
+        if not _req_date:
+            try:
+                _req_date = (
+                    attendance.attendance_date.strftime("%Y-%m-%d")
+                    if attendance.attendance_date
+                    else None
+                )
+            except Exception:
+                _req_date = attendance.attendance_date
+        first_dict["attendance_date"] = _req_date
     else:
         other_dict = json.loads(attendance.requested_data)
 
@@ -934,7 +914,7 @@ def validate_attendance_request(request, attendance_id):
     diff_data = get_diff_dict(first_dict, other_dict, Attendance)
 
     # Attendance Correction Request (mobile parity): do not show worked hours / batch
-    for _k in ("Worked Hours", "Worked Hour", "Minimum hour", "Minimum Hour", "Batch Attendance"):
+    for _k in ("Employee", "Employee ID", "Employee Id", "Employee Name", "Employee name", "Worked Hours", "Worked Hour", "Minimum hour", "Minimum Hour", "Batch Attendance", "Work Type", "Work type", "Work Mode", "Work mode"):
         try:
             diff_data.pop(_k, None)
         except Exception:
