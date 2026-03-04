@@ -14,20 +14,6 @@
     </div>
 </a>
 
-{% if shift_info %}
-  <div class="px-4" style="margin-top: 6px;">
-    <div class="text-muted" style="font-size: 13px;">
-      <strong>{% trans 'Shift' %}:</strong> {{ shift_info.name }}
-      {% if shift_info.start != '-' or shift_info.end != '-' %}
-        • {{ shift_info.start }} - {{ shift_info.end }}
-      {% endif %}
-      {% if shift_info.flexi_minutes %}
-        • Flexi In: {{ shift_info.flexi_minutes }}m
-      {% endif %}
-    </div>
-  </div>
-{% endif %}
-
 <table class="table w-100 mt-3 mb-5">
     <tr>
         <th>{% trans "Field" %}</th>
@@ -74,9 +60,25 @@
         <td class="p-2 ml-2 timeformat_changer">{{diff.1}},</td>
         {% endif %}
         {% else %}
-        <td class="p-2 ml-2">{% if diff.0 %}{{diff.0}}{% endif %}</td>
-        <td class="p-2 ml-2">{{diff.1}}</td>
-        {% endif %}
+<td class="p-2 ml-2">
+  {% if key == 'Shift' and shift_info %}
+    {% if diff.0 and diff.0 != 'None' %}{{ diff.0 }}{% else %}{{ shift_info.name }}{% endif %}
+    {% if shift_info.start != '-' or shift_info.end != '-' %} • {{ shift_info.start }} - {{ shift_info.end }}{% endif %}
+    {% if shift_info.flexi_minutes is not None %} • Flexi In: {{ shift_info.flexi_minutes }}m{% endif %}
+  {% else %}
+    {% if diff.0 %}{{diff.0}}{% endif %}
+  {% endif %}
+</td>
+<td class="p-2 ml-2">
+  {% if key == 'Shift' and shift_info %}
+    {% if diff.1 and diff.1 != 'None' %}{{ diff.1 }}{% else %}{{ shift_info.name }}{% endif %}
+    {% if shift_info.start != '-' or shift_info.end != '-' %} • {{ shift_info.start }} - {{ shift_info.end }}{% endif %}
+    {% if shift_info.flexi_minutes is not None %} • Flexi In: {{ shift_info.flexi_minutes }}m{% endif %}
+  {% else %}
+    {{diff.1}}
+  {% endif %}
+</td>
+{% endif %}
     </tr>
     {% endfor %}
     <tr>
