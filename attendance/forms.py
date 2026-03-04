@@ -33,6 +33,7 @@ from typing import Any, Dict
 from django import forms
 from django.apps import apps
 from django.core.exceptions import ValidationError
+from django.utils import timezone
 from django.db.models.query import QuerySet
 from django.forms import DateTimeInput
 from django.template.loader import render_to_string
@@ -669,115 +670,213 @@ class AttendanceRequestForm(BaseModelForm):
 
 class NewRequestForm(AttendanceRequestForm):
     """
-    NewRequestForm class
+    NewRequestForm (Web + API)
+    Aligned with Mobile "Attendance Correction Request" create flow:
+      - Employee, Date
+      - Scope: IN / OUT / BOTH (hidden field set by UI)
+      - Check In / Check Out time (same day)
+      - Reason / Note (required)
+      - Attachment(s) optional (multi file upload via field name "files")
     """
 
+    # UI-only scope (not a model field). Values: IN / OUT / BOTH
+    scope = forms.CharField(
+        required=False,
+        initial="BOTH",
+        widget=forms.HiddenInput(),
+        label=_("Scope"),
+    )
+
+    # Optional attachments (not a model field). API + mobile uses "files".
+    files = forms.FileField(
+        required=False,
+        label=_("Attachment"),
+        widget=forms.ClearableFileInput(attrs={"multiple": True}),
+        help_text=_("Optional. Upload supporting file(s)."),
+    )
+
     def __init__(self, *args, **kwargs):
+        # Get the initial data passed from views.py file (employee_id, etc.)
+        view_initial = kwargs.get("initial", {})
         super().__init__(*args, **kwargs)
-        # Get the initial data passes from views.py file
-        view_initial = kwargs.pop("initial", {})
-        # Add the new model choice field to the form at the beginning
-        old_dict = self.fields
-        new_dict = {
-            "employee_id": forms.ModelChoiceField(
-                queryset=Employee.objects.filter(is_active=True),
-                label=_("Employee"),
-                widget=forms.Select(attrs={"class": "oh-select oh-select-2 w-100"}),
-                initial=view_initial.get("employee_id"),
-            ),
+
+        # Rebuild field order to match mobile:
+        # employee, date, check-in, check-out, reason, files (+ hidden technical fields)
+        old = self.fields
+
+        employee_field = forms.ModelChoiceField(
+            queryset=Employee.objects.filter(is_active=True),
+            label=_("Employee"),
+            widget=forms.Select(attrs={"class": "oh-select oh-select-2 w-100"}),
+            initial=view_initial.get("employee_id"),
+        )
+
+        ordered = {
+            "employee_id": employee_field,
+            "attendance_date": old.get("attendance_date"),
+            "attendance_clock_in": old.get("attendance_clock_in"),
+            "attendance_clock_out": old.get("attendance_clock_out"),
+            "request_description": old.get("request_description"),
+            "files": self.fields.get("files"),
+            # Hidden UI-only scope
+            "scope": self.fields.get("scope"),
         }
-        new_dict.update(old_dict)
-        self.fields = new_dict
 
-        kwargs["initial"] = view_initial
+        # Keep any remaining fields (mostly hidden) to preserve backend logic
+        for k, v in old.items():
+            if k not in ordered and k not in ("employee_id",):
+                ordered[k] = v
 
+        # Drop None entries (defensive)
+        ordered = {k: v for k, v in ordered.items() if v is not None}
+
+        self.fields = ordered
+
+        # --- Hide fields not used in the mobile create flow ---
+        hide_fields = [
+            "shift_id",
+            "work_type_id",
+            "attendance_clock_in_date",
+            "attendance_clock_out_date",
+            "attendance_worked_hour",
+            "minimum_hour",
+            "batch_attendance_id",
+        ]
+        for f in hide_fields:
+            if f in self.fields:
+                self.fields[f].required = False
+                self.fields[f].widget = forms.HiddenInput()
+
+        # Work Type is not selected in mobile create flow; keep backend defaulting.
+        if "work_type_id" in self.fields:
+            self.fields["work_type_id"].required = False
+
+        # Normalize labels to match mobile
+        if "attendance_clock_in" in self.fields:
+            self.fields["attendance_clock_in"].label = _("Check In")
+        if "attendance_clock_out" in self.fields:
+            self.fields["attendance_clock_out"].label = _("Check Out")
+        if "request_description" in self.fields:
+            self.fields["request_description"].label = _("Reason / Note")
+            self.fields["request_description"].required = True
+
+        # Scope hidden field default
+        if "scope" in self.fields and not self.initial.get("scope"):
+            self.initial["scope"] = "BOTH"
+
+
+        # Limit attendance_date to yesterday and earlier (mobile parity)
+        if "attendance_date" in self.fields:
+            try:
+                max_date = timezone.localdate() - datetime.timedelta(days=1)
+                self.fields["attendance_date"].widget.attrs["max"] = max_date.strftime("%Y-%m-%d")
+            except Exception:
+                pass
     def as_p(self, *args, **kwargs):
         """
-        Render the form fields as HTML table rows with Bootstrap styling.
+        Render the form fields as HTML rows (modal).
         """
         _ = args, kwargs  # Explicitly mark as used for pylint
         context = {"form": self}
-        form_html = render_to_string(
-            "requests/attendance/request_new_form.html", context
-        )
+        form_html = render_to_string("requests/attendance/request_new_form.html", context)
         return form_html
 
     def clean(self) -> Dict[str, Any]:
         super().clean()
 
-        employee = self.cleaned_data.get('employee_id')
-        attendance_date = self.cleaned_data.get('attendance_date')
+        employee = self.cleaned_data.get("employee_id")
+        attendance_date = self.cleaned_data.get("attendance_date")
 
-        if employee and not hasattr(employee, 'employee_work_info'):
+        # Only allow requests for yesterday and earlier (no today/future)
+        if attendance_date:
+            try:
+                max_date = timezone.localdate() - datetime.timedelta(days=1)
+                if attendance_date > max_date:
+                    raise ValidationError({"attendance_date": _("You can only request for yesterday and earlier.")})
+            except ValidationError:
+                raise
+            except Exception:
+                # fail open on timezone issues
+                pass
+        scope = (self.data.get("scope") or self.cleaned_data.get("scope") or "BOTH").strip().upper()
+
+        if employee and not hasattr(employee, "employee_work_info"):
             raise ValidationError(_("Employee work info not found"))
 
-        # Must provide at least one time (IN / OUT / BOTH)
-        in_time = self.cleaned_data.get('attendance_clock_in')
-        out_time = self.cleaned_data.get('attendance_clock_out')
-        if not in_time and not out_time:
-            raise ValidationError({
-                'attendance_clock_in': _("Provide Check-In and/or Check-Out time"),
-            })
+        # Reason is required (mobile parity)
+        reason = (self.cleaned_data.get("request_description") or "").strip()
+        if not reason:
+            raise ValidationError({"request_description": _("Reason is required")})
 
-        in_date = self.cleaned_data.get('attendance_clock_in_date')
-        out_date = self.cleaned_data.get('attendance_clock_out_date')
+        in_time = self.cleaned_data.get("attendance_clock_in")
+        out_time = self.cleaned_data.get("attendance_clock_out")
 
+        # Apply scope rules (mobile parity)
+        if scope == "IN":
+            out_time = None
+            self.cleaned_data["attendance_clock_out"] = None
+            self.cleaned_data["attendance_clock_out_date"] = None
+        elif scope == "OUT":
+            in_time = None
+            self.cleaned_data["attendance_clock_in"] = None
+            self.cleaned_data["attendance_clock_in_date"] = None
+        else:
+            scope = "BOTH"
+
+        needs_in = scope in ("IN", "BOTH")
+        needs_out = scope in ("OUT", "BOTH")
+
+        if needs_in and not in_time:
+            raise ValidationError({"attendance_clock_in": _("Provide Check In time")})
+        if needs_out and not out_time:
+            raise ValidationError({"attendance_clock_out": _("Provide Check Out time")})
+
+        # Default in/out dates = attendance_date (mobile sends the same day)
+        in_date = self.cleaned_data.get("attendance_clock_in_date")
+        out_date = self.cleaned_data.get("attendance_clock_out_date")
         if in_time and not in_date:
+            self.cleaned_data["attendance_clock_in_date"] = attendance_date
             in_date = attendance_date
-            self.cleaned_data['attendance_clock_in_date'] = in_date
         if out_time and not out_date:
+            self.cleaned_data["attendance_clock_out_date"] = attendance_date
             out_date = attendance_date
-            self.cleaned_data['attendance_clock_out_date'] = out_date
 
-        # Default shift from employee work info if not provided
-        shift = self.cleaned_data.get('shift_id')
-        if not shift and employee and hasattr(employee, 'employee_work_info'):
+        # Default shift/work type from employee work info
+        shift = self.cleaned_data.get("shift_id")
+        if not shift and employee and hasattr(employee, "employee_work_info"):
             shift = employee.employee_work_info.shift_id
-            self.cleaned_data['shift_id'] = shift
+            self.cleaned_data["shift_id"] = shift
 
-        # Default work type from employee work info if not provided
-        work_type = self.cleaned_data.get('work_type_id')
-        if not work_type and employee and hasattr(employee, 'employee_work_info'):
+        work_type = self.cleaned_data.get("work_type_id")
+        if not work_type and employee and hasattr(employee, "employee_work_info"):
             work_type = employee.employee_work_info.work_type_id
-            self.cleaned_data['work_type_id'] = work_type
+            self.cleaned_data["work_type_id"] = work_type
 
-        # Default minimum_hour
-        minimum_hour = (
-            self.cleaned_data.get('minimum_hour')
-            or self.data.get('minimum_hour')
-            or '00:00'
-        )
-        self.cleaned_data['minimum_hour'] = minimum_hour
+        # Default minimum_hour and worked_hour (hidden fields)
+        minimum_hour = self.cleaned_data.get("minimum_hour") or self.data.get("minimum_hour") or "00:00"
+        self.cleaned_data["minimum_hour"] = minimum_hour
 
-        # Compute worked hour when both IN & OUT are present
-        worked_hour = self.cleaned_data.get('attendance_worked_hour')
-        if not worked_hour:
-            worked_hour = '00:00'
-            if in_time and out_time and in_date and out_date:
-                try:
-                    import datetime as _dt
-                    in_dt = _dt.datetime.combine(in_date, in_time)
-                    out_dt = _dt.datetime.combine(out_date, out_time)
-                    if out_dt < in_dt:
-                        out_dt = out_dt + _dt.timedelta(days=1)
-                    mins = int((out_dt - in_dt).total_seconds() // 60)
-                    h = mins // 60
-                    m = mins % 60
-                    worked_hour = f"{h:02d}:{m:02d}"
-                except Exception:
-                    worked_hour = '00:00'
-        self.cleaned_data['attendance_worked_hour'] = worked_hour
+        worked_hour = self.cleaned_data.get("attendance_worked_hour") or "00:00"
+        if not self.data.get("attendance_worked_hour") and in_time and out_time and in_date and out_date:
+            try:
+                import datetime as _dt
+                in_dt = _dt.datetime.combine(in_date, in_time)
+                out_dt = _dt.datetime.combine(out_date, out_time)
+                if out_dt < in_dt:
+                    out_dt = out_dt + _dt.timedelta(days=1)
+                mins = int((out_dt - in_dt).total_seconds() // 60)
+                h = mins // 60
+                m = mins % 60
+                worked_hour = f"{h:02d}:{m:02d}"
+            except Exception:
+                worked_hour = "00:00"
+        self.cleaned_data["attendance_worked_hour"] = worked_hour
 
         # Check if attendance exists for the employee and date
         attendances = Attendance.objects.filter(employee_id=employee, attendance_date=attendance_date)
 
         # -----------------------------------------------------------------
-        # -----------------------------------------------------------------
         # Scope rules (IN / OUT / FULL) to prevent duplicates/overlaps.
-        # - A session that is WAITING blocks another request overlapping that session.
-        # - A session that is APPROVED blocks another request overlapping that session.
-        # - If there is an existing WAITING request and the incoming scope is disjoint,
-        #   we merge values into the existing WAITING requested_data (e.g., add OUT after IN).
         # -----------------------------------------------------------------
         from attendance.services.attendance_correction_scope_rules import (
             infer_scope_from_values,
@@ -794,9 +893,9 @@ class NewRequestForm(AttendanceRequestForm):
         keep_existing_fields = False
         existing_attendance = attendances.first() if attendances.exists() else None
         if existing_attendance is not None:
-            existing_req = getattr(existing_attendance, 'requested_data', None)
+            existing_req = getattr(existing_attendance, "requested_data", None)
             approved_scopes = get_approved_scopes(existing_req)
-            if bool(getattr(existing_attendance, 'is_validate_request', False)):
+            if bool(getattr(existing_attendance, "is_validate_request", False)):
                 existing_waiting_scope = get_current_scope(existing_req)
                 keep_existing_fields = True
 
@@ -805,75 +904,65 @@ class NewRequestForm(AttendanceRequestForm):
             approved_scopes=approved_scopes,
             incoming_scope=incoming_scope,
         )
+
         data = {
-            'employee_id': employee,
-            'attendance_date': attendance_date,
-            'attendance_clock_in_date': in_date,
-            'attendance_clock_in': in_time,
-            'attendance_clock_out': out_time,
-            'attendance_clock_out_date': out_date,
-            'shift_id': shift,
-            'work_type_id': work_type,
-            'attendance_worked_hour': worked_hour,
-            'minimum_hour': minimum_hour,
+            "employee_id": employee,
+            "attendance_date": attendance_date,
+            "attendance_clock_in_date": in_date,
+            "attendance_clock_in": in_time,
+            "attendance_clock_out": out_time,
+            "attendance_clock_out_date": out_date,
+            "shift_id": shift,
+            "work_type_id": work_type,
+            "attendance_worked_hour": worked_hour,
+            "minimum_hour": minimum_hour,
         }
 
         if attendances.exists():
             # update_request: store requested_data on existing record
-            data['employee_id'] = employee.id
-            data['attendance_date'] = str(attendance_date)
-            data['attendance_clock_in_date'] = self.data.get('attendance_clock_in_date') or (str(in_date) if in_date else None)
-            data['attendance_clock_in'] = self.data.get('attendance_clock_in') or (in_time.strftime('%H:%M') if in_time else None)
-            data['attendance_clock_out'] = (
-                None if (self.data.get('attendance_clock_out') in (None, '', 'None')) else self.data.get('attendance_clock_out')
-            )
-            data['attendance_clock_out_date'] = (
-                None if (self.data.get('attendance_clock_out_date') in (None, '', 'None')) else self.data.get('attendance_clock_out_date')
-            )
-            data['work_type_id'] = self.data.get('work_type_id') or (str(getattr(work_type, 'id', '')) if work_type else '')
-            data['shift_id'] = self.data.get('shift_id') or (str(getattr(shift, 'id', '')) if shift else '')
-            data['attendance_worked_hour'] = self.data.get('attendance_worked_hour') or worked_hour
-            data['minimum_hour'] = self.data.get('minimum_hour') or minimum_hour
+            data["employee_id"] = employee.id
+            data["attendance_date"] = str(attendance_date)
+            data["attendance_clock_in_date"] = self.data.get("attendance_clock_in_date") or (str(in_date) if in_date else None)
+            data["attendance_clock_in"] = self.data.get("attendance_clock_in") or (in_time.strftime("%H:%M") if in_time else None)
+            data["attendance_clock_out"] = None if (self.data.get("attendance_clock_out") in (None, "", "None")) else self.data.get("attendance_clock_out")
+            data["attendance_clock_out_date"] = None if (self.data.get("attendance_clock_out_date") in (None, "", "None")) else self.data.get("attendance_clock_out_date")
 
             attendance = attendances.first()
-
-            # Build requested_data with __meta (approved_scopes + current_scope).
+            # Merge requested_data while keeping previous fields if needed
             meta_wrapped = build_requested_data_for_save(
-                new_payload=data,
-                existing_requested_data=getattr(attendance, 'requested_data', None),
+                new_payload={
+                    **data,
+                    "work_type_id": self.data.get("work_type_id") or (str(getattr(work_type, "id", "")) if work_type else ""),
+                    "shift_id": self.data.get("shift_id") or (str(getattr(shift, "id", "")) if shift else ""),
+                    "attendance_worked_hour": self.data.get("attendance_worked_hour") or worked_hour,
+                    "minimum_hour": self.data.get("minimum_hour") or minimum_hour,
+                },
+                existing_requested_data=getattr(attendance, "requested_data", None),
                 incoming_scope=incoming_scope,
                 keep_existing_fields=keep_existing_fields,
             )
-
-            # Keep legacy behavior: stringify values for requested_data fields.
-            for key, value in list(meta_wrapped.items()):
-                if key == '__meta':
-                    continue
-                meta_wrapped[key] = str(value)
-
             attendance.requested_data = json.dumps(meta_wrapped)
             attendance.is_validate_request = True
-            if attendance.request_type != 'create_request':
-                attendance.request_type = 'update_request'
-            attendance.request_description = self.data.get('request_description')
+            if attendance.request_type != "create_request":
+                attendance.request_type = "update_request"
+            attendance.request_description = self.data.get("request_description")
             attendance.save()
             self.new_instance = None
-            return
+            return self.cleaned_data
 
         # New create_request row
-        # Add meta to requested_data so approval can record approved scopes.
         meta_wrapped = build_requested_data_for_save(
             new_payload={
-                'employee_id': employee.id,
-                'attendance_date': str(attendance_date),
-                'attendance_clock_in_date': self.data.get('attendance_clock_in_date') or (str(in_date) if in_date else None),
-                'attendance_clock_in': self.data.get('attendance_clock_in') or (in_time.strftime('%H:%M') if in_time else None),
-                'attendance_clock_out': None if (self.data.get('attendance_clock_out') in (None, '', 'None')) else self.data.get('attendance_clock_out'),
-                'attendance_clock_out_date': None if (self.data.get('attendance_clock_out_date') in (None, '', 'None')) else self.data.get('attendance_clock_out_date'),
-                'work_type_id': self.data.get('work_type_id') or (str(getattr(work_type, 'id', '')) if work_type else ''),
-                'shift_id': self.data.get('shift_id') or (str(getattr(shift, 'id', '')) if shift else ''),
-                'attendance_worked_hour': self.data.get('attendance_worked_hour') or worked_hour,
-                'minimum_hour': self.data.get('minimum_hour') or minimum_hour,
+                "employee_id": employee.id,
+                "attendance_date": str(attendance_date),
+                "attendance_clock_in_date": self.data.get("attendance_clock_in_date") or (str(in_date) if in_date else None),
+                "attendance_clock_in": self.data.get("attendance_clock_in") or (in_time.strftime("%H:%M") if in_time else None),
+                "attendance_clock_out": None if (self.data.get("attendance_clock_out") in (None, "", "None")) else self.data.get("attendance_clock_out"),
+                "attendance_clock_out_date": None if (self.data.get("attendance_clock_out_date") in (None, "", "None")) else self.data.get("attendance_clock_out_date"),
+                "work_type_id": self.data.get("work_type_id") or (str(getattr(work_type, "id", "")) if work_type else ""),
+                "shift_id": self.data.get("shift_id") or (str(getattr(shift, "id", "")) if shift else ""),
+                "attendance_worked_hour": self.data.get("attendance_worked_hour") or worked_hour,
+                "minimum_hour": self.data.get("minimum_hour") or minimum_hour,
             },
             existing_requested_data=None,
             incoming_scope=incoming_scope,
@@ -883,11 +972,11 @@ class NewRequestForm(AttendanceRequestForm):
         new_instance = Attendance(**data)
         new_instance.is_validate_request = True
         new_instance.attendance_validated = False
-        new_instance.request_description = self.data.get('request_description')
-        new_instance.request_type = 'create_request'
+        new_instance.request_description = self.data.get("request_description")
+        new_instance.request_type = "create_request"
         new_instance.requested_data = json.dumps(meta_wrapped)
         self.new_instance = new_instance
-        return
+        return self.cleaned_data
 
 
 excluded_fields = [
