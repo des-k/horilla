@@ -2,51 +2,91 @@
     {% load i18n widget_tweaks attendancefilters %}
     <div class="oh-modal__dialog-header">
         <h2 class="oh-modal__dialog-title" id="addEmployeeModalLabel">
-            {% trans "New Attendances Request" %}
+            {% trans "Attendance Correction Request" %}
         </h2>
         <button class="oh-modal__close" aria-label="Close">
             <ion-icon name="close-outline"></ion-icon>
         </button>
     </div>
+
     <div class="oh-modal__dialog-body">
         <div class="oh-general__tab-target oh-profile-section" id="personal">
-            <form hx-post="{% url 'request-new-attendance' %}?bulk={{bulk}}" hx-target="#objectCreateModalTarget" id="attendanceRequestForm">
+            <form
+                hx-post="{% url 'request-new-attendance' %}?bulk={{bulk}}"
+                hx-target="#objectCreateModalTarget"
+                hx-encoding="multipart/form-data"
+                enctype="multipart/form-data"
+                id="attendanceRequestForm"
+            >
                 {% csrf_token %}
+
+                {# Hidden fields include: shift_id, work_type_id, in/out dates, scope, etc. #}
                 {% for hf in form.hidden_fields %}{{ hf }}{% endfor %}
+
                 <div class="oh-profile-section__card">
                     <div class="row">
                         <div class="col-12">{{form.non_field_errors}}</div>
+
+                        {# Render visible fields in order (employee, date, check-in, check-out, reason, files) #}
                         {% for field in form.visible_fields %}
-                            {% if field.field.widget|is_select_multiple or field.field.widget|is_text_area %}
+                            {% if field.field.widget|is_select_multiple or field.field.widget|is_text_area or field.field.widget.input_type == "file" %}
                                 <div class="oh-label__info" for="id_{{ field.name }}">
                                     <label class="oh-label {% if field.field.required %} required-star{% endif %}"
-                                    for="id_{{ field.name }}">{{ field.label }}</label>
+                                           for="id_{{ field.name }}">{{ field.label }}</label>
                                     {% if field.help_text != '' %}
                                         <span class="oh-info mr-2" title="{{ field.help_text|safe }}"></span>
                                     {% endif %}
                                 </div>
                                 <div style="width: 100%; padding: 12px;">
-
                                     {{ field|add_class:"form-control" }}
+                                    {{field.errors}}
                                 </div>
                             {% else %}
                                 <div class="col-12 col-md-6" id="id_{{field.name}}_parent_div">
                                     <div class="oh-label__info" for="id_{{ field.name }}">
                                         <label class="oh-label {% if field.field.required %} required-star{% endif %}"
-                                        for="id_{{ field.name }}">{{ field.label }}</label>
+                                               for="id_{{ field.name }}">{{ field.label }}</label>
                                         {% if field.help_text != '' %}
                                             <span class="oh-info mr-2" title="{{ field.help_text|safe }}"></span>
                                         {% endif %}
                                     </div>
                                     {% if field.field.widget.input_type == "checkbox" %}
-                                    <div class="oh-switch" style="width: 30px">
-                                        {{ field|add_class:"oh-switch__checkbox" }}
-
-                                    </div>
+                                        <div class="oh-switch" style="width: 30px">
+                                            {{ field|add_class:"oh-switch__checkbox" }}
+                                        </div>
                                     {% else %}
-                                    {{ field|add_class:"form-control" }}
+                                        {{ field|add_class:"form-control" }}
                                     {% endif %}
                                     {{field.errors}}
+                                </div>
+                            {% endif %}
+
+                            {# Insert Shift + Flexi + Scope chips right after Date #}
+                            {% if field.name == "attendance_date" %}
+                                <div class="col-12" style="padding: 12px;">
+                                    <div class="oh-label__info">
+                                        <label class="oh-label">{% trans "Shift Information" %}</label>
+                                    </div>
+                                    <div id="shiftInfoText" class="form-control" style="background:#f7f7f7;">—</div>
+
+                                    <div class="oh-label__info" style="margin-top: 10px;">
+                                        <label class="oh-label">{% trans "Flexi In" %}</label>
+                                    </div>
+                                    <div id="flexiInfoText" class="form-control" style="background:#f7f7f7;">—</div>
+                                </div>
+
+                                <div class="col-12" style="padding: 12px;">
+                                    <div class="oh-label__info">
+                                        <label class="oh-label required-star">{% trans "Scope" %}</label>
+                                    </div>
+                                    <div class="d-flex flex-wrap" style="gap: 10px;">
+                                        <button type="button" class="oh-btn oh-btn--light" data-att-scope="IN">{% trans "IN" %}</button>
+                                        <button type="button" class="oh-btn oh-btn--light" data-att-scope="OUT">{% trans "OUT" %}</button>
+                                        <button type="button" class="oh-btn oh-btn--light" data-att-scope="BOTH">{% trans "IN & OUT" %}</button>
+                                    </div>
+                                    <small class="text-muted d-block" style="margin-top: 6px;">
+                                        {% trans "Choose whether you are correcting Check In, Check Out, or both." %}
+                                    </small>
                                 </div>
                             {% endif %}
                         {% endfor %}
@@ -62,3 +102,93 @@
         </div>
     </div>
 </div>
+
+<script>
+(function () {
+  function byId(id) { return document.getElementById(id); }
+
+  // --- Scope chips (IN / OUT / BOTH) ---
+  const scopeInput = byId('id_scope'); // hidden input from form
+  const scopeBtns = document.querySelectorAll('#attendanceRequestDiv [data-att-scope]');
+  const inDiv = byId('id_attendance_clock_in_parent_div');
+  const outDiv = byId('id_attendance_clock_out_parent_div');
+  const inInput = byId('id_attendance_clock_in');
+  const outInput = byId('id_attendance_clock_out');
+
+  function setScope(val) {
+    if (!scopeInput) return;
+    scopeInput.value = val;
+
+    scopeBtns.forEach(btn => {
+      const active = (btn.dataset.attScope === val);
+      btn.classList.toggle('oh-btn--secondary', active);
+      btn.classList.toggle('oh-btn--light', !active);
+    });
+
+    if (inDiv) inDiv.style.display = (val === 'OUT') ? 'none' : '';
+    if (outDiv) outDiv.style.display = (val === 'IN') ? 'none' : '';
+
+    // Clear hidden side to prevent accidental submission
+    if (val === 'IN' && outInput) outInput.value = '';
+    if (val === 'OUT' && inInput) inInput.value = '';
+  }
+
+  const initialScope = (scopeInput && scopeInput.value) ? scopeInput.value.toUpperCase() : 'BOTH';
+  setScope(['IN','OUT','BOTH'].includes(initialScope) ? initialScope : 'BOTH');
+
+  scopeBtns.forEach(btn => {
+    btn.addEventListener('click', function () {
+      setScope(this.dataset.attScope);
+    });
+  });
+
+  // --- Shift + Flexi info (mobile parity) ---
+  async function refreshShiftInfo() {
+    const empSel = byId('id_employee_id');
+    const dateInp = byId('id_attendance_date');
+    const shiftText = byId('shiftInfoText');
+    const flexText = byId('flexiInfoText');
+
+    if (!empSel || !dateInp) return;
+
+    const emp = (empSel.value || '').trim();
+    const date = (dateInp.value || '').trim();
+
+    if (!emp || !date) {
+      if (shiftText) shiftText.textContent = '—';
+      if (flexText) flexText.textContent = '—';
+      return;
+    }
+
+    const url = `/attendance/attendance-request-shift-info?employee_id=${encodeURIComponent(emp)}&attendance_date=${encodeURIComponent(date)}`;
+
+    try {
+      const resp = await fetch(url, { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+      if (!resp.ok) throw new Error('bad status');
+      const data = await resp.json();
+
+      const name = (data.shift_name || '').toString().trim();
+      const start = (data.shift_start || '').toString().trim();
+      const end = (data.shift_end || '').toString().trim();
+      const flex = (data.flexi_in_minutes || '').toString().trim();
+
+      let shiftLine = '—';
+      if (name && start && end) shiftLine = `${name} (${start} - ${end})`;
+      else if (start && end) shiftLine = `${start} - ${end}`;
+      else if (name) shiftLine = name;
+
+      if (shiftText) shiftText.textContent = shiftLine;
+      if (flexText) flexText.textContent = flex ? `${flex} minutes` : '—';
+    } catch (e) {
+      if (byId('shiftInfoText')) byId('shiftInfoText').textContent = '—';
+      if (byId('flexiInfoText')) byId('flexiInfoText').textContent = '—';
+    }
+  }
+
+  const empSel = byId('id_employee_id');
+  const dateInp = byId('id_attendance_date');
+  if (empSel) empSel.addEventListener('change', refreshShiftInfo);
+  if (dateInp) dateInp.addEventListener('change', refreshShiftInfo);
+  refreshShiftInfo();
+})();
+</script>
