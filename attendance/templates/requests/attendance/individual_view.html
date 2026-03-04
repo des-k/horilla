@@ -1,19 +1,4 @@
 {% load i18n %} {% load basefilters %}
-<div class="oh-modal__dialog oh-modal__dialog--navigation m-0 p-0">
-    <button hx-get="{% url 'validate-attendance-request' previous %}?requests_ids={{requests_ids}}"
-        hx-target="#validateAttendanceRequestModalBody" class="oh-modal__diaglog-nav oh-modal__nav-prev"
-        data-action="previous">
-        <ion-icon name="chevron-back-outline" class="md hydrated" role="img"
-            aria-label="chevron back outline"></ion-icon>
-    </button>
-
-    <button hx-get="{% url 'validate-attendance-request' next %}?requests_ids={{requests_ids}}"
-        hx-target="#validateAttendanceRequestModalBody" class="oh-modal__diaglog-nav oh-modal__nav-next"
-        data-action="next">
-        <ion-icon name="chevron-forward-outline" class="md hydrated" role="img"
-            aria-label="chevron forward outline"></ion-icon>
-    </button>
-</div>
 <a class="oh-timeoff-modal__profile-content pt-4" style="text-decoration:none;"
     href="{% url 'employee-view-individual' attendance.employee_id.id %}">
     <div class="oh-profile mb-2">
@@ -28,6 +13,20 @@
         </div>
     </div>
 </a>
+
+{% if shift_info %}
+  <div class="px-4" style="margin-top: 6px;">
+    <div class="text-muted" style="font-size: 13px;">
+      <strong>{% trans 'Shift' %}:</strong> {{ shift_info.name }}
+      {% if shift_info.start != '-' or shift_info.end != '-' %}
+        • {{ shift_info.start }} - {{ shift_info.end }}
+      {% endif %}
+      {% if shift_info.flexi_minutes %}
+        • Flexi In: {{ shift_info.flexi_minutes }}m
+      {% endif %}
+    </div>
+  </div>
+{% endif %}
 
 <table class="table w-100 mt-3 mb-5">
     <tr>
