@@ -359,6 +359,11 @@ urlpatterns = [
         name="request-new-attendance",
     ),
     path(
+        "attendance-request-shift-info",
+        attendance.views.requests.attendance_request_shift_info,
+        name="attendance-request-shift-info",
+    ),
+    path(
         "create-batch-attendance",
         attendance.views.requests.create_batch_attendance,
         name="create-batch-attendance",
