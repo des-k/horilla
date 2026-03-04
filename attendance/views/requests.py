@@ -12,8 +12,8 @@ from urllib.parse import parse_qs
 from django.contrib import messages
 from django.core.exceptions import ValidationError
 from django.db import transaction
-from django.db.models import ProtectedError, Q
-from django.http import HttpResponse, HttpResponseRedirect, JsonResponse
+from django.db.models import ProtectedError, Q, Count
+from django.http import HttpResponse, HttpResponseRedirect, JsonResponse, HttpResponseForbidden
 from django.shortcuts import redirect, render
 from django.template.loader import render_to_string
 from django.urls import reverse
@@ -36,6 +36,8 @@ from attendance.models import (
     Attendance,
     AttendanceActivity,
     AttendanceLateComeEarlyOut,
+    AttendanceRequestComment,
+    AttendanceRequestFile,
     BatchAttendance,
 )
 from attendance.views.clock_in_out import early_out, late_come
@@ -211,69 +213,177 @@ def request_attendance(request):
 
 @login_required
 def request_attendance_view(request):
-    """
-    This method is used to view the attendances for to request
-    """
-    requests = Attendance.objects.filter(
-        is_validate_request=True,
-    )
-    requests = filtersubordinates(
-        request=request,
-        perm="attendance.view_attendance",
-        queryset=requests,
-    )
-    requests = requests | Attendance.objects.filter(
-        employee_id__employee_user_id=request.user,
-        is_validate_request=True,
-    )
-    requests = AttendanceFilters(request.GET, requests).qs
-    previous_data = request.GET.urlencode()
-    data_dict = parse_qs(previous_data)
-    get_key_instances(Attendance, data_dict)
+    """Attendance Requests page aligned with mobile Attendance Correction Request.
 
-    keys_to_remove = [key for key, value in data_dict.items() if value == ["unknown"]]
-    for key in keys_to_remove:
-        data_dict.pop(key)
-    attendances = filtersubordinates(
-        request=request,
-        perm="attendance.view_attendance",
-        queryset=Attendance.objects.all(),
+    Two tabs:
+      - My Requests: current user's requests (pending + history)
+      - Approvals: pending requests the current user can approve (admin/reporting manager)
+    """
+    employee = getattr(request.user, "employee_get", None)
+    is_super = bool(getattr(request.user, "is_superuser", False))
+    has_global_perm = bool(getattr(request.user, "has_perm", lambda _p: False)("attendance.change_attendance"))
+
+    # Some deployments have admin users not linked to Employee.
+    if employee is None and not (is_super or has_global_perm):
+        return HttpResponseForbidden("Employee profile required")
+
+    search = (request.GET.get("search") or "").strip()
+    status_my = (request.GET.get("status_my") or "all").strip().lower()
+    allowed_status_my = {"all", "waiting", "approved", "rejected", "canceled", "cancel"}
+    if status_my not in allowed_status_my:
+        status_my = "all"
+
+    # ----------------------------
+    # Build Approvals queryset
+    # ----------------------------
+    approvals_qs = Attendance.objects.filter(is_validate_request=True)
+
+    # Hardening:
+    # - Superuser/global approver can see all pending requests.
+    # - Reporting manager can see pending requests of subordinates.
+    # - Others see none.
+    if is_reportingmanager(request) and not (has_global_perm or is_super):
+        approvals_qs = filtersubordinates(
+            request=request,
+            perm="attendance.change_attendance",
+            queryset=approvals_qs,
+        )
+    elif not (has_global_perm or is_super):
+        approvals_qs = Attendance.objects.none()
+
+    # Never include own requests in approvals list (cannot self-approve)
+    approvals_qs = approvals_qs.exclude(employee_id__employee_user_id=request.user)
+
+    # ----------------------------
+    # Build My Requests queryset
+    # ----------------------------
+    my_qs = Attendance.objects.filter(employee_id__employee_user_id=request.user).filter(
+        Q(is_validate_request=True)
+        | Q(is_validate_request_approved=True)
+        | Q(
+            request_type__in=[
+                "create_request",
+                "update_request",
+                "revalidate_request",
+                "cancel_request",
+                "reject_request",
+            ]
+        )
+        | Q(request_description__isnull=False)
+        | Q(requested_data__isnull=False)
+    ).distinct()
+
+    # My Requests status filter
+    if status_my == "waiting":
+        my_qs = my_qs.filter(is_validate_request=True)
+    elif status_my == "approved":
+        my_qs = my_qs.filter(Q(is_validate_request_approved=True) | Q(attendance_validated=True)).exclude(is_validate_request=True)
+    elif status_my == "rejected":
+        my_qs = my_qs.filter(request_type="reject_request")
+    elif status_my in ("canceled", "cancel"):
+        my_qs = my_qs.filter(request_type="cancel_request")
+
+    # Shared search filter
+    if search:
+        parsed_date = None
+        for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%Y/%m/%d"):
+            try:
+                parsed_date = datetime.strptime(search, fmt).date()
+                break
+            except Exception:
+                parsed_date = None
+        if parsed_date:
+            approvals_qs = approvals_qs.filter(attendance_date=parsed_date)
+            my_qs = my_qs.filter(attendance_date=parsed_date)
+        else:
+            approvals_qs = approvals_qs.filter(
+                Q(employee_id__employee_first_name__icontains=search)
+                | Q(employee_id__employee_last_name__icontains=search)
+                | Q(employee_id__badge_id__icontains=search)
+                | Q(request_description__icontains=search)
+            )
+            my_qs = my_qs.filter(
+                Q(request_description__icontains=search)
+                | Q(request_type__icontains=search)
+            )
+
+    # Pagination (separate query params)
+    page_my = request.GET.get("page_my")
+    page_app = request.GET.get("page_app")
+
+    my_requests = paginator_qry(
+        my_qs.select_related("employee_id", "approved_by", "shift_id", "work_type_id").order_by("-id"),
+        page_my,
     )
-    attendances = attendances | Attendance.objects.filter(
-        employee_id__employee_user_id=request.user
+    approvals = paginator_qry(
+        approvals_qs.select_related("employee_id", "approved_by", "shift_id", "work_type_id").order_by("-id"),
+        page_app,
     )
-    attendances = attendances.filter(
-        employee_id__is_active=True,
+
+    # Attachment counts for current page (used as badges like Work Type Requests)
+    try:
+        my_ids = [obj.id for obj in getattr(my_requests, "object_list", [])]
+        app_ids = [obj.id for obj in getattr(approvals, "object_list", [])]
+        my_attach_counts = {
+            row["request_id_id"]: row["cnt"]
+            for row in AttendanceRequestComment.objects.filter(request_id_id__in=my_ids)
+            .values("request_id_id")
+            .annotate(cnt=Count("files", distinct=True))
+        }
+        app_attach_counts = {
+            row["request_id_id"]: row["cnt"]
+            for row in AttendanceRequestComment.objects.filter(request_id_id__in=app_ids)
+            .values("request_id_id")
+            .annotate(cnt=Count("files", distinct=True))
+        }
+    except Exception:
+        my_attach_counts = {}
+        app_attach_counts = {}
+
+    can_approve = bool(
+        request.user.has_perm("attendance.change_attendance") or is_reportingmanager(request)
     )
-    attendances = AttendanceFilters(request.GET, attendances).qs
-    filter_obj = AttendanceFilters()
-    check_attendance = Attendance.objects.all()
-    if check_attendance.exists():
-        template = "requests/attendance/view-requests.html"
-    else:
-        template = "requests/attendance/requests_empty.html"
-    requests_ids = json.dumps(
-        [instance.id for instance in paginator_qry(requests, None).object_list]
-    )
-    attendances_ids = json.dumps(
-        [instance.id for instance in paginator_qry(attendances, None).object_list]
-    )
-    requests = requests.filter(
-        employee_id__is_active=True,
-    )
+
+    status_my_options = [
+        ("all", _("All")),
+        ("waiting", _("Waiting")),
+        ("approved", _("Approved")),
+        ("rejected", _("Rejected")),
+        ("canceled", _("Canceled")),
+    ]
+
+
+
+    # Preserve filters for pagination links
+    try:
+        q_my = request.GET.copy()
+        q_my.pop("page_my", None)
+        pd_my = q_my.urlencode()
+        q_app = request.GET.copy()
+        q_app.pop("page_app", None)
+        pd_app = q_app.urlencode()
+    except Exception:
+        pd_my = ""
+        pd_app = ""
+
     return render(
         request,
-        template,
+        "attendance/attendance_requests/view.html",
         {
-            "requests": paginator_qry(requests, None),
-            "attendances": paginator_qry(attendances, None),
-            "requests_ids": requests_ids,
-            "attendances_ids": attendances_ids,
-            "f": filter_obj,
-            "filter_dict": data_dict,
-            "gp_fields": AttendanceRequestReGroup.fields,
+            "my_requests": my_requests,
+            "approvals": approvals,
+            "can_approve": can_approve,
+            "search": search,
+            "status_my": status_my,
+            "status_my_options": status_my_options,
+            "my_attach_counts": my_attach_counts,
+            "app_attach_counts": app_attach_counts,
+            "pd_my": pd_my,
+            "pd_app": pd_app,
         },
     )
+
+
 
 
 @login_required
@@ -619,6 +729,18 @@ def validate_attendance_request(request, attendance_id):
         previous_instance_id, next_instance_id = closest_numbers(
             json.loads(requests_ids_json), attendance_id
         )
+
+    # Attachments count (used for UI parity with Work Type Requests)
+    try:
+        attachment_count = (
+            AttendanceRequestComment.objects.filter(request_id=attendance)
+            .aggregate(cnt=Count("files", distinct=True))
+            .get("cnt")
+            or 0
+        )
+    except Exception:
+        attachment_count = 0
+
     return render(
         request,
         "requests/attendance/individual_view.html",
@@ -628,6 +750,7 @@ def validate_attendance_request(request, attendance_id):
             "previous": previous_instance_id,
             "next": next_instance_id,
             "requests_ids": requests_ids_json,
+            "attachment_count": attachment_count,
         },
     )
 
@@ -640,13 +763,31 @@ def approve_validate_attendance_request(request, attendance_id):
     This method is used to validate the attendance requests
     """
     attendance = Attendance.objects.select_for_update().get(id=attendance_id)
+
+    # Disallow approving your own request (even if admin)
+    try:
+        if attendance.employee_id.employee_user_id == request.user:
+            messages.error(request, _("You cannot approve your own request."))
+            return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+    except Exception:
+        pass
+
+    # Only pending requests can be approved
+    if not getattr(attendance, "is_validate_request", False):
+        messages.error(request, _("Request is not waiting for approval."))
+        return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+
     prev_attendance_date = attendance.attendance_date
 
     # Approve request flags (these fields are NOT included in serialize/requested_data)
     attendance.attendance_validated = True
     attendance.is_validate_request_approved = True
     attendance.is_validate_request = False
-    attendance.request_description = None
+    try:
+        attendance.approved_by = request.user.employee_get
+    except Exception:
+        attendance.approved_by = None
+    # Keep request_description for history
     attendance.save()
 
     # Apply requested field changes (if any)
@@ -674,7 +815,6 @@ def approve_validate_attendance_request(request, attendance_id):
         attendance.attendance_validated = True
         attendance.is_validate_request_approved = True
         attendance.is_validate_request = False
-        attendance.request_description = None
         attendance.save()
 
     # -----------------------------------------------------------------
@@ -783,55 +923,172 @@ def approve_validate_attendance_request(request, attendance_id):
 
 
 @login_required
+@transaction.atomic
 def cancel_attendance_request(request, attendance_id):
-    """
-    This method is used to cancel attendance request
+    """Cancel an attendance request (owner action).
+
+    Aligned with mobile Attendance Correction Request:
+    - Only the requester can cancel
+    - Only WAITING requests can be canceled
+    - Keep the Attendance row for history (status=CANCELED)
     """
     try:
-        attendance = Attendance.objects.get(id=attendance_id)
-        if (
-            attendance.employee_id.employee_user_id == request.user
-            or is_reportingmanager(request)
-            or request.user.has_perm("attendance.change_attendance")
-        ):
-            # Keep the original request type before clearing fields
-            req_type = attendance.request_type
-            req_date = attendance.attendance_date
-            req_employee = attendance.employee_id
+        attendance = Attendance.objects.select_for_update().get(id=attendance_id)
 
-            attendance.is_validate_request_approved = False
-            attendance.is_validate_request = False
-            attendance.request_description = None
-            attendance.requested_data = None
-            attendance.request_type = None
+        # Owner-only
+        try:
+            if attendance.employee_id.employee_user_id != request.user:
+                messages.error(request, _("Only the requester can cancel this request."))
+                return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+        except Exception:
+            messages.error(request, _("You do not have permission to perform this action."))
+            return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
 
-            attendance.save()
+        # Only pending requests can be canceled
+        if not getattr(attendance, "is_validate_request", False):
+            messages.error(request, _("Only pending requests can be canceled."))
+            return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
 
-            if req_type == "create_request":
-                # Single-session cleanup: remove any daily activity linked to that date
-                AttendanceActivity.objects.filter(
-                    employee_id=req_employee,
-                    attendance_date=req_date,
-                ).delete()
-                AttendanceLateComeEarlyOut.objects.filter(attendance_id=attendance).delete()
-                attendance.delete()
-                messages.success(request, _("The requested attendance is removed."))
-            else:
-                messages.success(request, _("Attendance request has been rejected"))
-            employee = attendance.employee_id
-            notify.send(
-                request.user,
-                recipient=employee.employee_user_id,
-                verb=f"Your attendance request for {attendance.attendance_date} is rejected",
-                verb_ar=f"تم رفض طلبك للحضور في تاريخ {attendance.attendance_date}",
-                verb_de=f"Ihre Anwesenheitsanfrage für {attendance.attendance_date} wurde abgelehnt",
-                verb_es=f"Tu solicitud de asistencia para el {attendance.attendance_date} ha sido rechazada",
-                verb_fr=f"Votre demande de présence pour le {attendance.attendance_date} est rejetée",
-                icon="close-circle-outline",
-            )
-    except (Attendance.DoesNotExist, OverflowError):
+        req_type = attendance.request_type
+        req_date = attendance.attendance_date
+        req_employee = attendance.employee_id
+
+        attendance.is_validate_request_approved = False
+        attendance.is_validate_request = False
+        # Discard pending payload but keep request_description for history
+        attendance.requested_data = None
+        attendance.request_type = "cancel_request"
+        try:
+            attendance.approved_by = request.user.employee_get
+        except Exception:
+            attendance.approved_by = None
+        attendance.save()
+
+        # For create_request, remove derived daily artifacts so it won't affect reporting.
+        if req_type == "create_request":
+            AttendanceActivity.objects.filter(
+                employee_id=req_employee,
+                attendance_date=req_date,
+            ).delete()
+            AttendanceLateComeEarlyOut.objects.filter(attendance_id=attendance).delete()
+
+        messages.success(request, _("Attendance request canceled."))
+
+    except Attendance.DoesNotExist:
         messages.error(request, _("Attendance request not found"))
+    except Exception:
+        messages.error(request, _("Something went wrong."))
+
     return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+
+
+@login_required
+@manager_can_enter("attendance.change_attendance")
+@transaction.atomic
+def reject_validate_attendance_request(request, attendance_id):
+    """Reject an attendance request (approver action).
+
+    Aligned with mobile Attendance Correction Request:
+    - Owner cannot reject own request (use cancel)
+    - Only WAITING requests can be rejected
+    - Keep the Attendance row for history (status=REJECTED)
+    """
+    try:
+        # Fetch via permission-filtered queryset to ensure manager/admin scope
+        qs = Attendance.objects.filter(id=attendance_id, is_validate_request=True)
+        qs = filtersubordinates(
+            request=request,
+            perm="attendance.change_attendance",
+            queryset=qs,
+        )
+        attendance = qs.select_for_update().get()
+
+        # Disallow rejecting your own request
+        try:
+            if attendance.employee_id.employee_user_id == request.user:
+                messages.error(request, _("Use cancel for your own request."))
+                return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+        except Exception:
+            pass
+
+        req_type = attendance.request_type
+        req_date = attendance.attendance_date
+        req_employee = attendance.employee_id
+
+        attendance.is_validate_request_approved = False
+        attendance.is_validate_request = False
+        attendance.requested_data = None
+        attendance.request_type = "reject_request"
+        try:
+            attendance.approved_by = request.user.employee_get
+        except Exception:
+            attendance.approved_by = None
+        attendance.save()
+
+        # For create_request, remove derived daily artifacts so it won't affect reporting.
+        if req_type == "create_request":
+            AttendanceActivity.objects.filter(
+                employee_id=req_employee,
+                attendance_date=req_date,
+            ).delete()
+            AttendanceLateComeEarlyOut.objects.filter(attendance_id=attendance).delete()
+
+        messages.success(request, _("Attendance request rejected."))
+
+    except Attendance.DoesNotExist:
+        messages.error(request, _("Attendance request not found"))
+    except Exception:
+        messages.error(request, _("Something went wrong."))
+
+    return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+
+
+@login_required
+@hx_request_required
+def attendance_request_attachments(request, attendance_id):
+    """HTMX modal: show Attendance Request attachments."""
+    attendance = Attendance.objects.filter(id=attendance_id).first()
+    if not attendance:
+        return render(
+            request,
+            "attendance/attendance_requests/attachments_modal.html",
+            {"req": None, "files": []},
+        )
+
+    # Allow: owner OR manager/admin with attendance perms
+    try:
+        is_owner = attendance.employee_id.employee_user_id == request.user
+    except Exception:
+        is_owner = False
+
+    if not (
+        is_owner
+        or is_reportingmanager(request)
+        or request.user.has_perm("attendance.change_attendance")
+        or request.user.has_perm("attendance.view_attendance")
+    ):
+        return HttpResponseForbidden("Permission denied")
+
+    files = []
+    try:
+        comments = AttendanceRequestComment.objects.filter(request_id=attendance).prefetch_related("files")
+        seen = set()
+        for c in comments:
+            for f in c.files.all():
+                if f and f.id not in seen:
+                    seen.add(f.id)
+                    files.append(f)
+    except Exception:
+        files = []
+
+    return render(
+        request,
+        "attendance/attendance_requests/attachments_modal.html",
+        {"req": attendance, "files": files},
+    )
+
+
+
 
 
 @login_required
@@ -880,13 +1137,24 @@ def bulk_approve_attendance_request(request):
     for attendance_id in ids:
         # Lock row per id to prevent partial updates in concurrent approvals
         attendance = Attendance.objects.select_for_update().get(id=attendance_id)
+
+        # Disallow approving your own request (bulk)
+        try:
+            if attendance.employee_id.employee_user_id == request.user:
+                continue
+        except Exception:
+            pass
+
+        # Only pending requests can be approved
+        if not getattr(attendance, 'is_validate_request', False):
+            continue
+
         prev_attendance_date = attendance.attendance_date
 
         # Mark approved
         attendance.attendance_validated = True
         attendance.is_validate_request_approved = True
         attendance.is_validate_request = False
-        attendance.request_description = None
         attendance.save()
 
         # Apply requested changes
@@ -963,55 +1231,62 @@ def bulk_approve_attendance_request(request):
 
 
 @login_required
-@manager_can_enter("attendance.delete_attendance")
+@manager_can_enter("attendance.change_attendance")
+@transaction.atomic
 def bulk_reject_attendance_request(request):
+    """Bulk reject pending attendance requests (approver action).
+
+    This keeps the Attendance row for history (status=REJECTED), aligned with the
+    mobile Attendance Correction Request flow.
     """
-    This method is used to delete bulk attendance request
-    """
-    ids = request.POST["ids"]
+    ids = request.POST.get("ids") or "[]"
     ids = json.loads(ids)
+
     for attendance_id in ids:
         try:
-            attendance = Attendance.objects.get(id=attendance_id)
-            if (
-                attendance.employee_id.employee_user_id == request.user
-                or is_reportingmanager(request)
-                or request.user.has_perm("attendance.change_attendance")
-            ):
-                req_type = attendance.request_type
-                emp = attendance.employee_id
-                att_date = attendance.attendance_date
+            qs = Attendance.objects.filter(id=attendance_id, is_validate_request=True)
+            qs = filtersubordinates(
+                request=request,
+                perm="attendance.change_attendance",
+                queryset=qs,
+            )
+            attendance = qs.select_for_update().get()
 
-                attendance.is_validate_request_approved = False
-                attendance.is_validate_request = False
-                attendance.request_description = None
-                attendance.requested_data = None
-                attendance.request_type = None
-                attendance.save()
+            # Skip own request
+            try:
+                if attendance.employee_id.employee_user_id == request.user:
+                    continue
+            except Exception:
+                pass
 
-                if req_type == "create_request":
-                    # If the request was for creating an attendance, remove the record completely.
-                    # Also clean up any activity rows created for that day (single-session).
-                    AttendanceActivity.objects.filter(employee_id=emp, attendance_date=att_date).delete()
-                    AttendanceLateComeEarlyOut.objects.filter(attendance_id=attendance).delete()
-                    attendance.delete()
-                    messages.success(request, _("The requested attendance is removed."))
-                else:
-                    messages.success(request, _("The requested attendance is rejected."))
-                employee = attendance.employee_id
-                notify.send(
-                    request.user,
-                    recipient=employee.employee_user_id,
-                    verb=f"Your attendance request for {attendance.attendance_date} is rejected",
-                    verb_ar=f"تم رفض طلبك للحضور في تاريخ {attendance.attendance_date}",
-                    verb_de=f"Ihre Anwesenheitsanfrage für {attendance.attendance_date} wurde abgelehnt",
-                    verb_es=f"Tu solicitud de asistencia para el {attendance.attendance_date} ha sido rechazada",
-                    verb_fr=f"Votre demande de présence pour le {attendance.attendance_date} est rejetée",
-                    icon="close-circle-outline",
-                )
-        except (Attendance.DoesNotExist, OverflowError):
-            messages.error(request, _("Attendance request not found"))
+            req_type = attendance.request_type
+            req_date = attendance.attendance_date
+            req_employee = attendance.employee_id
+
+            attendance.is_validate_request_approved = False
+            attendance.is_validate_request = False
+            attendance.requested_data = None
+            attendance.request_type = "reject_request"
+            try:
+                attendance.approved_by = request.user.employee_get
+            except Exception:
+                attendance.approved_by = None
+            attendance.save()
+
+            if req_type == "create_request":
+                AttendanceActivity.objects.filter(
+                    employee_id=req_employee,
+                    attendance_date=req_date,
+                ).delete()
+                AttendanceLateComeEarlyOut.objects.filter(attendance_id=attendance).delete()
+
+        except Exception:
+            # Ignore errors per item to continue processing the list
+            continue
+
     return HttpResponse("success")
+
+
 
 
 @login_required
