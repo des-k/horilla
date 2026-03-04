@@ -621,12 +621,10 @@ class AttendanceRequestForm(BaseModelForm):
             })
         if 'work_type_id' in self.fields:
             self.fields['work_type_id'].widget.attrs.update({'id': str(uuid.uuid4())})
-
         if 'batch_attendance_id' in self.fields:
-            self.fields['batch_attendance_id'].choices = list(self.fields['batch_attendance_id'].choices) + [("dynamic_create", "Dynamic create")]
-            self.fields['batch_attendance_id'].widget.attrs.update({
-                'onchange': 'dynamicBatchAttendance($(this))',
-            })
+            # Attendance Correction Request (mobile parity): no batch selection
+            self.fields['batch_attendance_id'].required = False
+            self.fields['batch_attendance_id'].widget = forms.HiddenInput()
 
     class Meta:
         """
@@ -684,23 +682,8 @@ class NewRequestForm(AttendanceRequestForm):
             "employee_id": forms.ModelChoiceField(
                 queryset=Employee.objects.filter(is_active=True),
                 label=_("Employee"),
-                widget=forms.Select(
-                    attrs={
-                        "class": "oh-select oh-select-2 w-100",
-                                            }
-                ),
+                widget=forms.Select(attrs={"class": "oh-select oh-select-2 w-100"}),
                 initial=view_initial.get("employee_id"),
-            ),
-            "create_bulk": forms.BooleanField(
-                required=False,
-                label=_("Create Bulk"),
-                widget=forms.CheckboxInput(
-                    attrs={
-                        "class": "oh-checkbox",
-                        "hx-target": "#objectCreateModalTarget",
-                        "hx-get": "/attendance/request-new-attendance?bulk=True",
-                    }
-                ),
             ),
         }
         new_dict.update(old_dict)
@@ -1241,6 +1224,11 @@ class BulkAttendanceRequestForm(BaseModelForm):
         request = getattr(horilla_middlewares._thread_locals, "request", None)
         employee = request.user.employee_get
         super().__init__(*args, **kwargs)
+        # Attendance Correction Request (mobile parity): no batch selection
+        if 'batch_attendance_id' in self.fields:
+            self.fields['batch_attendance_id'].required = False
+            self.fields['batch_attendance_id'].widget = forms.HiddenInput()
+
         # Shift / worked hour / minimum hour should not be chosen/typed by user
         for f in ["shift_id", "attendance_worked_hour", "minimum_hour"]:
             if f in self.fields:
