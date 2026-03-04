@@ -10,6 +10,7 @@
           <div class="oh-sticky-table__tr">
             <div class="oh-sticky-table__th">{% trans "Employee" %}</div>
             <div class="oh-sticky-table__th">{% trans "Date" %}</div>
+            <div class="oh-sticky-table__th">{% trans "Shift" %}</div>
             <div class="oh-sticky-table__th">{% trans "Check In" %}</div>
             <div class="oh-sticky-table__th">{% trans "Check Out" %}</div>
             <div class="oh-sticky-table__th">{% trans "Status" %}</div>
@@ -28,6 +29,17 @@
                 </div>
 
                 <div class="oh-sticky-table__td">{{ r.attendance_date|default:"-" }}</div>
+
+                <div class="oh-sticky-table__td">
+                  {% with s=app_shift_info|get_item:r.id %}
+                    {% if s %}
+                      <div class="fw-semibold">{{ s.name }}</div>
+                      <div class="text-muted" style="font-size: 12px;">{{ s.start }} - {{ s.end }}{% if s.flexi_minutes %} • Flexi In: {{ s.flexi_minutes }}m{% endif %}</div>
+                    {% else %}
+                      -
+                    {% endif %}
+                  {% endwith %}
+                </div>
 
                 <div class="oh-sticky-table__td">
                   {% if r.attendance_clock_in %}{{ r.attendance_clock_in }}{% else %}-{% endif %}
@@ -61,22 +73,22 @@
 
                 <div class="oh-sticky-table__td oh-sticky-table__right">
                   <div class="d-flex" style="gap: 6px; justify-content: flex-end;">
-                    <button class="oh-btn oh-btn--light-bkg"
+                    <button class="oh-btn oh-btn--light-bkg" title="{% trans 'View' %}"
                       data-toggle="oh-modal-toggle" data-target="#validateAttendanceRequest"
                       hx-get="{% url 'validate-attendance-request' r.id %}"
                       hx-target="#validateAttendanceRequestModalBody"
                       onclick="event.preventDefault()">
-                      <ion-icon name="eye-outline" class="mr-1"></ion-icon>{% trans "View" %}
+                      <ion-icon name="eye-outline"></ion-icon>
                     </button>
 
-                    <a class="oh-btn oh-btn--danger" href="{% url 'reject-validate-attendance-request' r.id %}"
+                    <a class="oh-btn oh-btn--danger" title="{% trans 'Reject' %}" href="{% url 'reject-validate-attendance-request' r.id %}"
                       onclick="return confirm('{% trans "Reject this request?" %}');">
-                      <ion-icon name="close-circle-outline" class="mr-1"></ion-icon>{% trans "Reject" %}
+                      <ion-icon name="close-circle-outline"></ion-icon>
                     </a>
 
-                    <a class="oh-btn oh-btn--success" href="{% url 'approve-validate-attendance-request' r.id %}"
+                    <a class="oh-btn oh-btn--success" title="{% trans 'Approve' %}" href="{% url 'approve-validate-attendance-request' r.id %}"
                       onclick="return confirm('{% trans "Approve this request?" %}');">
-                      <ion-icon name="checkmark-outline" class="mr-1"></ion-icon>{% trans "Approve" %}
+                      <ion-icon name="checkmark-circle-outline"></ion-icon>
                     </a>
                   </div>
                 </div>
