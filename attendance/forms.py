@@ -667,6 +667,48 @@ class AttendanceRequestForm(BaseModelForm):
         # No need to save the changes to the actual modal instance
         return super().save(False)
 
+class MultipleClearableFileInput(forms.ClearableFileInput):
+    """ClearableFileInput that allows selecting multiple files.
+
+    Django's built-in ClearableFileInput raises ValueError when `multiple` is set.
+    This subclass enables multiple selection and will return a list from
+    value_from_datadict.
+    """
+    allow_multiple_selected = True
+
+
+class MultipleFileField(forms.FileField):
+    """FileField that accepts multiple uploaded files and returns a list."""
+
+    widget = MultipleClearableFileInput
+
+    def __init__(self, *args, **kwargs):
+        # Ensure multiple selection is enabled
+        widget = kwargs.get("widget")
+        if widget is None:
+            kwargs["widget"] = MultipleClearableFileInput(attrs={"multiple": True})
+        else:
+            # force multiple attribute for provided widget
+            widget.attrs = dict(widget.attrs or {})
+            widget.attrs["multiple"] = True
+            kwargs["widget"] = widget
+        super().__init__(*args, **kwargs)
+
+    def clean(self, data, initial=None):
+        if not data:
+            return []
+        if isinstance(data, (list, tuple)):
+            cleaned = []
+            errors = []
+            for item in data:
+                try:
+                    cleaned.append(super().clean(item, initial))
+                except ValidationError as e:
+                    errors.extend(e.error_list)
+            if errors:
+                raise ValidationError(errors)
+            return cleaned
+        return [super().clean(data, initial)]
 
 class NewRequestForm(AttendanceRequestForm):
     """
@@ -688,10 +730,9 @@ class NewRequestForm(AttendanceRequestForm):
     )
 
     # Optional attachments (not a model field). API + mobile uses "files".
-    files = forms.FileField(
+    files = MultipleFileField(
         required=False,
         label=_("Attachment"),
-        widget=forms.ClearableFileInput(attrs={"multiple": True}),
         help_text=_("Optional. Upload supporting file(s)."),
     )
 
