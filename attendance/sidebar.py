@@ -22,7 +22,7 @@ SUBMENUS = [
     },
     {
         "menu": _("Attendances"),
-        "redirect": reverse("attendance-view"),
+        "redirect": reverse("attendance-employee-month-view"),
         "accessibility": "attendance.sidebar.attendances_accessibility",
     },
     {
