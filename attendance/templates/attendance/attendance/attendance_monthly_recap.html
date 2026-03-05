@@ -12,7 +12,7 @@
   /* Recap filter layout */
   .recap-filter{
     display:grid;
-    grid-template-columns: 280px 200px 1fr;
+    grid-template-columns: 280px 340px 1fr;
     gap:12px;
     align-items:end;
   }
@@ -52,6 +52,16 @@
     min-width:190px;
   }
 
+  .recap-filter__month-row{
+    display:flex;
+    gap:10px;
+    align-items:end;
+  }
+  .recap-filter__month-row input[type="month"]{
+    flex: 1 1 auto;
+    min-width: 200px;
+  }
+
 </style>
 
 <div class="oh-wrapper">
@@ -77,7 +87,10 @@
 
         <div class="oh-form-group recap-filter__month">
           <label class="oh-input__label">{% trans "Month" %}</label>
-          <input type="month" name="month" value="{{ selected_month }}" max="{{ max_month }}" class="oh-input w-100 recap-filter__control" />
+          <div class="recap-filter__month-row">
+            <input type="month" name="month" value="{{ selected_month }}" max="{{ max_month }}" class="oh-input w-100 recap-filter__control" />
+            <button class="oh-btn oh-btn--primary" type="submit">{% trans "Apply" %}</button>
+          </div>
         </div>
 
         <div class="oh-form-group recap-filter__actions">
@@ -87,8 +100,6 @@
               <option value="en" selected>English</option>
               <option value="id">Bahasa Indonesia</option>
             </select>
-
-            <button class="oh-btn oh-btn--primary" type="submit">{% trans "Apply" %}</button>
             <button type="button" id="exportPdfBtn" class="oh-btn oh-btn--secondary">Export PDF</button>
           </div>
         </div>
