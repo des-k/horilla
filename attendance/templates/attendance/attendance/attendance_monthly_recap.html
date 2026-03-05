@@ -62,6 +62,15 @@
     min-width: 200px;
   }
 
+  /* Make "No" column narrower (table + header) */
+  .monthly-recap-table .oh-sticky-table__tr > .oh-sticky-table__th:first-child,
+  .monthly-recap-table .oh-sticky-table__tr > .oh-sticky-table__td:first-child {
+    width: 55px !important;
+    max-width: 55px !important;
+    text-align: center;
+    white-space: nowrap;
+  }
+
 </style>
 
 <div class="oh-wrapper">
@@ -144,7 +153,7 @@
         });
       </script>
 
-      <div class="oh-sticky-table" style="margin-top:16px;">
+      <div class="oh-sticky-table monthly-recap-table" style="margin-top:16px;">
         <div class="oh-sticky-table__table oh-table--sortable">
           <div class="oh-sticky-table__thead">
             <div class="oh-sticky-table__tr">
