@@ -25,7 +25,9 @@ from attendance.models import (
 )
 from attendance.services.monthly_recap_note import NoteInputs, derive_note, seconds_to_hhmm
 from attendance.services.work_type_request_rules import scheduled_attendance_mode
-from attendance.views.clock_in_out import get_shift_rules, _resolve_grace_time
+# NOTE: Do NOT import from attendance.views.clock_in_out at module import time.
+# That module imports attendance.views.views, which imports this service.
+# Import lazily inside build_employee_monthly_recap() to avoid circular imports.
 from base.methods import is_holiday
 from base.models import EmployeeShiftDay
 from employee.models import Employee
@@ -168,6 +170,10 @@ class MonthlyRecapRow:
 
 def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str) -> List[MonthlyRecapRow]:
     first_day, last_day = _month_range(month_yyyy_mm)
+
+    # Lazy import to avoid circular imports during Django initialization.
+    # attendance.views.clock_in_out imports attendance.views.views, which imports this module.
+    from attendance.views.clock_in_out import get_shift_rules, _resolve_grace_time
 
     # Prefetch Attendance + Activity
     att_qs = Attendance.objects.filter(
