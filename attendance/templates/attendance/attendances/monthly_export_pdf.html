@@ -14,6 +14,8 @@
       th { background: #f2f2f2; }
       .off-row td { background: #ffd6e5; }
       .nowrap { white-space: nowrap; }
+      /* Narrow "No" column */
+      .col-no { width: 32px; text-align: center; }
     </style>
   </head>
   <body>
@@ -36,7 +38,7 @@
       <thead>
         <tr>
           {% if lang == 'id' %}
-            <th class="nowrap">No</th>
+            <th class="nowrap col-no">No</th>
             <th class="nowrap">Tanggal</th>
             <th>Informasi Shift</th>
             <th class="nowrap">Jam Datang</th>
@@ -46,7 +48,7 @@
             <th class="nowrap">Pulang Cepat</th>
             <th>Keterangan</th>
           {% else %}
-            <th class="nowrap">No</th>
+            <th class="nowrap col-no">No</th>
             <th class="nowrap">Date</th>
             <th>Shift Information</th>
             <th class="nowrap">Check In</th>
@@ -61,7 +63,7 @@
       <tbody>
         {% for r in rows %}
           <tr class="{% if r.is_off %}off-row{% endif %}">
-            <td class="nowrap">{{ r.no }}</td>
+            <td class="nowrap col-no">{{ r.no }}</td>
             <td class="nowrap">{{ r.attendance_date|date:"d-m-Y" }}</td>
             <td>{{ r.shift_information }}</td>
             <td class="nowrap">{{ r.check_in }}</td>
