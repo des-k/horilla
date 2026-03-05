@@ -12,7 +12,7 @@
   /* Recap filter layout */
   .recap-filter{
     display:grid;
-    grid-template-columns: minmax(320px, 1fr) 200px auto;
+    grid-template-columns: 280px 200px 1fr;
     gap:12px;
     align-items:end;
   }
@@ -39,6 +39,17 @@
   }
   .recap-filter .select2-container--default .select2-selection--single .select2-selection__arrow{
     height:45px !important;
+  }
+
+  .recap-filter__actions-row{
+    display:flex;
+    gap:10px;
+    align-items:end;
+    flex-wrap:wrap;
+  }
+  .recap-filter__actions-row .oh-select{
+    height:45px;
+    min-width:190px;
   }
 
 </style>
@@ -69,20 +80,19 @@
           <input type="month" name="month" value="{{ selected_month }}" max="{{ max_month }}" class="oh-input w-100 recap-filter__control" />
         </div>
 
-        <div class="oh-form-group recap-filter__submit">
-          <button class="oh-btn oh-btn--primary" type="submit">{% trans "Apply" %}</button>
+        <div class="oh-form-group recap-filter__actions">
+          <label class="oh-input__label">Export PDF</label>
+          <div class="recap-filter__actions-row">
+            <select id="exportPdfLang" class="oh-select">
+              <option value="en" selected>English</option>
+              <option value="id">Bahasa Indonesia</option>
+            </select>
+
+            <button class="oh-btn oh-btn--primary" type="submit">{% trans "Apply" %}</button>
+            <button type="button" id="exportPdfBtn" class="oh-btn oh-btn--secondary">Export PDF</button>
+          </div>
         </div>
       </form>
-
-      <div style="display:flex; gap:10px; align-items:center; justify-content:flex-end; margin-top:14px; flex-wrap:wrap;">
-        <label for="exportPdfLang" class="oh-input__label" style="margin:0;">{% trans "Language" %}</label>
-        <select id="exportPdfLang" class="oh-select" style="height:45px; min-width: 190px;">
-          <option value="en" selected>English</option>
-          <option value="id">Bahasa Indonesia</option>
-        </select>
-
-        <button type="button" id="exportPdfBtn" class="oh-btn oh-btn--secondary">Export PDF</button>
-      </div>
 
       <script>
         // Ensure Select2 is enabled on this page even though we don't include the legacy nav/topbar.
