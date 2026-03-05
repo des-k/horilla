@@ -316,15 +316,27 @@ def attendance_employee_month_export_pdf(request):
     }
 
     filename = f"monthly_attendance_{employee.id}_{month}_{lang}.pdf"
-    response = generate_pdf(
+
+    # Render template to HTML and convert to PDF using xhtml2pdf (pure-Python, no wkhtmltopdf dependency)
+    html_content = render_to_string(
         "attendance/attendances/monthly_export_pdf.html",
         context,
-        html=False,
-        title=filename,
+        request=request,
     )
-    # Ensure download + filename
+
+    try:
+        from xhtml2pdf import pisa
+    except Exception as e:
+        return HttpResponse(f"Error generating PDF: {str(e)}", status=500)
+
+    result = io.BytesIO()
+    pdf_status = pisa.CreatePDF(src=html_content, dest=result, encoding="UTF-8")
+
+    if pdf_status.err:
+        return HttpResponse("Error generating PDF", status=500)
+
+    response = HttpResponse(result.getvalue(), content_type="application/pdf")
     response["Content-Disposition"] = f'attachment; filename="{filename}"'
-    response["Content-Type"] = "application/pdf"
     return response
 
 
