@@ -16,6 +16,8 @@
       .nowrap { white-space: nowrap; }
       /* Narrow "No" column */
       .col-no { width: 32px; text-align: center; }
+      /* Center common value columns */
+      .col-center { text-align: center; }
     </style>
   </head>
   <body>
@@ -41,21 +43,21 @@
             <th class="nowrap col-no">No</th>
             <th class="nowrap">Tanggal</th>
             <th>Informasi Shift</th>
-            <th class="nowrap">Jam Datang</th>
-            <th class="nowrap">Jam Pulang</th>
-            <th>Tipe Kerja</th>
-            <th class="nowrap">Terlambat</th>
-            <th class="nowrap">Pulang Cepat</th>
+            <th class="nowrap col-center">Jam Datang</th>
+            <th class="nowrap col-center">Jam Pulang</th>
+            <th class="col-center">Tipe Kerja</th>
+            <th class="nowrap col-center">Terlambat</th>
+            <th class="nowrap col-center">Pulang Cepat</th>
             <th>Keterangan</th>
           {% else %}
             <th class="nowrap col-no">No</th>
             <th class="nowrap">Date</th>
             <th>Shift Information</th>
-            <th class="nowrap">Check In</th>
-            <th class="nowrap">Check Out</th>
-            <th>Work Type</th>
-            <th class="nowrap">Late</th>
-            <th class="nowrap">Early Out</th>
+            <th class="nowrap col-center">Check In</th>
+            <th class="nowrap col-center">Check Out</th>
+            <th class="col-center">Work Type</th>
+            <th class="nowrap col-center">Late</th>
+            <th class="nowrap col-center">Early Out</th>
             <th>Note</th>
           {% endif %}
         </tr>
@@ -66,11 +68,11 @@
             <td class="nowrap col-no">{{ r.no }}</td>
             <td class="nowrap">{{ r.attendance_date|date:"d-m-Y" }}</td>
             <td>{{ r.shift_information }}</td>
-            <td class="nowrap">{{ r.check_in }}</td>
-            <td class="nowrap">{{ r.check_out }}</td>
-            <td>{{ r.work_type|safe }}</td>
-            <td class="nowrap">{{ r.late }}</td>
-            <td class="nowrap">{{ r.early_out }}</td>
+            <td class="nowrap col-center">{{ r.check_in }}</td>
+            <td class="nowrap col-center">{{ r.check_out }}</td>
+            <td class="col-center">{{ r.work_type|safe }}</td>
+            <td class="nowrap col-center">{{ r.late }}</td>
+            <td class="nowrap col-center">{{ r.early_out }}</td>
             <td>{{ r.note }}</td>
           </tr>
         {% empty %}
