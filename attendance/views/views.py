@@ -177,6 +177,11 @@ def attendance_employee_month_view(request):
     except Exception:
         month = django_timezone.localdate().strftime("%Y-%m")
 
+    # Disallow future months (UI also limits selection).
+    current_month = django_timezone.localdate().strftime("%Y-%m")
+    if month > current_month:
+        month = current_month
+
     # Resolve employee
     emp_id = request.GET.get("employee_id") or request.GET.get("employee")
     selected_employee = None
@@ -204,6 +209,7 @@ def attendance_employee_month_view(request):
         "employees": employees_qs,
         "selected_employee": selected_employee,
         "selected_month": month,
+        "max_month": current_month,
         "rows": rows,
     }
     return render(
