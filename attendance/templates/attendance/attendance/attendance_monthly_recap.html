@@ -74,6 +74,16 @@
         </div>
       </form>
 
+      <div style="display:flex; gap:10px; align-items:center; justify-content:flex-end; margin-top:14px; flex-wrap:wrap;">
+        <label for="exportPdfLang" class="oh-input__label" style="margin:0;">{% trans "Language" %}</label>
+        <select id="exportPdfLang" class="oh-select" style="height:45px; min-width: 190px;">
+          <option value="en" selected>English</option>
+          <option value="id">Bahasa Indonesia</option>
+        </select>
+
+        <button type="button" id="exportPdfBtn" class="oh-btn oh-btn--secondary">Export PDF</button>
+      </div>
+
       <script>
         // Ensure Select2 is enabled on this page even though we don't include the legacy nav/topbar.
         $(document).ready(function () {
@@ -94,6 +104,21 @@
 
           $emp.select2({
             width: '100%'
+          });
+
+          // Export PDF
+          $(document).on('click', '#exportPdfBtn', function () {
+            var empId = $('#employeeSelect').val();
+            var month = $('input[name="month"]').val();
+            var lang = $('#exportPdfLang').val() || 'en';
+            if (!empId || !month) return;
+
+            var url = "{% url 'attendance-employee-month-export-pdf' %}" +
+              "?employee_id=" + encodeURIComponent(empId) +
+              "&month=" + encodeURIComponent(month) +
+              "&lang=" + encodeURIComponent(lang);
+
+            window.open(url, '_blank');
           });
         });
       </script>
