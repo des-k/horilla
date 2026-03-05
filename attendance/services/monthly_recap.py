@@ -509,13 +509,17 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str) -> L
         late_txt = seconds_to_hhmm(late_sec)
         early_txt = seconds_to_hhmm(early_sec)
 
-        # Shift information (simple: Start - End)
+        # Shift information: Start - End + Flexi In minutes
+        # Flexi In follows the same resolution as grace_in_sec (schedule grace time > shift grace time > default)
         shift_info = "—"
         try:
             st = rules.get("start_time")
             et = rules.get("end_time")
             if st and et:
                 shift_info = f"{st.strftime('%H:%M')} - {et.strftime('%H:%M')}"
+                # Always show flexi info (0m is meaningful: no flex window)
+                flexi_min = int((grace_in_sec or 0) // 60)
+                shift_info += f" • Flexi In: {flexi_min}m"
         except Exception:
             shift_info = "—"
 
