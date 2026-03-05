@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Dict, Iterable, List, Optional, Tuple
 
+from django.conf import settings
 from django.db.models import Q
 from django.utils import timezone
 
@@ -61,11 +62,37 @@ def _combine_dt(d: Optional[date], t, fallback_date: date) -> Optional[datetime]
         return None
 
 
+def _normalize_dt(dt_obj: Optional[datetime], tzinfo=None) -> Optional[datetime]:
+    """Normalize datetimes to avoid naive/aware arithmetic errors.
+
+    In Horilla we can get:
+    - naive datetimes from datetime.combine(DateField, TimeField)
+    - aware datetimes from DateTimeField / timezone utilities
+
+    This function normalizes based on Django settings.USE_TZ.
+    """
+
+    if dt_obj is None:
+        return None
+
+    if getattr(settings, "USE_TZ", False):
+        if timezone.is_aware(dt_obj):
+            return timezone.localtime(dt_obj)
+        tz = tzinfo or timezone.get_current_timezone()
+        return timezone.make_aware(dt_obj, tz)
+
+    # USE_TZ is False
+    if timezone.is_aware(dt_obj):
+        return timezone.make_naive(dt_obj, timezone.get_current_timezone())
+    return dt_obj
+
+
 def _format_punch(dt: Optional[datetime], attendance_date: date) -> str:
     if not dt:
         return "—"
-    suffix = " D+1" if dt.date() > attendance_date else ""
-    return dt.strftime("%H:%M") + suffix
+    dt_local = _normalize_dt(dt)
+    suffix = " D+1" if dt_local.date() > attendance_date else ""
+    return dt_local.strftime("%H:%M") + suffix
 
 
 def _work_mode_label(mode: str) -> str:
@@ -265,18 +292,18 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str) -> L
         for a in att_list:
             dt_in = _combine_dt(getattr(a, "attendance_clock_in_date", None), getattr(a, "attendance_clock_in", None), a.attendance_date)
             if dt_in:
-                in_dts.append(dt_in)
+                in_dts.append(_normalize_dt(dt_in))
             dt_out = _combine_dt(getattr(a, "attendance_clock_out_date", None), getattr(a, "attendance_clock_out", None), a.attendance_date)
             if dt_out:
-                out_dts.append(dt_out)
+                out_dts.append(_normalize_dt(dt_out))
 
         for ac in act_list:
             dt_in = getattr(ac, "in_datetime", None) or _combine_dt(getattr(ac, "clock_in_date", None), getattr(ac, "clock_in", None), ac.attendance_date)
             if dt_in:
-                in_dts.append(dt_in)
+                in_dts.append(_normalize_dt(dt_in))
             dt_out = getattr(ac, "out_datetime", None) or _combine_dt(getattr(ac, "clock_out_date", None), getattr(ac, "clock_out", None), ac.attendance_date)
             if dt_out:
-                out_dts.append(dt_out)
+                out_dts.append(_normalize_dt(dt_out))
 
         final_in_dt = min(in_dts) if in_dts else None
         final_out_dt = max(out_dts) if out_dts else None
@@ -298,6 +325,18 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str) -> L
         shift_end_dt = rules.get("shift_end_dt")
         cutoff_in_dt = rules.get("cutoff_in_dt") or rules.get("check_in_window_end_dt")
         grace_in_sec = int(rules.get("grace_seconds") or 0)
+
+        # Ensure all datetimes are comparable (avoid naive/aware subtraction errors)
+        tzinfo = None
+        for cand in (shift_start_dt, shift_end_dt, cutoff_in_dt, final_in_dt, final_out_dt):
+            if cand and timezone.is_aware(cand):
+                tzinfo = cand.tzinfo
+                break
+        shift_start_dt = _normalize_dt(shift_start_dt, tzinfo)
+        shift_end_dt = _normalize_dt(shift_end_dt, tzinfo)
+        cutoff_in_dt = _normalize_dt(cutoff_in_dt, tzinfo)
+        final_in_dt = _normalize_dt(final_in_dt, tzinfo)
+        final_out_dt = _normalize_dt(final_out_dt, tzinfo)
 
         grace_out_sec = 0
         try:
