@@ -48,6 +48,11 @@ urlpatterns = [
         name="attendance-employee-month-view",
     ),
     path(
+        "attendances-recap/export-pdf/",
+        views.attendance_employee_month_export_pdf,
+        name="attendance-employee-month-export-pdf",
+    ),
+    path(
         "attendance-search",
         attendance.views.search.attendance_search,
         name="attendance-search",
