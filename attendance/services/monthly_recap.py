@@ -198,6 +198,18 @@ class MonthlyRecapRow:
 def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str) -> List[MonthlyRecapRow]:
     first_day, last_day = _month_range(month_yyyy_mm)
 
+    # Guardrail: do not generate rows for future dates.
+    # - If current month: show up to today only.
+    # - If future month: clamp to current month up to today.
+    today = timezone.localdate()
+    this_month_first = date(today.year, today.month, 1)
+    if first_day > this_month_first:
+        first_day = this_month_first
+        last_day = today
+    elif first_day.year == today.year and first_day.month == today.month:
+        if last_day > today:
+            last_day = today
+
     # Lazy import to avoid circular imports during Django initialization.
     # attendance.views.clock_in_out imports attendance.views.views, which imports this module.
     from attendance.views.clock_in_out import get_shift_rules, _resolve_grace_time
@@ -321,6 +333,31 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str) -> L
         day_obj = day_objs.get(weekday_key)
 
         rules = get_shift_rules(d, shift, day_obj)
+
+        # If there is no work schedule for the day, treat it as OFF (Holiday/Off)
+        # instead of Alpha (unless there are actual punches).
+        schedule_obj = rules.get("schedule")
+        if (shift is None or schedule_obj is None or not rules.get("start_time") or not rules.get("end_time")) and (
+            final_in_dt is None and final_out_dt is None
+        ):
+            shift_info = "Holiday/Off"
+            note = derive_note(NoteInputs(is_off=True, off_kind="holiday"))
+            rows.append(
+                MonthlyRecapRow(
+                    no=i,
+                    attendance_date=d,
+                    shift_information=shift_info,
+                    check_in="—",
+                    check_out="—",
+                    work_type="—",
+                    late="00:00",
+                    early_out="00:00",
+                    note=note,
+                    is_off=True,
+                )
+            )
+            i += 1
+            continue
         shift_start_dt = rules.get("shift_start_dt")
         shift_end_dt = rules.get("shift_end_dt")
         cutoff_in_dt = rules.get("cutoff_in_dt") or rules.get("check_in_window_end_dt")
