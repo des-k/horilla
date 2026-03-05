@@ -3,7 +3,10 @@
 {% load i18n %}
 {% load static %}
 
-{% include 'attendance/attendance/attendance_nav.html' %}
+{# Monthly recap uses its own filter form below.
+   We intentionally do NOT include attendance_nav.html here because it renders
+   the legacy topbar (Search/Filter/Group By/Actions) that is not needed on
+   this page. #}
 
 <style>
   .monthly-off-row {
@@ -19,9 +22,11 @@
 
     <div class="oh-card__body">
       <form method="get" class="oh-form" style="display:flex; gap:12px; flex-wrap:wrap; align-items:end;">
-        <div class="oh-form-group" style="min-width:260px;">
+        <div class="oh-form-group" style="min-width:320px;">
           <label class="oh-input__label">{% trans "Employee" %}</label>
-          <select name="employee_id" class="oh-select">
+
+          {# Select2 (already shipped in index.html via build/js/htmxSelect2.js) #}
+          <select name="employee_id" id="employeeSelect" class="oh-select oh-select2 w-100" style="height:45px;">
             {% for emp in employees %}
               <option value="{{ emp.id }}" {% if selected_employee and emp.id == selected_employee.id %}selected{% endif %}>
                 {{ emp }}
@@ -39,6 +44,30 @@
           <button class="oh-btn oh-btn--primary" type="submit">{% trans "Apply" %}</button>
         </div>
       </form>
+
+      <script>
+        // Ensure Select2 is enabled on this page even though we don't include the legacy nav/topbar.
+        $(document).ready(function () {
+          var $emp = $("#employeeSelect");
+          if (!$emp.length) return;
+          if (!(window.jQuery && $.fn && $.fn.select2)) return;
+
+          try {
+            if ($emp.data('select2')) {
+              $emp.select2('destroy');
+            }
+          } catch (e) {
+            // ignore
+          }
+
+          // Remove any stale containers (in case of browser back/forward cache).
+          $emp.parent().find('span.select2').remove();
+
+          $emp.select2({
+            width: '100%'
+          });
+        });
+      </script>
 
       <div class="oh-sticky-table" style="margin-top:16px;">
         <div class="oh-sticky-table__table oh-table--sortable">
