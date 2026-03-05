@@ -278,13 +278,30 @@ def attendance_employee_month_export_pdf(request):
     if lang == "id":
         for r in rows:
             try:
-                if getattr(r, "shift_information", None):
-                    r.shift_information = r.shift_information.replace("Flexi In", "Waktu Fleksibel")
+                # Shift Information: translate labels/keywords only
+                shift_info = getattr(r, "shift_information", None)
+                if isinstance(shift_info, str) and shift_info:
+                    shift_info = (
+                        shift_info.replace("Flexi In", "Waktu Fleksibel")
+                                 .replace("Holiday/Off", "Libur")
+                                 .replace("On Leave", "Cuti")
+                    )
+                    r.shift_information = shift_info
+
+                # Note/Keterangan: translate keywords only (do not touch Work Type)
+                note = getattr(r, "note", None)
+                if isinstance(note, str) and note:
+                    note = (
+                        note.replace("Holiday/Off", "Libur")
+                            .replace("On Leave", "Cuti")
+                    )
+                    r.note = note
             except Exception:
                 # Keep row as-is if anything unexpected happens.
                 pass
 
-    # Header month display
+
+# Header month display
     if lang == "id":
         month_names_id = [
             "Januari",
