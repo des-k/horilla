@@ -109,6 +109,7 @@ from base.methods import (
     export_data,
     filtersubordinates,
     filtersubordinatesemployeemodel,
+    generate_pdf,
     get_key_instances,
     get_pagination,
 )
@@ -130,7 +131,7 @@ from horilla.decorators import (
 from notifications.signals import notify
 
 # Monthly recap (Attendance → Attendances)
-from attendance.services.monthly_recap import build_employee_monthly_recap
+from attendance.services.monthly_recap import get_monthly_attendance_rows
 
 
 def attendance_validate(attendance):
@@ -203,7 +204,7 @@ def attendance_employee_month_view(request):
 
     rows = []
     if selected_employee:
-        rows = build_employee_monthly_recap(employee=selected_employee, month_yyyy_mm=month)
+        rows = get_monthly_attendance_rows(selected_employee, month)
 
     context = {
         "employees": employees_qs,
@@ -217,6 +218,114 @@ def attendance_employee_month_view(request):
         "attendance/attendance/attendance_monthly_recap.html",
         context,
     )
+
+
+@login_required
+@manager_can_enter("attendance.view_attendance")
+def attendance_employee_month_export_pdf(request):
+    """Export Attendance → Attendances (Monthly recap) as PDF.
+
+    Query params (GET):
+      - employee_id (required)
+      - month (YYYY-MM, required)
+      - lang (optional: en|id, default: en)
+    """
+
+    # Allowed employees list (same access control as the UI)
+    employees_qs = Employee.objects.filter(is_active=True).select_related("employee_work_info")
+    employees_qs = filtersubordinatesemployeemodel(
+        request, employees_qs, perm="attendance.view_attendance"
+    )
+
+    emp_id = request.GET.get("employee_id")
+    month = request.GET.get("month")
+    lang = (request.GET.get("lang") or "en").strip().lower()
+    if lang not in ("en", "id"):
+        lang = "en"
+
+    if not emp_id or not month:
+        return HttpResponseBadRequest("employee_id and month are required")
+
+    # Validate month
+    try:
+        if len(month) != 7 or month[4] != "-":
+            raise ValueError
+        year = int(month[:4])
+        month_no = int(month[5:7])
+        if month_no < 1 or month_no > 12:
+            raise ValueError
+    except Exception:
+        return HttpResponseBadRequest("Invalid month format. Expected YYYY-MM")
+
+    # Disallow future months (keep output aligned with UI)
+    current_month = django_timezone.localdate().strftime("%Y-%m")
+    if month > current_month:
+        month = current_month
+        year = int(month[:4])
+        month_no = int(month[5:7])
+
+    # Resolve employee within allowed queryset
+    try:
+        employee = employees_qs.filter(id=int(emp_id)).first()
+    except Exception:
+        employee = None
+    if employee is None:
+        return HttpResponseBadRequest("Invalid employee_id")
+
+    rows = get_monthly_attendance_rows(employee, month)
+
+    # Indonesian tweaks (labels only; data stays the same as UI)
+    if lang == "id":
+        for r in rows:
+            try:
+                if getattr(r, "shift_information", None):
+                    r.shift_information = r.shift_information.replace("Flexi In", "Waktu Fleksibel")
+            except Exception:
+                # Keep row as-is if anything unexpected happens.
+                pass
+
+    # Header month display
+    if lang == "id":
+        month_names_id = [
+            "Januari",
+            "Februari",
+            "Maret",
+            "April",
+            "Mei",
+            "Juni",
+            "Juli",
+            "Agustus",
+            "September",
+            "Oktober",
+            "November",
+            "Desember",
+        ]
+        month_display = month_names_id[month_no - 1]
+        title = "Rekap Absensi Bulanan"
+    else:
+        month_display = calendar.month_name[month_no]
+        title = "Monthly Attendance Report"
+
+    context = {
+        "lang": lang,
+        "title": title,
+        "employee": employee,
+        "month_display": month_display,
+        "year": year,
+        "rows": rows,
+    }
+
+    filename = f"monthly_attendance_{employee.id}_{month}_{lang}.pdf"
+    response = generate_pdf(
+        "attendance/attendances/monthly_export_pdf.html",
+        context,
+        html=False,
+        title=filename,
+    )
+    # Ensure download + filename
+    response["Content-Disposition"] = f'attachment; filename="{filename}"'
+    response["Content-Type"] = "application/pdf"
+    return response
 
 
 @login_required
