@@ -274,34 +274,39 @@ def attendance_employee_month_export_pdf(request):
 
     rows = get_monthly_attendance_rows(employee, month)
 
-    # Indonesian tweaks (labels only; data stays the same as UI)
+    # Indonesian tweaks (labels only; do not touch Work Type)
     if lang == "id":
         for r in rows:
             try:
-                # Shift Information: translate labels/keywords only
+                # Shift Information
                 shift_info = getattr(r, "shift_information", None)
                 if isinstance(shift_info, str) and shift_info:
                     shift_info = (
                         shift_info.replace("Flexi In", "Waktu Fleksibel")
                                  .replace("Holiday/Off", "Libur")
+                                 .replace("Holiday", "Libur")
                                  .replace("On Leave", "Cuti")
                     )
                     r.shift_information = shift_info
 
-                # Note/Keterangan: translate keywords only (do not touch Work Type)
+                # Note/Keterangan
                 note = getattr(r, "note", None)
                 if isinstance(note, str) and note:
                     note = (
                         note.replace("Holiday/Off", "Libur")
+                            .replace("Holiday / Off", "Libur")
+                            .replace("Holiday/ Off", "Libur")
+                            .replace("Holiday /Off", "Libur")
+                            .replace("Holiday", "Libur")
                             .replace("On Leave", "Cuti")
+                            .replace("Alpha", "Alpa")
                     )
                     r.note = note
             except Exception:
                 # Keep row as-is if anything unexpected happens.
                 pass
 
-
-# Header month display
+    # Header month display
     if lang == "id":
         month_names_id = [
             "Januari",
@@ -334,31 +339,28 @@ def attendance_employee_month_export_pdf(request):
 
     filename = f"monthly_attendance_{employee.id}_{month}_{lang}.pdf"
 
-    # Render template to HTML and convert to PDF using xhtml2pdf (pure-Python, no wkhtmltopdf dependency)
-    html_content = render_to_string(
-        "attendance/attendances/monthly_export_pdf.html",
-        context,
-        request=request,
-    )
-
+    # Render PDF using the existing Horilla engine (xhtml2pdf / pisa)
     try:
         from xhtml2pdf import pisa
+
+        html_content = render_to_string(
+            "attendance/attendances/monthly_export_pdf.html", context
+        )
+
+        result = io.BytesIO()
+        pdf_status = pisa.CreatePDF(src=html_content, dest=result)
+
+        if pdf_status.err:
+            logger.error("Error creating PDF (monthly attendance export)")
+            return HttpResponse("Error generating PDF", status=500)
+
+        response = HttpResponse(result.getvalue(), content_type="application/pdf")
+        response["Content-Disposition"] = f'attachment; filename="{filename}"'
+        return response
     except Exception as e:
+        logger.exception("Error generating PDF (monthly attendance export)")
         return HttpResponse(f"Error generating PDF: {str(e)}", status=500)
 
-    result = io.BytesIO()
-    pdf_status = pisa.CreatePDF(src=html_content, dest=result, encoding="UTF-8")
-
-    if pdf_status.err:
-        return HttpResponse("Error generating PDF", status=500)
-
-    response = HttpResponse(result.getvalue(), content_type="application/pdf")
-    response["Content-Disposition"] = f'attachment; filename="{filename}"'
-    return response
-
-
-@login_required
-@hx_request_required
 def profile_attendance_tab(request):
     """
     This function is used to view attendance tab of an employee in profile view.
