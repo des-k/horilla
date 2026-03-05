@@ -129,6 +129,9 @@ from horilla.decorators import (
 )
 from notifications.signals import notify
 
+# Monthly recap (Attendance → Attendances)
+from attendance.services.monthly_recap import build_employee_monthly_recap
+
 
 def attendance_validate(attendance):
     """
@@ -145,6 +148,69 @@ def attendance_validate(attendance):
         condition_for_at_work = strtime_seconds(conditions[0].validation_at_work)
     at_work = strtime_seconds(attendance.attendance_worked_hour)
     return condition_for_at_work >= at_work
+
+
+@login_required
+@manager_can_enter("attendance.view_attendance")
+def attendance_employee_month_view(request):
+    """Attendance → Attendances: Monthly recap per employee.
+
+    Filters (GET):
+      - employee_id (or employee)
+      - month in YYYY-MM
+    """
+
+    # Allowed employees list
+    employees_qs = Employee.objects.filter(is_active=True).select_related("employee_work_info")
+    employees_qs = filtersubordinatesemployeemodel(
+        request, employees_qs, perm="attendance.view_attendance"
+    )
+
+    # Resolve month
+    month = request.GET.get("month") or django_timezone.localdate().strftime("%Y-%m")
+    # Basic guard: fallback to current month if malformed
+    try:
+        if len(month) != 7 or month[4] != "-":
+            raise ValueError
+        int(month[:4])
+        int(month[5:7])
+    except Exception:
+        month = django_timezone.localdate().strftime("%Y-%m")
+
+    # Resolve employee
+    emp_id = request.GET.get("employee_id") or request.GET.get("employee")
+    selected_employee = None
+    if emp_id:
+        try:
+            selected_employee = employees_qs.filter(id=int(emp_id)).first()
+        except Exception:
+            selected_employee = None
+
+    if selected_employee is None:
+        # default to self if possible
+        try:
+            me = request.user.employee_get
+            selected_employee = (
+                employees_qs.filter(id=me.id).first() if me else None
+            ) or employees_qs.first()
+        except Exception:
+            selected_employee = employees_qs.first()
+
+    rows = []
+    if selected_employee:
+        rows = build_employee_monthly_recap(employee=selected_employee, month_yyyy_mm=month)
+
+    context = {
+        "employees": employees_qs,
+        "selected_employee": selected_employee,
+        "selected_month": month,
+        "rows": rows,
+    }
+    return render(
+        request,
+        "attendance/attendance/attendance_monthly_recap.html",
+        context,
+    )
 
 
 @login_required
