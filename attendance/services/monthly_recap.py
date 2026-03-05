@@ -560,3 +560,24 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str) -> L
         i += 1
 
     return rows
+
+
+# ---------------------------------------------------------------------------
+# Public helper (shared)
+# ---------------------------------------------------------------------------
+def get_monthly_attendance_rows(employee: Employee, month: str, **kwargs) -> List[MonthlyRecapRow]:
+    """Shared helper for Attendance → Attendances monthly recap rows.
+
+    This helper is intentionally thin and returns the **same row structure**
+    consumed by the monthly recap UI.
+
+    Args:
+        employee: Employee instance.
+        month: Month in YYYY-MM.
+        **kwargs: Reserved for future use.
+
+    Returns:
+        List[MonthlyRecapRow]
+    """
+    # kwargs is reserved for compatibility with callers that may pass extra flags.
+    return build_employee_monthly_recap(employee=employee, month_yyyy_mm=month)
