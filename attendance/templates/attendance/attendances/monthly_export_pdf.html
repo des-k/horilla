@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="{{ lang|default:'en' }}">
+  <head>
+    <meta charset="utf-8" />
+    <title>{{ title }}</title>
+    <style>
+      /* Keep styling lightweight and wkhtmltopdf-friendly */
+      body { font-size: 12px; }
+      h2 { margin: 0 0 10px 0; }
+      .meta { margin: 0 0 6px 0; }
+      .meta strong { display:inline-block; min-width: 110px; }
+      table { width: 100%; border-collapse: collapse; }
+      th, td { border: 1px solid #999; padding: 6px 6px; vertical-align: top; }
+      th { background: #f2f2f2; }
+      .off-row td { background: #ffd6e5; }
+      .nowrap { white-space: nowrap; }
+    </style>
+  </head>
+  <body>
+    {# Header PDF (ONLY) #}
+    <h2>{{ title }}</h2>
+
+    {% if lang == 'id' %}
+      <p class="meta"><strong>Pegawai:</strong> {{ employee }}</p>
+      <p class="meta"><strong>Bulan:</strong> {{ month_display }}</p>
+      <p class="meta"><strong>Tahun:</strong> {{ year }}</p>
+    {% else %}
+      <p class="meta"><strong>Employee:</strong> {{ employee }}</p>
+      <p class="meta"><strong>Month:</strong> {{ month_display }}</p>
+      <p class="meta"><strong>Year:</strong> {{ year }}</p>
+    {% endif %}
+
+    <hr />
+
+    <table>
+      <thead>
+        <tr>
+          {% if lang == 'id' %}
+            <th class="nowrap">No</th>
+            <th class="nowrap">Tanggal</th>
+            <th>Informasi Shift</th>
+            <th class="nowrap">Jam Datang</th>
+            <th class="nowrap">Jam Pulang</th>
+            <th>Tipe Kerja</th>
+            <th class="nowrap">Terlambat</th>
+            <th class="nowrap">Pulang Cepat</th>
+            <th>Keterangan</th>
+          {% else %}
+            <th class="nowrap">No</th>
+            <th class="nowrap">Date</th>
+            <th>Shift Information</th>
+            <th class="nowrap">Check In</th>
+            <th class="nowrap">Check Out</th>
+            <th>Work Type</th>
+            <th class="nowrap">Late</th>
+            <th class="nowrap">Early Out</th>
+            <th>Note</th>
+          {% endif %}
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in rows %}
+          <tr class="{% if r.is_off %}off-row{% endif %}">
+            <td class="nowrap">{{ r.no }}</td>
+            <td class="nowrap">{{ r.attendance_date|date:"d-m-Y" }}</td>
+            <td>{{ r.shift_information }}</td>
+            <td class="nowrap">{{ r.check_in }}</td>
+            <td class="nowrap">{{ r.check_out }}</td>
+            <td>{{ r.work_type|safe }}</td>
+            <td class="nowrap">{{ r.late }}</td>
+            <td class="nowrap">{{ r.early_out }}</td>
+            <td>{{ r.note }}</td>
+          </tr>
+        {% empty %}
+          <tr>
+            <td colspan="9">No data</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </body>
+</html>
