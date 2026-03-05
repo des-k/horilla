@@ -296,29 +296,41 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str) -> L
         att_list = att_by_date.get(d, [])
         act_list = act_by_date.get(d, [])
         best_att = _pick_best_attendance(att_list)
-
-        # Merge punches from all sources
-        in_dts: List[datetime] = []
-        out_dts: List[datetime] = []
+        # Collect punches from all sources first (we will apply window filtering later)
+        in_dts_raw: List[datetime] = []
+        out_dts_raw: List[datetime] = []
 
         for a in att_list:
-            dt_in = _combine_dt(getattr(a, "attendance_clock_in_date", None), getattr(a, "attendance_clock_in", None), a.attendance_date)
+            dt_in = _combine_dt(
+                getattr(a, "attendance_clock_in_date", None),
+                getattr(a, "attendance_clock_in", None),
+                a.attendance_date,
+            )
             if dt_in:
-                in_dts.append(_normalize_dt(dt_in))
-            dt_out = _combine_dt(getattr(a, "attendance_clock_out_date", None), getattr(a, "attendance_clock_out", None), a.attendance_date)
+                in_dts_raw.append(_normalize_dt(dt_in))
+            dt_out = _combine_dt(
+                getattr(a, "attendance_clock_out_date", None),
+                getattr(a, "attendance_clock_out", None),
+                a.attendance_date,
+            )
             if dt_out:
-                out_dts.append(_normalize_dt(dt_out))
+                out_dts_raw.append(_normalize_dt(dt_out))
 
         for ac in act_list:
-            dt_in = getattr(ac, "in_datetime", None) or _combine_dt(getattr(ac, "clock_in_date", None), getattr(ac, "clock_in", None), ac.attendance_date)
+            dt_in = getattr(ac, "in_datetime", None) or _combine_dt(
+                getattr(ac, "clock_in_date", None),
+                getattr(ac, "clock_in", None),
+                ac.attendance_date,
+            )
             if dt_in:
-                in_dts.append(_normalize_dt(dt_in))
-            dt_out = getattr(ac, "out_datetime", None) or _combine_dt(getattr(ac, "clock_out_date", None), getattr(ac, "clock_out", None), ac.attendance_date)
+                in_dts_raw.append(_normalize_dt(dt_in))
+            dt_out = getattr(ac, "out_datetime", None) or _combine_dt(
+                getattr(ac, "clock_out_date", None),
+                getattr(ac, "clock_out", None),
+                ac.attendance_date,
+            )
             if dt_out:
-                out_dts.append(_normalize_dt(dt_out))
-
-        final_in_dt = min(in_dts) if in_dts else None
-        final_out_dt = max(out_dts) if out_dts else None
+                out_dts_raw.append(_normalize_dt(dt_out))
 
         # Shift + rules
         shift = None
@@ -333,9 +345,66 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str) -> L
         day_obj = day_objs.get(weekday_key)
 
         rules = get_shift_rules(d, shift, day_obj)
+        # Windows (check-in / check-out)
+        check_in_window_start_dt = rules.get("check_in_window_start_dt")
+        check_in_window_end_dt = rules.get("check_in_window_end_dt")
+        check_out_window_start_dt = rules.get("check_out_window_start_dt")
+        check_out_window_end_dt = rules.get("check_out_window_end_dt")
+
+        # Normalize all datetimes to the same aware/naive style (avoid naive/aware subtraction errors)
+        tzinfo = None
+        for cand in (
+            rules.get("shift_start_dt"),
+            rules.get("shift_end_dt"),
+            rules.get("cutoff_in_dt"),
+            rules.get("cutoff_out_dt"),
+            check_in_window_start_dt,
+            check_in_window_end_dt,
+            check_out_window_start_dt,
+            check_out_window_end_dt,
+            *(in_dts_raw or []),
+            *(out_dts_raw or []),
+        ):
+            if cand and timezone.is_aware(cand):
+                tzinfo = cand.tzinfo
+                break
+
+        check_in_window_start_dt = _normalize_dt(check_in_window_start_dt, tzinfo)
+        check_in_window_end_dt = _normalize_dt(check_in_window_end_dt, tzinfo)
+        check_out_window_start_dt = _normalize_dt(check_out_window_start_dt, tzinfo)
+        check_out_window_end_dt = _normalize_dt(check_out_window_end_dt, tzinfo)
+
+        def _within_window(dt_obj: datetime, start: Optional[datetime], end: Optional[datetime]) -> bool:
+            """Return True when dt_obj is within [start, end].
+
+            If start/end is None, treat it as unbounded on that side.
+            """
+            if start and dt_obj < start:
+                return False
+            if end and dt_obj > end:
+                return False
+            return True
+
+        # Apply window filtering:
+        # - If a punch is outside the window, it is ignored (not counted, not displayed).
+        in_dts: List[datetime] = []
+        for dt_obj in in_dts_raw:
+            dt_n = _normalize_dt(dt_obj, tzinfo)
+            if dt_n and _within_window(dt_n, check_in_window_start_dt, check_in_window_end_dt):
+                in_dts.append(dt_n)
+
+        out_dts: List[datetime] = []
+        for dt_obj in out_dts_raw:
+            dt_n = _normalize_dt(dt_obj, tzinfo)
+            if dt_n and _within_window(dt_n, check_out_window_start_dt, check_out_window_end_dt):
+                out_dts.append(dt_n)
+
+        final_in_dt = min(in_dts) if in_dts else None
+        final_out_dt = max(out_dts) if out_dts else None
+
 
         # If there is no work schedule for the day, treat it as OFF (Holiday/Off)
-        # instead of Alpha (unless there are actual punches).
+        # instead of Alpha (unless there are actual punches within the valid window).
         schedule_obj = rules.get("schedule")
         if (shift is None or schedule_obj is None or not rules.get("start_time") or not rules.get("end_time")) and (
             final_in_dt is None and final_out_dt is None
@@ -362,13 +431,6 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str) -> L
         shift_end_dt = rules.get("shift_end_dt")
         cutoff_in_dt = rules.get("cutoff_in_dt") or rules.get("check_in_window_end_dt")
         grace_in_sec = int(rules.get("grace_seconds") or 0)
-
-        # Ensure all datetimes are comparable (avoid naive/aware subtraction errors)
-        tzinfo = None
-        for cand in (shift_start_dt, shift_end_dt, cutoff_in_dt, final_in_dt, final_out_dt):
-            if cand and timezone.is_aware(cand):
-                tzinfo = cand.tzinfo
-                break
         shift_start_dt = _normalize_dt(shift_start_dt, tzinfo)
         shift_end_dt = _normalize_dt(shift_end_dt, tzinfo)
         cutoff_in_dt = _normalize_dt(cutoff_in_dt, tzinfo)
