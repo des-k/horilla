@@ -41,6 +41,12 @@ urlpatterns = [
         "attendance-info-export", views.attendance_export, name="attendance-info-export"
     ),
     path("attendance-view/", views.attendance_view, name="attendance-view"),
+    # Attendance → Attendances (Monthly recap)
+    path(
+        "attendances-recap/",
+        views.attendance_employee_month_view,
+        name="attendance-employee-month-view",
+    ),
     path(
         "attendance-search",
         attendance.views.search.attendance_search,
