@@ -3515,31 +3515,29 @@ class AttendanceMonthlyRecapAPIView(APIView):
         if month > current_month:
             month = current_month
         return month
+
     def _allowed_employees_qs(self, request):
         """Employees accessible to the requester.
 
-        Spec requirement: only admin/HR may select other employees.
-        - Admin/HR is treated as having `employee.view_employee` (or superuser).
-        - Non-admin users can only access their own employee record here.
+        Spec-aligned:
+          - Admin/HR (employee.view_employee) -> all employees
+          - Others -> self only
         """
 
         from employee.models import Employee
 
         user = request.user
         employee = getattr(user, "employee_get", None)
-
         qs = Employee.objects.filter(is_active=True).select_related("employee_work_info")
 
-        # HR/Admin: full access
-        try:
-            if getattr(user, "is_superuser", False) or user.has_perm("employee.view_employee"):
-                return qs
-        except Exception:
-            pass
+        # Admin/HR: full access
+        if user.is_superuser or user.has_perm("employee.view_employee"):
+            return qs
 
-        # Regular user: self only
         if not employee:
             return qs.none()
+
+        # Regular user: self only
         return qs.filter(id=employee.id)
 
     def get(self, request):
