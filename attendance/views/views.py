@@ -48,6 +48,7 @@ from django.utils.timezone import now
 from django.utils.translation import gettext as __
 from django.utils.translation import gettext_lazy as _
 from django.views.decorators.http import require_http_methods
+from xhtml2pdf import pisa
 
 from attendance.filters import (
     AttendanceActivityFilter,
@@ -272,39 +273,9 @@ def attendance_employee_month_export_pdf(request):
     if employee is None:
         return HttpResponseBadRequest("Invalid employee_id")
 
-    rows = get_monthly_attendance_rows(employee, month)
-
-    # Indonesian tweaks (labels only; do not touch Work Type)
-    if lang == "id":
-        for r in rows:
-            try:
-                # Shift Information
-                shift_info = getattr(r, "shift_information", None)
-                if isinstance(shift_info, str) and shift_info:
-                    shift_info = (
-                        shift_info.replace("Flexi In", "Waktu Fleksibel")
-                                 .replace("Holiday/Off", "Libur")
-                                 .replace("Holiday", "Libur")
-                                 .replace("On Leave", "Cuti")
-                    )
-                    r.shift_information = shift_info
-
-                # Note/Keterangan
-                note = getattr(r, "note", None)
-                if isinstance(note, str) and note:
-                    note = (
-                        note.replace("Holiday/Off", "Libur")
-                            .replace("Holiday / Off", "Libur")
-                            .replace("Holiday/ Off", "Libur")
-                            .replace("Holiday /Off", "Libur")
-                            .replace("Holiday", "Libur")
-                            .replace("On Leave", "Cuti")
-                            .replace("Alpha", "Alpa")
-                    )
-                    r.note = note
-            except Exception:
-                # Keep row as-is if anything unexpected happens.
-                pass
+    # IMPORTANT: pass language into the shared helper so NOTE/Shift strings
+    # match the UI rules for the requested language.
+    rows = get_monthly_attendance_rows(employee, month, language=lang)
 
     # Header month display
     if lang == "id":
@@ -339,28 +310,22 @@ def attendance_employee_month_export_pdf(request):
 
     filename = f"monthly_attendance_{employee.id}_{month}_{lang}.pdf"
 
-    # Render PDF using the existing Horilla engine (xhtml2pdf / pisa)
-    try:
-        from xhtml2pdf import pisa
+    # Render HTML then convert to PDF using xhtml2pdf (pisa).
+    # This avoids wkhtmltopdf dependency used by pdfkit.
+    html_content = render_to_string("attendance/attendances/monthly_export_pdf.html", context)
+    result = io.BytesIO()
+    pdf_status = pisa.CreatePDF(src=html_content, dest=result)
+    if pdf_status.err:
+        logger.error("Error creating Monthly Recap PDF")
+        return HttpResponse("Error generating PDF", status=500)
 
-        html_content = render_to_string(
-            "attendance/attendances/monthly_export_pdf.html", context
-        )
+    response = HttpResponse(result.getvalue(), content_type="application/pdf")
+    response["Content-Disposition"] = f'attachment; filename="{filename}"'
+    return response
 
-        result = io.BytesIO()
-        pdf_status = pisa.CreatePDF(src=html_content, dest=result)
 
-        if pdf_status.err:
-            logger.error("Error creating PDF (monthly attendance export)")
-            return HttpResponse("Error generating PDF", status=500)
-
-        response = HttpResponse(result.getvalue(), content_type="application/pdf")
-        response["Content-Disposition"] = f'attachment; filename="{filename}"'
-        return response
-    except Exception as e:
-        logger.exception("Error generating PDF (monthly attendance export)")
-        return HttpResponse(f"Error generating PDF: {str(e)}", status=500)
-
+@login_required
+@hx_request_required
 def profile_attendance_tab(request):
     """
     This function is used to view attendance tab of an employee in profile view.
