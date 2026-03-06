@@ -3474,3 +3474,126 @@ class UserAttendanceDetailedView(APIView):
         return Response(
             {"error": "Permission denied"}, status=status.HTTP_403_FORBIDDEN
         )
+
+
+class AttendanceMonthlyRecapAPIView(APIView):
+    """Attendance → Attendances (Monthly recap) rows.
+
+    Query params (GET):
+      - employee_id (optional; defaults to the logged-in user)
+      - month (optional; YYYY-MM; defaults to current month)
+      - lang (optional; en|id; defaults to request language or en)
+
+    Response:
+      {"rows": [{no, date, shift_information, check_in, check_out, work_type, late, early_out, note, is_off}]}
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def _resolve_language(self, request) -> str:
+        lang = (request.GET.get("lang") or getattr(request, "LANGUAGE_CODE", "en") or "en")
+        lang = lang.split("-")[0].lower().strip()
+        return "id" if lang == "id" else "en"
+
+    def _resolve_month(self, request) -> str:
+        # Default month = current month
+        month = request.GET.get("month") or dj_timezone.localdate().strftime("%Y-%m")
+
+        # Validate format YYYY-MM; fallback to current month if malformed
+        try:
+            if len(month) != 7 or month[4] != "-":
+                raise ValueError
+            year = int(month[:4])
+            mon = int(month[5:7])
+            if mon < 1 or mon > 12:
+                raise ValueError
+        except Exception:
+            month = dj_timezone.localdate().strftime("%Y-%m")
+
+        # Disallow future months
+        current_month = dj_timezone.localdate().strftime("%Y-%m")
+        if month > current_month:
+            month = current_month
+        return month
+    def _allowed_employees_qs(self, request):
+        """Employees accessible to the requester.
+
+        Spec requirement: only admin/HR may select other employees.
+        - Admin/HR is treated as having `employee.view_employee` (or superuser).
+        - Non-admin users can only access their own employee record here.
+        """
+
+        from employee.models import Employee
+
+        user = request.user
+        employee = getattr(user, "employee_get", None)
+
+        qs = Employee.objects.filter(is_active=True).select_related("employee_work_info")
+
+        # HR/Admin: full access
+        try:
+            if getattr(user, "is_superuser", False) or user.has_perm("employee.view_employee"):
+                return qs
+        except Exception:
+            pass
+
+        # Regular user: self only
+        if not employee:
+            return qs.none()
+        return qs.filter(id=employee.id)
+
+    def get(self, request):
+        from attendance.services.monthly_recap import get_monthly_attendance_rows
+
+        month = self._resolve_month(request)
+        lang = self._resolve_language(request)
+
+        employees_qs = self._allowed_employees_qs(request)
+
+        # Resolve employee
+        emp_id_raw = request.GET.get("employee_id")
+        selected_employee = None
+        if emp_id_raw:
+            try:
+                selected_employee = employees_qs.filter(id=int(emp_id_raw)).first()
+            except Exception:
+                selected_employee = None
+
+        if selected_employee is None:
+            # Default: self (if accessible), else first accessible employee
+            try:
+                me = request.user.employee_get
+                selected_employee = employees_qs.filter(id=me.id).first() if me else None
+            except Exception:
+                selected_employee = None
+            if selected_employee is None:
+                selected_employee = employees_qs.first()
+
+        if selected_employee is None:
+            return Response({"rows": []}, status=200)
+
+        rows = get_monthly_attendance_rows(selected_employee, month, language=lang)
+        payload_rows = [
+            {
+                "no": r.no,
+                "date": r.attendance_date.strftime("%Y-%m-%d"),
+                "shift_information": r.shift_information,
+                "check_in": r.check_in,
+                "check_out": r.check_out,
+                "work_type": r.work_type,
+                "late": r.late,
+                "early_out": r.early_out,
+                "note": r.note,
+                "is_off": bool(getattr(r, "is_off", False)),
+            }
+            for r in rows
+        ]
+        return Response(
+            {
+                "employee_id": selected_employee.id,
+                "month": month,
+                "lang": lang,
+                "rows": payload_rows,
+            },
+            status=200,
+        )
