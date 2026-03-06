@@ -7,8 +7,58 @@ Kept Django-free so it can be unit-tested without requiring Django settings.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
-from typing import Iterable, List, Optional
+from typing import List, Optional
+
+
+# NOTE suffix / Work Type translation table (longest phrases first)
+_ID_SUFFIX_REPLACEMENTS = [
+    # Pending / awaiting upload variants
+    ("On Duty FULL Pending Approval", "Permintaan Dinas luar penuh menunggu persetujuan"),
+    ("On Duty OUT Pending Approval", "Permintaan Dinas luar akhir menunggu persetujuan"),
+    ("On Duty IN Pending Approval", "Permintaan Dinas luar awal menunggu persetujuan"),
+    ("On Duty OUT Awaiting Document Upload", "Permintaan Dinas luar akhir menunggu upload"),
+    ("On Duty IN Awaiting Document Upload", "Permintaan Dinas luar awal menunggu upload"),
+    # Per user request: FULL awaiting upload maps to "awal"
+    ("On Duty FULL Awaiting Document Upload", "Permintaan Dinas luar awal menunggu upload"),
+    # Base labels
+    ("On Duty FULL", "Dinas luar penuh"),
+    ("On Duty OUT", "Dinas luar akhir"),
+    ("On Duty IN", "Dinas luar awal"),
+]
+
+
+def _translate_on_duty_phrases(text: str, *, language: str) -> str:
+    """Translate known ON DUTY phrases for Indonesian output."""
+
+    if not text:
+        return text
+    lang = (language or "en").lower()
+    if not lang.startswith("id"):
+        return text
+
+    out = text
+    for src, dst in _ID_SUFFIX_REPLACEMENTS:
+        out = re.sub(re.escape(src), dst, out, flags=re.IGNORECASE)
+    return out
+
+
+def localize_on_duty_work_type(text: str, *, language: str) -> str:
+    """Translate Work Type values for ON DUTY only (Indonesian).
+
+    Requirement (latest): translate Work Type only when the Work Type value is
+    ON DUTY (IN/OUT/FULL). Keep other Work Type values (WFO/WFA, etc.) unchanged.
+    """
+
+    if not text:
+        return text
+    lang = (language or "en").lower()
+    if not lang.startswith("id"):
+        return text
+    if "on duty" not in text.lower():
+        return text
+    return _translate_on_duty_phrases(text, language=lang)
 
 
 def seconds_to_hhmm(total_seconds: float) -> str:
@@ -17,12 +67,15 @@ def seconds_to_hhmm(total_seconds: float) -> str:
     - Negative values are clamped to 0.
     - Seconds are floored to the nearest minute.
     """
+
     try:
         sec = int(total_seconds)
     except Exception:
         sec = 0
+
     if sec < 0:
         sec = 0
+
     minutes = sec // 60
     hh = minutes // 60
     mm = minutes % 60
@@ -68,7 +121,7 @@ def derive_note(inp: NoteInputs, *, language: str = "en") -> str:
         "id": {
             "holiday": "Libur",
             "leave": "Cuti",
-            "alpha": "Alpha",
+            "alpha": "Alpa",
             "late": "Terlambat",
             "leave_early": "Pulang Cepat",
             "late_and_early": "Terlambat, Pulang Cepat",
@@ -77,35 +130,31 @@ def derive_note(inp: NoteInputs, *, language: str = "en") -> str:
     }
     t = labels["id"] if lang.startswith("id") else labels["en"]
 
-    # 1) OFF overrides
+    # Base note
     if inp.is_off:
-        if inp.off_kind == "leave":
-            return t["leave"]
-        return t["holiday"]
-
-    # 2) Alpha
-    if not inp.has_check_in and not inp.has_check_out:
-        return t["alpha"]
-
-    # 3) Late / Leave early flags
-    is_late = bool(inp.late_seconds and inp.late_seconds > 0) or (not inp.has_check_in)
-    is_leave_early = bool(inp.early_out_seconds and inp.early_out_seconds > 0) or (
-        not inp.has_check_out
-    )
-
-    if is_late and is_leave_early:
-        base = t["late_and_early"]
-    elif is_late:
-        base = t["late"]
-    elif is_leave_early:
-        base = t["leave_early"]
+        base = t["leave"] if inp.off_kind == "leave" else t["holiday"]
+    elif not inp.has_check_in and not inp.has_check_out:
+        base = t["alpha"]
     else:
-        base = ""
+        is_late = bool(inp.late_seconds and inp.late_seconds > 0) or (not inp.has_check_in)
+        is_leave_early = bool(inp.early_out_seconds and inp.early_out_seconds > 0) or (
+            not inp.has_check_out
+        )
 
+        if is_late and is_leave_early:
+            base = t["late_and_early"]
+        elif is_late:
+            base = t["late"]
+        elif is_leave_early:
+            base = t["leave_early"]
+        else:
+            base = ""
+
+    # Suffixes (pending requests, correction pending)
     suffixes: List[str] = []
     for s in (inp.pending_suffixes or []):
         if s and s.strip():
-            suffixes.append(s.strip())
+            suffixes.append(_translate_on_duty_phrases(s.strip(), language=lang))
     if inp.correction_pending:
         suffixes.append(t["correction_pending"])
 
@@ -116,4 +165,3 @@ def derive_note(inp: NoteInputs, *, language: str = "en") -> str:
     if base:
         return f"{base} ({suffix_txt})"
     return f"({suffix_txt})"
-
