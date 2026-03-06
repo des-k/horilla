@@ -165,4 +165,18 @@ urlpatterns = [
     path("my-attendance/", UserAttendanceView.as_view()),
     path("attendance-type-check/", AttendanceTypeAccessCheck.as_view()),
     path("my-attendance-detailed/<int:id>/", UserAttendanceDetailedView.as_view()),
+
+    # Attendance → Attendances (Monthly recap)
+    # Canonical URL (aligned with web route name `attendances-recap/`)
+    path(
+        "attendances-recap/",
+        AttendanceMonthlyRecapAPIView.as_view(),
+        name="api-attendance-monthly-recap",
+    ),
+    # No-slash variant (some clients omit trailing slash)
+    path(
+        "attendances-recap",
+        AttendanceMonthlyRecapAPIView.as_view(),
+        name="api-attendance-monthly-recap-noslash",
+    ),
 ]
