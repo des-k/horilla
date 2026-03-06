@@ -24,7 +24,7 @@ from attendance.models import (
     WorkModeRequestScope,
     WorkModeRequestStatus,
 )
-from attendance.services.monthly_recap_note import NoteInputs, derive_note, seconds_to_hhmm
+from attendance.services.monthly_recap_note import NoteInputs, derive_note, seconds_to_hhmm, localize_on_duty_work_type
 from attendance.services.work_type_request_rules import scheduled_attendance_mode
 # NOTE: Do NOT import from attendance.views.clock_in_out at module import time.
 # That module imports attendance.views.views, which imports this service.
@@ -95,6 +95,36 @@ def _format_punch(dt: Optional[datetime], attendance_date: date) -> str:
     return dt_local.strftime("%H:%M") + suffix
 
 
+
+def _localize_shift_information(text: str, language: str) -> str:
+    """Localize only the *phrases* inside the Shift Information string.
+
+    This is intentionally minimal: we do NOT translate shift names or other content.
+    """
+    if not text:
+        return text
+    lang = (language or "en").lower()
+    if not lang.startswith("id"):
+        return text
+    # Order matters (longer phrases first).
+    return (
+        text.replace("Flexi In", "Waktu Fleksibel")
+            .replace("Holiday/Off", "Libur")
+            .replace("Holiday / Off", "Libur")
+            .replace("Holiday", "Libur")
+            .replace("On Leave", "Cuti")
+    )
+
+
+
+def _localize_work_type(text: str, language: str) -> str:
+    """Translate Work Type values for ON DUTY only (Indonesian).
+
+    - Keep non-ON DUTY values unchanged (WFO/WFA, etc.).
+    - For lang=id, map On Duty IN/OUT/FULL to Dinas luar awal/akhir/penuh.
+    """
+    return localize_on_duty_work_type(text, language=language)
+
 def _work_mode_label(mode: str) -> str:
     if mode == AttendanceWorkMode.ON_DUTY:
         return "On Duty"
@@ -154,29 +184,57 @@ def _pending_on_duty_suffixes(
     requests: List[WorkModeRequest],
     attendance_date: date,
 ) -> List[str]:
-    """Only for NOTE suffix (does not affect calculations)."""
+    """Build NOTE suffix strings for pending ON_DUTY requests (does not affect calculations)."""
+
     suffixes: List[str] = []
     pending_statuses = {WorkModeRequestStatus.PENDING, WorkModeRequestStatus.WAITING_FOR_APPROVAL}
 
     def _covers(req: WorkModeRequest) -> bool:
         return req.start_date <= attendance_date <= req.end_date
 
+    def _has_files(req: WorkModeRequest) -> bool:
+        try:
+            return req.files.exists()
+        except Exception:
+            try:
+                return req.files.count() > 0
+            except Exception:
+                return False
+
     pending = [
         r
         for r in requests
-        if r.mode == AttendanceWorkMode.ON_DUTY
-        and r.status in pending_statuses
-        and _covers(r)
+        if r.mode == AttendanceWorkMode.ON_DUTY and r.status in pending_statuses and _covers(r)
     ]
     # Newest first
     pending.sort(key=lambda r: r.id, reverse=True)
 
-    # IN
-    if any(r.scope in (WorkModeRequestScope.IN, WorkModeRequestScope.FULL) for r in pending):
-        suffixes.append("ON DUTY IN PENDING")
-    # OUT
-    if any(r.scope in (WorkModeRequestScope.OUT, WorkModeRequestScope.FULL) for r in pending):
-        suffixes.append("ON DUTY OUT PENDING")
+    pending_full = [r for r in pending if r.scope == WorkModeRequestScope.FULL]
+    pending_in = [r for r in pending if r.scope == WorkModeRequestScope.IN]
+    pending_out = [r for r in pending if r.scope == WorkModeRequestScope.OUT]
+
+    # Prefer FULL label when there is any FULL request covering the date.
+    if pending_full:
+        req = pending_full[0]
+        if not _has_files(req):
+            suffixes.append("On Duty FULL Awaiting Document Upload")
+        else:
+            suffixes.append("On Duty FULL Pending Approval")
+        return suffixes
+
+    if pending_in:
+        req = pending_in[0]
+        if not _has_files(req):
+            suffixes.append("On Duty IN Awaiting Document Upload")
+        else:
+            suffixes.append("On Duty IN Pending Approval")
+
+    if pending_out:
+        req = pending_out[0]
+        if not _has_files(req):
+            suffixes.append("On Duty OUT Awaiting Document Upload")
+        else:
+            suffixes.append("On Duty OUT Pending Approval")
 
     return suffixes
 
@@ -195,7 +253,7 @@ class MonthlyRecapRow:
     is_off: bool = False
 
 
-def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str) -> List[MonthlyRecapRow]:
+def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, language: str = "en") -> List[MonthlyRecapRow]:
     first_day, last_day = _month_range(month_yyyy_mm)
 
     # Guardrail: do not generate rows for future dates.
@@ -274,8 +332,11 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str) -> L
 
         # OFF override
         if is_off:
-            shift_info = "On Leave" if is_leave else "Holiday/Off"
-            note = derive_note(NoteInputs(is_off=True, off_kind="leave" if is_leave else "holiday"))
+            shift_info = _localize_shift_information("On Leave" if is_leave else "Holiday/Off", language)
+            note = derive_note(
+                NoteInputs(is_off=True, off_kind="leave" if is_leave else "holiday"),
+                language=language,
+            )
             rows.append(
                 MonthlyRecapRow(
                     no=i,
@@ -401,16 +462,17 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str) -> L
 
         final_in_dt = min(in_dts) if in_dts else None
         final_out_dt = max(out_dts) if out_dts else None
-
-
         # If there is no work schedule for the day, treat it as OFF (Holiday/Off)
         # instead of Alpha (unless there are actual punches within the valid window).
         schedule_obj = rules.get("schedule")
         if (shift is None or schedule_obj is None or not rules.get("start_time") or not rules.get("end_time")) and (
             final_in_dt is None and final_out_dt is None
         ):
-            shift_info = "Holiday/Off"
-            note = derive_note(NoteInputs(is_off=True, off_kind="holiday"))
+            shift_info = _localize_shift_information("Holiday/Off", language)
+            note = derive_note(
+                NoteInputs(is_off=True, off_kind="holiday"),
+                language=language,
+            )
             rows.append(
                 MonthlyRecapRow(
                     no=i,
@@ -475,9 +537,15 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str) -> L
             want="out",
             baseline_mode=baseline_mode,
         )
-
-        # Work type display: single value if same, else IN/OUT.
-        if eff_in_mode == eff_out_mode:
+        # Work type display:
+        # - Specialize ON_DUTY into IN/OUT/FULL to match the UI spec.
+        if eff_in_mode == AttendanceWorkMode.ON_DUTY and eff_out_mode == AttendanceWorkMode.ON_DUTY:
+            work_type_disp = "On Duty FULL"
+        elif eff_in_mode == AttendanceWorkMode.ON_DUTY and eff_out_mode != AttendanceWorkMode.ON_DUTY:
+            work_type_disp = "On Duty IN"
+        elif eff_out_mode == AttendanceWorkMode.ON_DUTY and eff_in_mode != AttendanceWorkMode.ON_DUTY:
+            work_type_disp = "On Duty OUT"
+        elif eff_in_mode == eff_out_mode:
             work_type_disp = _work_mode_label(eff_in_mode)
         else:
             work_type_disp = f"IN: {_work_mode_label(eff_in_mode)}<br>OUT: {_work_mode_label(eff_out_mode)}"
@@ -540,8 +608,12 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str) -> L
                 early_out_seconds=early_sec,
                 pending_suffixes=pending_suffixes,
                 correction_pending=correction_pending,
-            )
+            ),
+            language=language,
         )
+
+        shift_info = _localize_shift_information(shift_info, language)
+        work_type_disp = _localize_work_type(work_type_disp, language)
 
         rows.append(
             MonthlyRecapRow(
@@ -580,4 +652,5 @@ def get_monthly_attendance_rows(employee: Employee, month: str, **kwargs) -> Lis
         List[MonthlyRecapRow]
     """
     # kwargs is reserved for compatibility with callers that may pass extra flags.
-    return build_employee_monthly_recap(employee=employee, month_yyyy_mm=month)
+    language = (kwargs.get("language") or kwargs.get("lang") or "en")
+    return build_employee_monthly_recap(employee=employee, month_yyyy_mm=month, language=language)
