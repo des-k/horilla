@@ -1416,7 +1416,14 @@ class AttendanceRequestView(APIView):
     def post(self, request):
         from attendance.forms import NewRequestForm
 
-        form = NewRequestForm(data=request.data, files=getattr(request, "FILES", None))
+        # Self-only: force employee_id to the logged-in employee.
+        data = request.data.copy() if hasattr(request, 'data') else getattr(request, 'POST', {}).copy()
+        try:
+            data['employee_id'] = request.user.employee_get.id
+        except Exception:
+            pass
+
+        form = NewRequestForm(data=data, files=getattr(request, "FILES", None))
         if form.is_valid():
             work_type = form.cleaned_data.get("work_type_id")
 
@@ -1435,13 +1442,13 @@ class AttendanceRequestView(APIView):
                 # If this was an update_request (attendance already exists), attach to the existing record.
                 if attendance_obj is None:
                     try:
-                        emp = request.data.get("employee_id") if hasattr(request, "data") else None
+                        emp = data.get("employee_id") if hasattr(request, "data") else None
                         if not emp:
                             try:
                                 emp = request.user.employee_get.id
                             except Exception:
                                 emp = None
-                        att_date = request.data.get("attendance_date") if hasattr(request, "data") else None
+                        att_date = data.get("attendance_date") if hasattr(request, "data") else None
                         if not att_date:
                             from datetime import date as _date
                             att_date = _date.today()
@@ -1463,7 +1470,7 @@ class AttendanceRequestView(APIView):
                     except Exception:
                         actor_emp = getattr(attendance_obj, "employee_id", None)
 
-                    comment_text = (request.data.get("request_description") if hasattr(request, "data") else None) or (request.data.get("reason") if hasattr(request, "data") else None) or None
+                    comment_text = (data.get("request_description") if hasattr(request, "data") else None) or (data.get("reason") if hasattr(request, "data") else None) or None
                     c = AttendanceRequestComment.objects.create(
                         request_id=attendance_obj,
                         employee_id=actor_emp,
@@ -1480,21 +1487,21 @@ class AttendanceRequestView(APIView):
             attendance_obj = getattr(form, "new_instance", None)
             if attendance_obj is None:
                 # Fallback for update_request-style forms
-                emp = request.data.get("employee_id") if hasattr(request, "data") else None
+                emp = data.get("employee_id") if hasattr(request, "data") else None
                 if not emp:
                     try:
                         emp = request.user.employee_get.id
                     except Exception:
                         emp = None
-                att_date = request.data.get("attendance_date") if hasattr(request, "data") else None
+                att_date = data.get("attendance_date") if hasattr(request, "data") else None
                 attendance_obj = Attendance.objects.filter(employee_id=emp, attendance_date=att_date).first()
             serializer = AttendanceRequestSerializer(
                 instance=attendance_obj,
                 context={"request": request},
             )
             return Response(serializer.data, status=status.HTTP_201_CREATED)
-        employee_id = request.data.get("employee_id")
-        attendance_date = request.data.get("attendance_date", date.today())
+        employee_id = data.get("employee_id")
+        attendance_date = data.get("attendance_date", date.today())
         if Attendance.objects.filter(
             employee_id=employee_id, attendance_date=attendance_date
         ).exists():
