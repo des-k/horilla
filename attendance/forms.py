@@ -61,8 +61,10 @@ from base.methods import (
     get_working_days,
     is_reportingmanager,
     reload_queryset,
+    is_holiday,
+    is_company_leave,
 )
-from base.models import Company, EmployeeShift
+from base.models import Company, EmployeeShift, EmployeeShiftDay, EmployeeShiftSchedule
 from employee.filters import EmployeeFilter
 from employee.models import Employee
 from horilla import horilla_middlewares
@@ -662,6 +664,62 @@ class AttendanceRequestForm(BaseModelForm):
         context = {"form": self}
         table_html = render_to_string("attendance_form.html", context)
         return table_html
+
+
+    def clean(self):
+        """
+        Block attendance requests on:
+        - Holiday / company leave
+        - Dates that have no shift schedule (no shift assigned OR no start/end on that weekday)
+
+        Applies to BOTH Web and Mobile because both create/update flows use
+        AttendanceRequestForm / NewRequestForm in the backend API.
+        """
+        cleaned_data = super().clean()
+
+        employee = self.cleaned_data.get('employee_id') or getattr(self.instance, 'employee_id', None)
+        attendance_date = self.cleaned_data.get('attendance_date')
+        if attendance_date is None:
+            attendance_date = getattr(self.instance, 'attendance_date', None)
+
+        if not attendance_date:
+            return cleaned_data
+
+        # Holiday / company leave
+        try:
+            if is_holiday(attendance_date) or is_company_leave(attendance_date):
+                raise ValidationError({'attendance_date': _("You cannot submit an attendance request on a holiday/off day.")})
+        except ValidationError:
+            raise
+        except Exception:
+            raise ValidationError({'attendance_date': _("Unable to validate whether this date is an off day.")})
+
+        # Resolve shift: prefer explicit shift_id from form, fallback to employee work info
+        shift = self.cleaned_data.get('shift_id')
+        if not shift and employee is not None:
+            try:
+                shift = getattr(getattr(employee, 'employee_work_info', None), 'shift_id', None)
+            except Exception:
+                shift = None
+
+        if not shift:
+            raise ValidationError({'attendance_date': _("You cannot submit an attendance request because no shift is assigned for this employee.")})
+
+        try:
+            day_name = ['monday','tuesday','wednesday','thursday','friday','saturday','sunday'][attendance_date.weekday()]
+            day_obj = EmployeeShiftDay.objects.filter(day=day_name).first()
+            if not day_obj:
+                raise ValidationError({'attendance_date': _("You cannot submit an attendance request because shift day configuration is missing.")})
+
+            sched = EmployeeShiftSchedule.objects.filter(shift_id=shift, day=day_obj).first()
+            if (not sched) or (getattr(sched, 'start_time', None) is None) or (getattr(sched, 'end_time', None) is None):
+                raise ValidationError({'attendance_date': _("You cannot submit an attendance request because there is no shift schedule for this date.")})
+        except ValidationError:
+            raise
+        except Exception:
+            raise ValidationError({'attendance_date': _("Unable to validate shift schedule for this date.")})
+
+        return cleaned_data
 
     def save(self, commit: bool = ...) -> Any:
         # No need to save the changes to the actual modal instance
