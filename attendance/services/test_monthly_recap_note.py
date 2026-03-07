@@ -6,7 +6,7 @@ from attendance.services.monthly_recap_note import NoteInputs, derive_note
 class MonthlyRecapNoteTests(unittest.TestCase):
     def test_off_holiday_overrides(self):
         note = derive_note(NoteInputs(is_off=True, off_kind="holiday"))
-        self.assertEqual(note, "Holiday/Off")
+        self.assertEqual(note, "Holiday")
 
     def test_off_leave_overrides(self):
         note = derive_note(NoteInputs(is_off=True, off_kind="leave"))
@@ -84,12 +84,12 @@ class MonthlyRecapNoteTests(unittest.TestCase):
                 has_check_out=True,
                 late_seconds=60,
                 early_out_seconds=0,
-                pending_suffixes=["ON DUTY IN PENDING"],
+                pending_suffixes=["Dinas Luar Awal menunggu persetujuan: 08:00"],
                 correction_pending=True,
             )
         )
         self.assertIn("Late", note)
-        self.assertIn("ON DUTY IN PENDING", note)
+        self.assertIn("Dinas Luar Awal menunggu persetujuan: 08:00", note)
         self.assertIn("Attendance correction pending", note)
 
 
