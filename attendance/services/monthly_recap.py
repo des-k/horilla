@@ -309,10 +309,10 @@ def _work_mode_scope_label(scope: str, *, mode: str, language: str) -> str:
     if mode_norm == AttendanceWorkMode.ON_DUTY:
         if lang.startswith("id"):
             if scope_norm == WorkModeRequestScope.IN:
-                return "Dinas luar awal"
+                return "Dinas Luar Awal"
             if scope_norm == WorkModeRequestScope.OUT:
-                return "Dinas luar akhir"
-            return "Dinas luar penuh"
+                return "Dinas Luar Akhir"
+            return "Dinas Luar Penuh"
         if scope_norm == WorkModeRequestScope.IN:
             return "On Duty IN"
         if scope_norm == WorkModeRequestScope.OUT:
@@ -324,16 +324,45 @@ def _work_mode_scope_label(scope: str, *, mode: str, language: str) -> str:
     return f"{mode_label} {scope_label}"
 
 
-def _status_note_label(status: str) -> str:
+def _request_has_attachments(req: WorkModeRequest) -> bool:
+    files = getattr(req, "files", None)
+    if files is None:
+        return False
+    try:
+        return bool(files.exists())
+    except Exception:
+        try:
+            return bool(len(files.all()))
+        except Exception:
+            return False
+
+
+def _status_note_label(*, status: str, mode: str, req: Optional[WorkModeRequest], language: str) -> str:
+    lang = (language or "en").lower()
+    mode_norm = (mode or "").lower()
+
+    if lang.startswith("id"):
+        if mode_norm == AttendanceWorkMode.ON_DUTY and status == WorkModeRequestStatus.PENDING:
+            return "menunggu upload dokumen" if not _request_has_attachments(req) else "menunggu persetujuan"
+        if status == WorkModeRequestStatus.WAITING_FOR_APPROVAL:
+            return "menunggu persetujuan"
+        if status == WorkModeRequestStatus.PENDING:
+            return "menunggu persetujuan"
+        return status or ""
+
+    if mode_norm == AttendanceWorkMode.ON_DUTY and status == WorkModeRequestStatus.PENDING:
+        return "awaiting document upload" if not _request_has_attachments(req) else "pending approval"
     if status == WorkModeRequestStatus.WAITING_FOR_APPROVAL:
-        return "waiting"
-    return "pending"
+        return "pending approval"
+    if status == WorkModeRequestStatus.PENDING:
+        return "pending"
+    return status or ""
 
 
 def _attendance_pending_suffix(session: str, time_txt: str, *, language: str) -> str:
     label = _session_note_label(session, language)
     if (language or "en").lower().startswith("id"):
-        base = f"Absensi {label} pending"
+        base = f"Absensi {label} menunggu persetujuan"
     else:
         base = f"Attendance {label} pending"
     return f"{base}: {time_txt}" if time_txt else base
@@ -342,10 +371,71 @@ def _attendance_pending_suffix(session: str, time_txt: str, *, language: str) ->
 def _attendance_out_of_window_suffix(session: str, time_txt: str, *, language: str) -> str:
     label = _session_note_label(session, language)
     if (language or "en").lower().startswith("id"):
-        base = f"Disetujui tapi di luar window ({label})"
+        base = f"Absensi {label} disetujui tetapi di luar batas waktu"
     else:
-        base = f"Approved but out of window ({label})"
-    return f"{base} {time_txt}" if time_txt else base
+        base = f"Approved but out of time limit ({label})"
+    return f"{base}: {time_txt}" if time_txt else base
+
+
+def _first_time_text(*values) -> str:
+    for value in values:
+        txt = _format_time_like(value)
+        if txt:
+            return txt
+    return ""
+
+
+def _join_time_texts(values: List[str]) -> str:
+    cleaned = []
+    seen = set()
+    for value in values:
+        value = (value or "").strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        cleaned.append(value)
+    return ", ".join(cleaned)
+
+
+def _request_time_text_from_obj(
+    req: WorkModeRequest,
+    *,
+    scope: str,
+    fallback_in_time: Optional[time] = None,
+    fallback_out_time: Optional[time] = None,
+) -> str:
+    scope_norm = (scope or "").lower()
+
+    generic_txt = _first_time_text(
+        getattr(req, "planned_time", None),
+        getattr(req, "time", None),
+        getattr(req, "request_time", None),
+    )
+    in_specific_txt = _first_time_text(
+        getattr(req, "planned_clock_in", None),
+        getattr(req, "clock_in", None),
+        getattr(req, "request_clock_in", None),
+        getattr(req, "request_in", None),
+        getattr(req, "in_time", None),
+        getattr(req, "start_time", None),
+    )
+    out_specific_txt = _first_time_text(
+        getattr(req, "planned_clock_out", None),
+        getattr(req, "clock_out", None),
+        getattr(req, "request_clock_out", None),
+        getattr(req, "request_out", None),
+        getattr(req, "out_time", None),
+        getattr(req, "end_time", None),
+    )
+    in_txt = in_specific_txt or generic_txt or _format_time_like(fallback_in_time)
+    out_txt = out_specific_txt or generic_txt or _format_time_like(fallback_out_time)
+
+    if scope_norm == WorkModeRequestScope.IN:
+        return in_txt
+    if scope_norm == WorkModeRequestScope.OUT:
+        return out_txt
+
+    return _join_time_texts([in_txt, out_txt])
 
 
 def _work_mode_pending_suffix(
@@ -353,32 +443,14 @@ def _work_mode_pending_suffix(
     mode: str,
     scope: str,
     status: str,
+    req: Optional[WorkModeRequest],
     time_txt: str,
     language: str,
 ) -> str:
     label = _work_mode_scope_label(scope, mode=mode, language=language)
-    status_label = _status_note_label(status)
-    base = f"{label} {status_label}"
+    status_label = _status_note_label(status=status, mode=mode, req=req, language=language)
+    base = f"{label} {status_label}".strip()
     return f"{base}: {time_txt}" if time_txt else base
-
-
-def _request_time_text_from_obj(req: WorkModeRequest) -> str:
-    for attr in (
-        "planned_time",
-        "time",
-        "request_time",
-        "planned_clock_in",
-        "planned_clock_out",
-        "clock_in",
-        "clock_out",
-        "start_time",
-        "end_time",
-    ):
-        value = getattr(req, attr, None)
-        txt = _format_time_like(value)
-        if txt:
-            return txt
-    return ""
 
 
 def _requested_payload_for_attendance(attendance) -> dict:
@@ -587,18 +659,28 @@ def _pending_work_mode_suffixes(
     requests: List[WorkModeRequest],
     attendance_date: date,
     language: str,
+    shift_start_time: Optional[time] = None,
+    shift_end_time: Optional[time] = None,
 ) -> List[str]:
     suffixes: List[str] = []
     pending_statuses = {WorkModeRequestStatus.PENDING, WorkModeRequestStatus.WAITING_FOR_APPROVAL}
-    seen: Set[Tuple[str, str, str]] = set()
+    seen: Set[Tuple[str, str, str, str]] = set()
 
     for req in sorted(requests, key=lambda r: r.id, reverse=True):
         if req.status not in pending_statuses:
             continue
+        if getattr(req, "mode", None) != AttendanceWorkMode.ON_DUTY:
+            continue
         if not (req.start_date <= attendance_date <= req.end_date):
             continue
 
-        key = (req.mode, req.scope, req.status)
+        time_txt = _request_time_text_from_obj(
+            req,
+            scope=getattr(req, "scope", None),
+            fallback_in_time=shift_start_time,
+            fallback_out_time=shift_end_time,
+        )
+        key = (req.mode, req.scope, req.status, time_txt)
         if key in seen:
             continue
         seen.add(key)
@@ -608,7 +690,8 @@ def _pending_work_mode_suffixes(
                 mode=req.mode,
                 scope=req.scope,
                 status=req.status,
-                time_txt=_request_time_text_from_obj(req),
+                req=req,
+                time_txt=time_txt,
                 language=language,
             )
         )
@@ -717,7 +800,7 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
                 shift_info = _localize_shift_information("On Leave", language)
                 note = derive_note(NoteInputs(is_off=True, off_kind="leave"), language=language)
             else:
-                shift_info = _localize_shift_information("Holiday/Off", language)
+                shift_info = _localize_shift_information("Holiday", language)
                 note = derive_note(NoteInputs(is_off=True, off_kind="holiday"), language=language)
 
             rows.append(
@@ -934,6 +1017,8 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
             requests=requests,
             attendance_date=d,
             language=language,
+            shift_start_time=rules.get("start_time"),
+            shift_end_time=rules.get("end_time"),
         )
         note_suffixes = attendance_request_suffixes + work_mode_pending_suffixes
         correction_pending = bool(
