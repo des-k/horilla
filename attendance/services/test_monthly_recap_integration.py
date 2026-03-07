@@ -290,7 +290,7 @@ class MonthlyRecapIntegrationTests(unittest.TestCase):
         self.assertEqual(row.late, "00:00")
         self.assertEqual(row.early_out, "00:00")
         self.assertEqual(row.work_type, "—")
-        self.assertEqual(row.note, "Holiday/Off")
+        self.assertEqual(row.note, "Holiday")
         self.assertNotIn("pending", row.note.lower())
 
     def test_normal_day_approved_attendance_request_in_window_changes_final_time(self):
@@ -370,7 +370,7 @@ class MonthlyRecapIntegrationTests(unittest.TestCase):
         self.assertEqual(row.check_out, "17:01")
         self.assertEqual(row.work_type, "WFO")
         self.assertIn("Attendance IN pending: 08:12", row.note)
-        self.assertIn("On Duty OUT pending: 17:10", row.note)
+        self.assertIn("On Duty OUT awaiting document upload: 17:10", row.note)
 
     def test_pending_create_request_does_not_fill_empty_check_in_or_check_out(self):
         pending_create_request = SimpleNamespace(
@@ -499,7 +499,7 @@ class MonthlyRecapIntegrationTests(unittest.TestCase):
 
         self.assertEqual(row.check_in, "—")
         self.assertEqual(row.check_out, "—")
-        self.assertIn("On Duty IN pending: 08:00", row.note)
+        self.assertIn("On Duty IN awaiting document upload: 08:00", row.note)
 
     def test_approved_request_out_of_window_is_not_applied_and_only_goes_to_note(self):
         attendance = SimpleNamespace(
@@ -531,7 +531,95 @@ class MonthlyRecapIntegrationTests(unittest.TestCase):
 
         self.assertEqual(row.check_in, "—")
         self.assertEqual(row.check_out, "17:00")
-        self.assertIn("Approved but out of window (IN) 13:05", row.note)
+        self.assertIn("Approved but out of time limit (IN): 13:05", row.note)
+
+    def test_pending_wfa_request_is_not_shown_in_note(self):
+        wfa_req = SimpleNamespace(
+            id=51,
+            employee_id=self.employee,
+            start_date=self.target_date,
+            end_date=self.target_date,
+            status=monthly_recap.WorkModeRequestStatus.WAITING_FOR_APPROVAL,
+            scope=monthly_recap.WorkModeRequestScope.FULL,
+            mode=monthly_recap.AttendanceWorkMode.WFA,
+        )
+
+        monthly_recap.WorkModeRequest.objects = FakeManager([wfa_req])
+
+        rows = monthly_recap.get_monthly_attendance_rows(self.employee, "2026-03")
+        row = self._find_row(rows, self.target_date)
+
+        self.assertNotIn("WFA", row.note)
+        self.assertEqual(row.check_in, "—")
+        self.assertEqual(row.check_out, "—")
+
+    def test_indonesian_on_duty_pending_without_attachment_uses_upload_wording_and_shift_times(self):
+        on_duty_req = SimpleNamespace(
+            id=52,
+            employee_id=self.employee,
+            start_date=self.target_date,
+            end_date=self.target_date,
+            status=monthly_recap.WorkModeRequestStatus.PENDING,
+            scope=monthly_recap.WorkModeRequestScope.FULL,
+            mode=monthly_recap.AttendanceWorkMode.ON_DUTY,
+            files=SimpleNamespace(exists=lambda: False),
+        )
+
+        monthly_recap.WorkModeRequest.objects = FakeManager([on_duty_req])
+
+        rows = monthly_recap.get_monthly_attendance_rows(self.employee, "2026-03", language="id")
+        row = self._find_row(rows, self.target_date)
+
+        self.assertIn("Dinas Luar Penuh menunggu upload dokumen: 08:00, 17:00", row.note)
+
+    def test_indonesian_on_duty_waiting_uses_approval_wording(self):
+        on_duty_req = SimpleNamespace(
+            id=53,
+            employee_id=self.employee,
+            start_date=self.target_date,
+            end_date=self.target_date,
+            status=monthly_recap.WorkModeRequestStatus.WAITING_FOR_APPROVAL,
+            scope=monthly_recap.WorkModeRequestScope.OUT,
+            mode=monthly_recap.AttendanceWorkMode.ON_DUTY,
+            files=SimpleNamespace(exists=lambda: True),
+        )
+
+        monthly_recap.WorkModeRequest.objects = FakeManager([on_duty_req])
+
+        rows = monthly_recap.get_monthly_attendance_rows(self.employee, "2026-03", language="id")
+        row = self._find_row(rows, self.target_date)
+
+        self.assertIn("Dinas Luar Akhir menunggu persetujuan: 17:00", row.note)
+
+    def test_indonesian_attendance_note_uses_final_wording(self):
+        attendance = SimpleNamespace(
+            id=54,
+            employee_id=self.employee,
+            attendance_date=self.target_date,
+            attendance_clock_in_date=self.target_date,
+            attendance_clock_in=time(13, 5),
+            attendance_clock_out_date=self.target_date,
+            attendance_clock_out=time(17, 0),
+            requested_data=json.dumps(
+                {
+                    "attendance_clock_in_date": "2026-03-03",
+                    "attendance_clock_in": "13:05",
+                    "__meta": {"approved_scopes": ["IN"]},
+                }
+            ),
+            is_validate_request=False,
+            is_validate_request_approved=True,
+            shift_id="SHIFT-A",
+            work_type_id=None,
+            attendance_validated=True,
+        )
+
+        monthly_recap.Attendance.objects = FakeManager([attendance])
+
+        rows = monthly_recap.get_monthly_attendance_rows(self.employee, "2026-03", language="id")
+        row = self._find_row(rows, self.target_date)
+
+        self.assertIn("Absensi Datang disetujui tetapi di luar batas waktu: 13:05", row.note)
 
 
 if __name__ == "__main__":
