@@ -10,6 +10,7 @@ from datetime import date, datetime, time
 from urllib.parse import parse_qs
 
 from django.contrib import messages
+from django import forms
 from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.db.models import ProtectedError, Q, Count
@@ -451,29 +452,33 @@ def request_new(request):
     if request.GET.get("bulk") and eval_validate(request.GET.get("bulk")):
         # Attendance Correction Request (mobile parity): no bulk/batch create flow in this UI.
         return HttpResponseForbidden(_("Bulk attendance request is not available here."))
-    if request.GET.get("employee_id"):
-        form = NewRequestForm(initial=request.GET.dict())
-    else:
-        form = NewRequestForm()
-    form = choosesubordinates(request, form, "attendance.change_attendance")
-    employees_qs = Employee.objects.filter(
-        Q(id__in=form.fields["employee_id"].queryset.values_list("id", flat=True))
-        | Q(employee_user_id=request.user)
-    )
+    # Self-only: employee selector is disabled.
+    # Keep other GET params (e.g., attendance_date) but force employee_id to the logged-in employee.
+    form = NewRequestForm(initial=request.GET.dict() if request.GET else None)
+    try:
+        self_emp_id = request.user.employee_get.id
+    except Exception:
+        self_emp_id = None
 
-    form.fields["employee_id"].queryset = employees_qs.distinct()
-    form.fields["employee_id"].initial = request.user.employee_get.id
-    if request.GET.get("emp_id"):
-        emp_id = request.GET.get("emp_id")
-        form.fields["employee_id"].queryset = Employee.objects.filter(id=emp_id)
-        form.fields["employee_id"].initial = emp_id
+    if self_emp_id:
+        form.fields['employee_id'].queryset = Employee.objects.filter(id=self_emp_id)
+        form.fields['employee_id'].initial = self_emp_id
+        form.fields['employee_id'].widget = forms.HiddenInput()
     if request.method == "POST":
-        form = NewRequestForm(request.POST, files=getattr(request, 'FILES', None))
-        employees_qs = Employee.objects.filter(
-            Q(id__in=form.fields["employee_id"].queryset.values_list("id", flat=True))
-            | Q(employee_user_id=request.user)
-        )
-        form.fields["employee_id"].queryset = employees_qs.distinct()
+        post_data = request.POST.copy()
+        try:
+            post_data['employee_id'] = request.user.employee_get.id
+        except Exception:
+            pass
+        form = NewRequestForm(post_data, files=getattr(request, 'FILES', None))
+        # Hide employee selector (self-only)
+        try:
+            self_emp_id = request.user.employee_get.id
+            form.fields['employee_id'].queryset = Employee.objects.filter(id=self_emp_id)
+            form.fields['employee_id'].initial = self_emp_id
+            form.fields['employee_id'].widget = forms.HiddenInput()
+        except Exception:
+            pass
         if form.is_valid():
             # Save (create_request) or update existing attendance (update_request)
             attendance_obj = None
