@@ -26,6 +26,7 @@ from attendance.models import (
 from attendance.services.attendance_correction_scope_rules import (
     get_approved_scopes,
     get_current_scope,
+    infer_scope_from_values,
     load_requested_data,
     scope_to_sessions,
 )
@@ -123,13 +124,16 @@ def _is_pending_create_request_source(attendance) -> bool:
 
     Those values are not actual/approved punches yet, so they must never be used
     as Check In / Check Out candidates in the monthly recap.
+
+    Important: some legacy / inconsistent rows may have empty or unparsable
+    ``requested_data`` even though the request is still a pending create_request.
+    We must still exclude their raw times from the final recap.
     """
 
     return bool(
         attendance
         and getattr(attendance, "is_validate_request", False)
         and getattr(attendance, "request_type", "") == "create_request"
-        and getattr(attendance, "requested_data", None)
     )
 
 
@@ -377,33 +381,46 @@ def _request_time_text_from_obj(req: WorkModeRequest) -> str:
     return ""
 
 
-def _requested_session_dt(
-    *,
-    requested_payload: dict,
-    attendance_date: date,
-    session: str,
-    tzinfo=None,
-) -> Optional[datetime]:
-    if not requested_payload:
-        return None
+def _requested_payload_for_attendance(attendance) -> dict:
+    """Return requested payload for an attendance request row.
 
-    session_norm = (session or "").upper()
-    if session_norm == "OUT":
-        date_key = "attendance_clock_out_date"
-        time_key = "attendance_clock_out"
-    else:
-        date_key = "attendance_clock_in_date"
-        time_key = "attendance_clock_in"
+    Fallback: legacy / inconsistent pending ``create_request`` rows may carry the
+    requested IN/OUT values only in the Attendance columns while ``requested_data``
+    is empty or malformed. In that case we synthesize a minimal payload so the
+    request still shows the correct session/time in Note and can be ignored from
+    final Check In / Check Out.
+    """
 
-    dt_time = _parse_time_like(requested_payload.get(time_key))
-    if not dt_time:
-        return None
+    payload = load_requested_data(getattr(attendance, "requested_data", None))
+    if payload:
+        return payload
 
-    dt_date = _parse_date_like(requested_payload.get(date_key), attendance_date)
-    return _normalize_dt(datetime.combine(dt_date, dt_time), tzinfo)
+    if not _is_pending_create_request_source(attendance):
+        return {}
+
+    fallback = {}
+    for key in (
+        "attendance_clock_in_date",
+        "attendance_clock_in",
+        "attendance_clock_out_date",
+        "attendance_clock_out",
+    ):
+        value = getattr(attendance, key, None)
+        if value in (None, "", "None", "null"):
+            continue
+        fallback[key] = value
+
+    if fallback:
+        fallback["__meta"] = {
+            "current_scope": infer_scope_from_values(
+                fallback.get("attendance_clock_in"),
+                fallback.get("attendance_clock_out"),
+            )
+        }
+    return fallback
 
 
-def _attendance_request_effects(
+def _attendance_request_effects_for_one(
     *,
     attendance: Optional[Attendance],
     attendance_date: date,
@@ -414,22 +431,27 @@ def _attendance_request_effects(
     tzinfo,
     language: str,
 ) -> Tuple[List[str], Set[datetime], Set[datetime], bool]:
-    """Return note suffixes + approved out-of-window exclusions for requested punches."""
+    """Return note suffixes + approved out-of-window exclusions for one row."""
 
     suffixes: List[str] = []
     excluded_in: Set[datetime] = set()
     excluded_out: Set[datetime] = set()
     used_detailed_pending = False
 
-    if not attendance or not getattr(attendance, "requested_data", None):
+    if not attendance:
         return suffixes, excluded_in, excluded_out, used_detailed_pending
 
-    requested_payload = load_requested_data(getattr(attendance, "requested_data", None))
+    requested_payload = _requested_payload_for_attendance(attendance)
     if not requested_payload:
         return suffixes, excluded_in, excluded_out, used_detailed_pending
 
     if bool(getattr(attendance, "is_validate_request", False)):
         current_scope = get_current_scope(getattr(attendance, "requested_data", None))
+        if not current_scope:
+            current_scope = infer_scope_from_values(
+                requested_payload.get("attendance_clock_in"),
+                requested_payload.get("attendance_clock_out"),
+            )
         for session in ("IN", "OUT"):
             if session not in scope_to_sessions(current_scope):
                 continue
@@ -447,6 +469,14 @@ def _attendance_request_effects(
         approved_sessions: Set[str] = set()
         for scope in get_approved_scopes(getattr(attendance, "requested_data", None)):
             approved_sessions |= scope_to_sessions(scope)
+
+        if not approved_sessions:
+            approved_sessions = scope_to_sessions(
+                infer_scope_from_values(
+                    requested_payload.get("attendance_clock_in"),
+                    requested_payload.get("attendance_clock_out"),
+                )
+            )
 
         for session in sorted(approved_sessions):
             req_dt = _requested_session_dt(
@@ -475,6 +505,79 @@ def _attendance_request_effects(
                         language=language,
                     )
                 )
+
+    return suffixes, excluded_in, excluded_out, used_detailed_pending
+
+
+def _requested_session_dt(
+    *,
+    requested_payload: dict,
+    attendance_date: date,
+    session: str,
+    tzinfo=None,
+) -> Optional[datetime]:
+    if not requested_payload:
+        return None
+
+    session_norm = (session or "").upper()
+    if session_norm == "OUT":
+        date_key = "attendance_clock_out_date"
+        time_key = "attendance_clock_out"
+    else:
+        date_key = "attendance_clock_in_date"
+        time_key = "attendance_clock_in"
+
+    dt_time = _parse_time_like(requested_payload.get(time_key))
+    if not dt_time:
+        return None
+
+    dt_date = _parse_date_like(requested_payload.get(date_key), attendance_date)
+    return _normalize_dt(datetime.combine(dt_date, dt_time), tzinfo)
+
+
+def _attendance_request_effects(
+    *,
+    attendances: List[Attendance],
+    attendance_date: date,
+    check_in_window_start_dt: Optional[datetime],
+    check_in_window_end_dt: Optional[datetime],
+    check_out_window_start_dt: Optional[datetime],
+    check_out_window_end_dt: Optional[datetime],
+    tzinfo,
+    language: str,
+) -> Tuple[List[str], Set[datetime], Set[datetime], bool]:
+    """Return note suffixes + approved out-of-window exclusions for requested punches.
+
+    We must inspect *all* attendance rows for the date, not only ``best_att``.
+    Otherwise a separate pending create_request row can still influence the note
+    or raw punch candidates inconsistently.
+    """
+
+    suffixes: List[str] = []
+    excluded_in: Set[datetime] = set()
+    excluded_out: Set[datetime] = set()
+    used_detailed_pending = False
+    seen_suffixes: Set[str] = set()
+
+    for attendance in attendances or []:
+        row_suffixes, row_excluded_in, row_excluded_out, row_used_detailed_pending = _attendance_request_effects_for_one(
+            attendance=attendance,
+            attendance_date=attendance_date,
+            check_in_window_start_dt=check_in_window_start_dt,
+            check_in_window_end_dt=check_in_window_end_dt,
+            check_out_window_start_dt=check_out_window_start_dt,
+            check_out_window_end_dt=check_out_window_end_dt,
+            tzinfo=tzinfo,
+            language=language,
+        )
+        for suffix in row_suffixes:
+            if suffix in seen_suffixes:
+                continue
+            seen_suffixes.add(suffix)
+            suffixes.append(suffix)
+        excluded_in |= row_excluded_in
+        excluded_out |= row_excluded_out
+        used_detailed_pending = used_detailed_pending or row_used_detailed_pending
 
     return suffixes, excluded_in, excluded_out, used_detailed_pending
 
@@ -701,7 +804,7 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
         check_out_window_end_dt = _normalize_dt(check_out_window_end_dt, tzinfo)
 
         attendance_request_suffixes, excluded_in_dts, excluded_out_dts, used_detailed_pending = _attendance_request_effects(
-            attendance=best_att,
+            attendances=att_list,
             attendance_date=d,
             check_in_window_start_dt=check_in_window_start_dt,
             check_in_window_end_dt=check_in_window_end_dt,
@@ -834,8 +937,7 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
         )
         note_suffixes = attendance_request_suffixes + work_mode_pending_suffixes
         correction_pending = bool(
-            best_att
-            and getattr(best_att, "is_validate_request", False)
+            any(getattr(att, "is_validate_request", False) for att in att_list)
             and not used_detailed_pending
         )
 
