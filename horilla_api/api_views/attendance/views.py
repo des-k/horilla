@@ -1,4 +1,6 @@
 from datetime import date, datetime, timedelta, timezone
+import calendar
+import io
 import json
 
 from django import template
@@ -7,8 +9,9 @@ from django.core.mail import EmailMessage
 from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.db.models import Case, CharField, F, Value, When, Q
-from django.http import QueryDict
+from django.http import HttpResponse, QueryDict
 from django.shortcuts import get_object_or_404
+from django.template.loader import render_to_string
 from django.utils import timezone as dj_timezone
 from django.utils.decorators import method_decorator
 from rest_framework import status
@@ -17,6 +20,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
+from xhtml2pdf import pisa
 
 import logging
 
@@ -3617,3 +3621,74 @@ class AttendanceMonthlyRecapAPIView(APIView):
             },
             status=200,
         )
+
+
+class AttendanceMonthlyRecapExportPDFAPIView(AttendanceMonthlyRecapAPIView):
+    """Export Attendance → Attendances (Monthly recap) as PDF for mobile/API clients."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        month = self._resolve_month(request)
+        lang = self._resolve_language(request)
+        employees_qs = self._allowed_employees_qs(request)
+
+        emp_id_raw = request.GET.get("employee_id")
+        if not emp_id_raw:
+            return Response({"error": "employee_id is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            employee = employees_qs.filter(id=int(emp_id_raw)).first()
+        except Exception:
+            employee = None
+
+        if employee is None:
+            return Response({"error": "Invalid employee_id"}, status=status.HTTP_400_BAD_REQUEST)
+
+        from attendance.services.monthly_recap import get_monthly_attendance_rows
+
+        rows = get_monthly_attendance_rows(employee, month, language=lang)
+        year = int(month[:4])
+        month_no = int(month[5:7])
+
+        if lang == "id":
+            month_names_id = [
+                "Januari",
+                "Februari",
+                "Maret",
+                "April",
+                "Mei",
+                "Juni",
+                "Juli",
+                "Agustus",
+                "September",
+                "Oktober",
+                "November",
+                "Desember",
+            ]
+            month_display = month_names_id[month_no - 1]
+            title = "Rekap Absensi Bulanan"
+        else:
+            month_display = calendar.month_name[month_no]
+            title = "Monthly Attendance Report"
+
+        context = {
+            "lang": lang,
+            "title": title,
+            "employee": employee,
+            "month_display": month_display,
+            "year": year,
+            "rows": rows,
+        }
+
+        filename = f"monthly_attendance_{employee.id}_{month}_{lang}.pdf"
+        html_content = render_to_string("attendance/attendances/monthly_export_pdf.html", context)
+        result = io.BytesIO()
+        pdf_status = pisa.CreatePDF(src=html_content, dest=result)
+        if pdf_status.err:
+            logger.error("Error creating Monthly Recap PDF via API")
+            return Response({"error": "Error generating PDF"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        response = HttpResponse(result.getvalue(), content_type="application/pdf")
+        response["Content-Disposition"] = f'attachment; filename="{filename}"'
+        return response
