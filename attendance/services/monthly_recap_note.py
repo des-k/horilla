@@ -104,13 +104,13 @@ def derive_note(inp: NoteInputs, *, language: str = "en") -> str:
        - Late if (late > 0) OR missing check-in
        - Leave Early if (early > 0) OR missing check-out
        - Combine deterministically.
-    4) Pending ON DUTY suffixes do not change effective calculations.
+    4) Pending request suffixes do not change effective calculations.
     """
 
     lang = (language or "en").lower()
     labels = {
         "en": {
-            "holiday": "Holiday",
+            "holiday": "Holiday/Off",
             "leave": "On Leave",
             "alpha": "Alpha",
             "late": "Late",
@@ -119,7 +119,7 @@ def derive_note(inp: NoteInputs, *, language: str = "en") -> str:
             "correction_pending": "Attendance correction pending",
         },
         "id": {
-            "holiday": "Libur",
+            "holiday": "Libur/Off",
             "leave": "Cuti",
             "alpha": "Alpa",
             "late": "Terlambat",
