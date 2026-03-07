@@ -75,6 +75,8 @@ def sessions_to_scope(sessions: Set[str]) -> str:
 def load_requested_data(requested_data: Optional[str]) -> Dict[str, Any]:
     if not requested_data:
         return {}
+    if isinstance(requested_data, dict):
+        return requested_data
     try:
         d = json.loads(requested_data)
         return d if isinstance(d, dict) else {}
