@@ -29,6 +29,7 @@ from urllib.parse import parse_qs
 
 import pandas as pd
 from django.contrib import messages
+from django import forms
 from django.core.paginator import Paginator
 from django.core.validators import validate_ipv46_address
 from django.db import transaction
@@ -1796,9 +1797,20 @@ def update_fields_based_shift(request):
             else AttendanceForm(initial=initial_data)
         )
     )
+    # Self-only: hide employee selector in attendance correction request form
+    try:
+        if isinstance(form, NewRequestForm):
+            self_emp_id = request.user.employee_get.id
+            form.fields['employee_id'].queryset = Employee.objects.filter(id=self_emp_id)
+            form.fields['employee_id'].initial = self_emp_id
+            form.fields['employee_id'].widget = forms.HiddenInput()
+    except Exception:
+        pass
+
+
     return render(
-        request,
-        "attendance/attendance/update_hx_form.html",
+    request,
+    "attendance/attendance/update_hx_form.html",
         {"request": request, "form": form},
     )
 
