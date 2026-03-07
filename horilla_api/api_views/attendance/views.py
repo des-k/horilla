@@ -20,6 +20,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
+from rest_framework.renderers import JSONRenderer, BaseRenderer
 from xhtml2pdf import pisa
 
 import logging
@@ -3498,6 +3499,26 @@ class UserAttendanceDetailedView(APIView):
         )
 
 
+class PDFRenderer(BaseRenderer):
+    media_type = "application/pdf"
+    format = "pdf"
+    charset = None
+    render_style = "binary"
+
+    def render(self, data, accepted_media_type=None, renderer_context=None):
+        if data is None:
+            return b""
+        if isinstance(data, (bytes, bytearray)):
+            return bytes(data)
+        if isinstance(data, str):
+            return data.encode("utf-8")
+        try:
+            return json.dumps(data).encode("utf-8")
+        except Exception:
+            return str(data).encode("utf-8")
+
+
+
 class AttendanceMonthlyRecapAPIView(APIView):
     """Attendance → Attendances (Monthly recap) rows.
 
@@ -3627,6 +3648,7 @@ class AttendanceMonthlyRecapExportPDFAPIView(AttendanceMonthlyRecapAPIView):
     """Export Attendance → Attendances (Monthly recap) as PDF for mobile/API clients."""
 
     permission_classes = [IsAuthenticated]
+    renderer_classes = [PDFRenderer, JSONRenderer]
 
     def get(self, request):
         month = self._resolve_month(request)
