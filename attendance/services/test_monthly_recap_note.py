@@ -6,7 +6,7 @@ from attendance.services.monthly_recap_note import NoteInputs, derive_note
 class MonthlyRecapNoteTests(unittest.TestCase):
     def test_off_holiday_overrides(self):
         note = derive_note(NoteInputs(is_off=True, off_kind="holiday"))
-        self.assertEqual(note, "Holiday")
+        self.assertEqual(note, "Holiday/Off")
 
     def test_off_leave_overrides(self):
         note = derive_note(NoteInputs(is_off=True, off_kind="leave"))
