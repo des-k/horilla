@@ -372,6 +372,76 @@ class MonthlyRecapIntegrationTests(unittest.TestCase):
         self.assertIn("Attendance IN pending: 08:12", row.note)
         self.assertIn("On Duty OUT pending: 17:10", row.note)
 
+    def test_pending_create_request_does_not_fill_empty_check_in_or_check_out(self):
+        pending_create_request = SimpleNamespace(
+            id=31,
+            employee_id=self.employee,
+            attendance_date=self.target_date,
+            attendance_clock_in_date=self.target_date,
+            attendance_clock_in=time(8, 12),
+            attendance_clock_out_date=self.target_date,
+            attendance_clock_out=time(17, 5),
+            requested_data=json.dumps(
+                {
+                    "attendance_clock_in_date": "2026-03-03",
+                    "attendance_clock_in": "08:12",
+                    "attendance_clock_out_date": "2026-03-03",
+                    "attendance_clock_out": "17:05",
+                    "__meta": {"current_scope": "FULL"},
+                }
+            ),
+            is_validate_request=True,
+            is_validate_request_approved=False,
+            request_type="create_request",
+            shift_id="SHIFT-A",
+            work_type_id=None,
+            attendance_validated=False,
+        )
+
+        monthly_recap.Attendance.objects = FakeManager([pending_create_request])
+
+        rows = monthly_recap.get_monthly_attendance_rows(self.employee, "2026-03")
+        row = self._find_row(rows, self.target_date)
+
+        self.assertEqual(row.check_in, "—")
+        self.assertEqual(row.check_out, "—")
+        self.assertIn("Attendance IN pending: 08:12", row.note)
+        self.assertIn("Attendance OUT pending: 17:05", row.note)
+
+    def test_pending_work_mode_linked_punch_is_ignored_for_final_time(self):
+        pending_work_req = SimpleNamespace(
+            id=41,
+            employee_id=self.employee,
+            start_date=self.target_date,
+            end_date=self.target_date,
+            status=monthly_recap.WorkModeRequestStatus.PENDING,
+            scope=monthly_recap.WorkModeRequestScope.IN,
+            mode=monthly_recap.AttendanceWorkMode.ON_DUTY,
+            planned_time=time(8, 0),
+        )
+        pending_linked_activity = SimpleNamespace(
+            id=42,
+            employee_id=self.employee,
+            attendance_date=self.target_date,
+            clock_in_date=self.target_date,
+            clock_in=time(8, 0),
+            in_datetime=datetime(2026, 3, 3, 8, 0),
+            clock_out_date=None,
+            clock_out=None,
+            out_datetime=None,
+            work_mode_request_id=pending_work_req,
+        )
+
+        monthly_recap.WorkModeRequest.objects = FakeManager([pending_work_req])
+        monthly_recap.AttendanceActivity.objects = FakeManager([pending_linked_activity])
+
+        rows = monthly_recap.get_monthly_attendance_rows(self.employee, "2026-03")
+        row = self._find_row(rows, self.target_date)
+
+        self.assertEqual(row.check_in, "—")
+        self.assertEqual(row.check_out, "—")
+        self.assertIn("On Duty IN pending: 08:00", row.note)
+
     def test_approved_request_out_of_window_is_not_applied_and_only_goes_to_note(self):
         attendance = SimpleNamespace(
             id=4,
