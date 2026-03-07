@@ -3519,9 +3519,8 @@ class AttendanceMonthlyRecapAPIView(APIView):
     def _allowed_employees_qs(self, request):
         """Employees accessible to the requester.
 
-        Spec-aligned:
-          - Admin/HR (employee.view_employee) -> all employees
-          - Others -> self only
+        Mirrors the logic of horilla_api.api_methods.base.methods.permission_based_queryset
+        but for Employee queryset.
         """
 
         from employee.models import Employee
@@ -3530,12 +3529,17 @@ class AttendanceMonthlyRecapAPIView(APIView):
         employee = getattr(user, "employee_get", None)
         qs = Employee.objects.filter(is_active=True).select_related("employee_work_info")
 
-        # Admin/HR: full access
-        if user.is_superuser or user.has_perm("employee.view_employee"):
+        # HR/Admin: full access
+        if user.has_perm("attendance.view_attendance"):
             return qs
 
         if not employee:
             return qs.none()
+
+        # Manager: self + subordinates
+        is_manager = EmployeeWorkInformation.objects.filter(reporting_manager_id=employee).exists()
+        if is_manager:
+            return qs.filter(Q(id=employee.id) | Q(employee_work_info__reporting_manager_id=employee))
 
         # Regular user: self only
         return qs.filter(id=employee.id)
