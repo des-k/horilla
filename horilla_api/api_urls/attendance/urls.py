@@ -179,4 +179,14 @@ urlpatterns = [
         AttendanceMonthlyRecapAPIView.as_view(),
         name="api-attendance-monthly-recap-noslash",
     ),
+    path(
+        "attendances-recap/export-pdf/",
+        AttendanceMonthlyRecapExportPDFAPIView.as_view(),
+        name="api-attendance-monthly-recap-export-pdf",
+    ),
+    path(
+        "attendances-recap/export-pdf",
+        AttendanceMonthlyRecapExportPDFAPIView.as_view(),
+        name="api-attendance-monthly-recap-export-pdf-noslash",
+    ),
 ]
