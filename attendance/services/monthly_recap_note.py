@@ -15,17 +15,16 @@ from typing import List, Optional
 # NOTE suffix / Work Type translation table (longest phrases first)
 _ID_SUFFIX_REPLACEMENTS = [
     # Pending / awaiting upload variants
-    ("On Duty FULL Pending Approval", "Permintaan Dinas luar penuh menunggu persetujuan"),
-    ("On Duty OUT Pending Approval", "Permintaan Dinas luar akhir menunggu persetujuan"),
-    ("On Duty IN Pending Approval", "Permintaan Dinas luar awal menunggu persetujuan"),
-    ("On Duty OUT Awaiting Document Upload", "Permintaan Dinas luar akhir menunggu upload"),
-    ("On Duty IN Awaiting Document Upload", "Permintaan Dinas luar awal menunggu upload"),
-    # Per user request: FULL awaiting upload maps to "awal"
-    ("On Duty FULL Awaiting Document Upload", "Permintaan Dinas luar awal menunggu upload"),
+    ("On Duty FULL Pending Approval", "Dinas Luar Penuh menunggu persetujuan"),
+    ("On Duty OUT Pending Approval", "Dinas Luar Akhir menunggu persetujuan"),
+    ("On Duty IN Pending Approval", "Dinas Luar Awal menunggu persetujuan"),
+    ("On Duty OUT Awaiting Document Upload", "Dinas Luar Akhir menunggu upload dokumen"),
+    ("On Duty IN Awaiting Document Upload", "Dinas Luar Awal menunggu upload dokumen"),
+    ("On Duty FULL Awaiting Document Upload", "Dinas Luar Penuh menunggu upload dokumen"),
     # Base labels
-    ("On Duty FULL", "Dinas luar penuh"),
-    ("On Duty OUT", "Dinas luar akhir"),
-    ("On Duty IN", "Dinas luar awal"),
+    ("On Duty FULL", "Dinas Luar Penuh"),
+    ("On Duty OUT", "Dinas Luar Akhir"),
+    ("On Duty IN", "Dinas Luar Awal"),
 ]
 
 
@@ -110,7 +109,7 @@ def derive_note(inp: NoteInputs, *, language: str = "en") -> str:
     lang = (language or "en").lower()
     labels = {
         "en": {
-            "holiday": "Holiday/Off",
+            "holiday": "Holiday",
             "leave": "On Leave",
             "alpha": "Alpha",
             "late": "Late",
@@ -119,7 +118,7 @@ def derive_note(inp: NoteInputs, *, language: str = "en") -> str:
             "correction_pending": "Attendance correction pending",
         },
         "id": {
-            "holiday": "Libur/Off",
+            "holiday": "Libur",
             "leave": "Cuti",
             "alpha": "Alpa",
             "late": "Terlambat",
