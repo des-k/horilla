@@ -408,6 +408,65 @@ class MonthlyRecapIntegrationTests(unittest.TestCase):
         self.assertIn("Attendance IN pending: 08:12", row.note)
         self.assertIn("Attendance OUT pending: 17:05", row.note)
 
+    def test_pending_create_request_without_requested_data_stays_empty_and_keeps_detailed_note(self):
+        pending_create_request = SimpleNamespace(
+            id=32,
+            employee_id=self.employee,
+            attendance_date=self.target_date,
+            attendance_clock_in_date=self.target_date,
+            attendance_clock_in=time(8, 12),
+            attendance_clock_out_date=None,
+            attendance_clock_out=None,
+            requested_data=None,
+            is_validate_request=True,
+            is_validate_request_approved=False,
+            request_type="create_request",
+            shift_id="SHIFT-A",
+            work_type_id=None,
+            attendance_validated=False,
+        )
+
+        monthly_recap.Attendance.objects = FakeManager([pending_create_request])
+
+        rows = monthly_recap.get_monthly_attendance_rows(self.employee, "2026-03")
+        row = self._find_row(rows, self.target_date)
+
+        self.assertEqual(row.check_in, "—")
+        self.assertEqual(row.check_out, "—")
+        self.assertIn("Attendance IN pending: 08:12", row.note)
+        self.assertNotIn("Attendance correction pending", row.note)
+
+    def test_pending_create_request_dict_requested_data_keeps_detailed_note(self):
+        pending_create_request = SimpleNamespace(
+            id=33,
+            employee_id=self.employee,
+            attendance_date=self.target_date,
+            attendance_clock_in_date=self.target_date,
+            attendance_clock_in=time(8, 12),
+            attendance_clock_out_date=None,
+            attendance_clock_out=None,
+            requested_data={
+                "attendance_clock_in_date": "2026-03-03",
+                "attendance_clock_in": "08:12",
+                "__meta": {"current_scope": "IN"},
+            },
+            is_validate_request=True,
+            is_validate_request_approved=False,
+            request_type="create_request",
+            shift_id="SHIFT-A",
+            work_type_id=None,
+            attendance_validated=False,
+        )
+
+        monthly_recap.Attendance.objects = FakeManager([pending_create_request])
+
+        rows = monthly_recap.get_monthly_attendance_rows(self.employee, "2026-03")
+        row = self._find_row(rows, self.target_date)
+
+        self.assertEqual(row.check_in, "—")
+        self.assertIn("Attendance IN pending: 08:12", row.note)
+        self.assertNotIn("Attendance correction pending", row.note)
+
     def test_pending_work_mode_linked_punch_is_ignored_for_final_time(self):
         pending_work_req = SimpleNamespace(
             id=41,
