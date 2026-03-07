@@ -2630,6 +2630,18 @@ class CheckingStatus(APIView):
         server_now_iso = dt_now.isoformat()
         server_time_hhmm = dt_now.strftime("%H:%M")
 
+        # If client provides a target date (e.g., Attendance Correction form), compute shift rules for that date
+        # while keeping server_now/server_time based on real current time.
+        target_date_str = (request.GET.get('attendance_date') or request.GET.get('date') or '').strip()
+        if target_date_str:
+            try:
+                from datetime import datetime as _dt
+                # Use 12:01 to avoid night-shift noon-to-noon adjustment for historical/future dates
+                d = _dt.strptime(target_date_str, '%Y-%m-%d').date()
+                dt_now = dt_now.replace(year=d.year, month=d.month, day=d.day, hour=12, minute=1, second=0, microsecond=0)
+            except Exception:
+                pass
+
         # Approver-only managers (reporting managers) are excluded from attendance.
         # They can still approve requests, but must not clock-in/out in Horilla.
         if _is_attendance_exempt_manager(employee):
