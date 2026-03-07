@@ -1435,7 +1435,6 @@ class AttendanceRequestView(APIView):
                 # If this was an update_request (attendance already exists), attach to the existing record.
                 if attendance_obj is None:
                     try:
-                        from attendance.models import Attendance
                         emp = request.data.get("employee_id") if hasattr(request, "data") else None
                         if not emp:
                             try:
