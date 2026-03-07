@@ -118,6 +118,58 @@ def _localize_work_type(text: str, language: str) -> str:
     return localize_on_duty_work_type(text, language=language)
 
 
+def _is_pending_create_request_source(attendance) -> bool:
+    """Pending create_request rows store requested times in Attendance fields.
+
+    Those values are not actual/approved punches yet, so they must never be used
+    as Check In / Check Out candidates in the monthly recap.
+    """
+
+    return bool(
+        attendance
+        and getattr(attendance, "is_validate_request", False)
+        and getattr(attendance, "request_type", "") == "create_request"
+        and getattr(attendance, "requested_data", None)
+    )
+
+
+def _linked_work_mode_request_status(obj, request_status_by_id: Dict[int, str], *, session: str) -> Optional[str]:
+    """Return linked WorkModeRequest status for IN/OUT punch sources if available."""
+
+    if not obj:
+        return None
+
+    req_id = None
+    session_norm = (session or "").upper()
+
+    if session_norm == "IN":
+        req_id = getattr(obj, "in_related_work_type_request_id", None)
+    elif session_norm == "OUT":
+        req_id = getattr(obj, "out_related_work_type_request_id", None)
+
+    if not req_id:
+        linked = getattr(obj, "work_mode_request_id", None)
+        req_id = getattr(linked, "id", None) or getattr(obj, "work_mode_request_id_id", None)
+
+    if not req_id:
+        return None
+
+    return request_status_by_id.get(req_id)
+
+
+def _should_use_raw_punch_source(obj, request_status_by_id: Dict[int, str], *, session: str) -> bool:
+    """Only actual / approved punch sources may contribute to final IN/OUT values."""
+
+    if _is_pending_create_request_source(obj):
+        return False
+
+    linked_status = _linked_work_mode_request_status(obj, request_status_by_id, session=session)
+    if linked_status and linked_status != WorkModeRequestStatus.APPROVED:
+        return False
+
+    return True
+
+
 def _work_mode_label(mode: str) -> str:
     if mode == AttendanceWorkMode.ON_DUTY:
         return "On Duty"
@@ -483,16 +535,22 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
         attendance_date__range=(first_day, last_day),
     ).order_by("attendance_date", "id")
 
-    req_qs = (
-        WorkModeRequest.objects.filter(
-            employee_id=employee,
-            start_date__lte=last_day,
-            end_date__gte=first_day,
-        )
-        .exclude(status__in=[WorkModeRequestStatus.REJECTED, WorkModeRequestStatus.CANCELED])
-        .order_by("-id")
-    )
-    requests = list(req_qs)
+    all_req_qs = WorkModeRequest.objects.filter(
+        employee_id=employee,
+        start_date__lte=last_day,
+        end_date__gte=first_day,
+    ).order_by("-id")
+    all_requests = list(all_req_qs)
+    requests = [
+        r
+        for r in all_requests
+        if r.status not in [WorkModeRequestStatus.REJECTED, WorkModeRequestStatus.CANCELED]
+    ]
+    request_status_by_id = {
+        getattr(r, "id", None): getattr(r, "status", None)
+        for r in all_requests
+        if getattr(r, "id", None) is not None
+    }
 
     leave_qs = LeaveRequest.objects.filter(
         employee_id=employee,
@@ -585,36 +643,40 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
         out_dts_raw: List[datetime] = []
 
         for a in att_list:
-            dt_in = _combine_dt(
-                getattr(a, "attendance_clock_in_date", None),
-                getattr(a, "attendance_clock_in", None),
-                a.attendance_date,
-            )
-            if dt_in:
-                in_dts_raw.append(_normalize_dt(dt_in))
-            dt_out = _combine_dt(
-                getattr(a, "attendance_clock_out_date", None),
-                getattr(a, "attendance_clock_out", None),
-                a.attendance_date,
-            )
-            if dt_out:
-                out_dts_raw.append(_normalize_dt(dt_out))
+            if _should_use_raw_punch_source(a, request_status_by_id, session="IN"):
+                dt_in = _combine_dt(
+                    getattr(a, "attendance_clock_in_date", None),
+                    getattr(a, "attendance_clock_in", None),
+                    a.attendance_date,
+                )
+                if dt_in:
+                    in_dts_raw.append(_normalize_dt(dt_in))
+            if _should_use_raw_punch_source(a, request_status_by_id, session="OUT"):
+                dt_out = _combine_dt(
+                    getattr(a, "attendance_clock_out_date", None),
+                    getattr(a, "attendance_clock_out", None),
+                    a.attendance_date,
+                )
+                if dt_out:
+                    out_dts_raw.append(_normalize_dt(dt_out))
 
         for ac in act_list:
-            dt_in = getattr(ac, "in_datetime", None) or _combine_dt(
-                getattr(ac, "clock_in_date", None),
-                getattr(ac, "clock_in", None),
-                ac.attendance_date,
-            )
-            if dt_in:
-                in_dts_raw.append(_normalize_dt(dt_in))
-            dt_out = getattr(ac, "out_datetime", None) or _combine_dt(
-                getattr(ac, "clock_out_date", None),
-                getattr(ac, "clock_out", None),
-                ac.attendance_date,
-            )
-            if dt_out:
-                out_dts_raw.append(_normalize_dt(dt_out))
+            if _should_use_raw_punch_source(ac, request_status_by_id, session="IN"):
+                dt_in = getattr(ac, "in_datetime", None) or _combine_dt(
+                    getattr(ac, "clock_in_date", None),
+                    getattr(ac, "clock_in", None),
+                    ac.attendance_date,
+                )
+                if dt_in:
+                    in_dts_raw.append(_normalize_dt(dt_in))
+            if _should_use_raw_punch_source(ac, request_status_by_id, session="OUT"):
+                dt_out = getattr(ac, "out_datetime", None) or _combine_dt(
+                    getattr(ac, "clock_out_date", None),
+                    getattr(ac, "clock_out", None),
+                    ac.attendance_date,
+                )
+                if dt_out:
+                    out_dts_raw.append(_normalize_dt(dt_out))
 
         tzinfo = None
         for cand in (
