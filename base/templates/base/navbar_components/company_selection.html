@@ -1,5 +1,6 @@
 {% load static %}
 {% load i18n %}
+{% load basefilters %}
 <div id="multCompany" class="oh-dropdown" x-data="{open: false}" @click="open = !open" title="{% trans 'Companies' %}">
     <div class="oh-navbar__action-icons">
         <a href="#" class="oh-navbar__action-icons-link">
@@ -11,7 +12,12 @@
                 {% for company in all_companies %}
                     <li class="oh-dropdown__item">
                         <a hx-get="{% url 'update-selected-company' %}?company_id={{company.0}}&next={{ request.path }}"class="oh-dropdown__link">
-                            <img src="{{company.2}}" class="oh-dropdown__lang-icon" style="border-radius: 50%;" />
+                            {% if company.2 %}
+                            <img src="{{ company.2 }}" class="oh-dropdown__lang-icon" style="border-radius: 50%; object-fit: cover;" onerror="this.style.display='none'; this.nextElementSibling.style.display='inline-flex';" />
+                            <span class="oh-dropdown__lang-icon" style="border-radius: 50%; display:none; align-items:center; justify-content:center; background:#e9eef7; color:#4f5d75; font-size:11px; font-weight:700;">{{ company.1|initials }}</span>
+                            {% else %}
+                            <span class="oh-dropdown__lang-icon" style="border-radius: 50%; display:inline-flex; align-items:center; justify-content:center; background:#e9eef7; color:#4f5d75; font-size:11px; font-weight:700;">{{ company.1|initials }}</span>
+                            {% endif %}
                             {{company.1}}
                             {% if company.3 %}
                                 <ion-icon name="checkmark-circle-outline" style="position: relative; top: 3.3px; color: green; font-size: 1.2em;"></ion-icon>
