@@ -2,12 +2,10 @@
 leave/sidebar.py
 """
 
-from django.apps import apps
 from django.urls import reverse
 from django.utils.translation import gettext_lazy as trans
 
 from base.templatetags.basefilters import is_leave_approval_manager, is_reportingmanager
-from leave.templatetags.leavefilters import is_compensatory
 
 MENU = trans("Leave")
 IMG_SRC = "images/ui/leave.svg"
@@ -36,10 +34,6 @@ SUBMENUS = [
         "menu": trans("Assigned Leave"),
         "redirect": reverse("assign-view"),
         "accessibility": "leave.sidebar.assign_accessibility",
-    },
-    {
-        "menu": trans("Leave Allocation Request"),
-        "redirect": reverse("leave-allocation-request-view"),
     },
     {
         "menu": trans("Holidays"),
@@ -102,15 +96,3 @@ def restrict_leave_accessibility(request, submenu, user_perms, *args, **kwargs):
         "leave.view_restrictleave"
     )
 
-
-if apps.is_installed("attendance"):
-    SUBMENUS.append(
-        {
-            "menu": trans("Compensatory Leave Requests"),
-            "redirect": reverse("view-compensatory-leave"),
-            "accessibility": "leave.sidebar.componstory_accessibility",
-        }
-    )
-
-    def componstory_accessibility(request, submenu, user_perms, *args, **kwargs):
-        return is_compensatory(request.user)
