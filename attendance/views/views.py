@@ -2673,6 +2673,7 @@ def check_in_check_out_setting(request):
     """
     Check in check out setting
     """
+    AttendanceGeneralSetting.objects.all().update(enable_check_in=False)
     attendance_settings = AttendanceGeneralSetting.objects.all()
     return render(
         request,
@@ -2686,24 +2687,17 @@ def check_in_check_out_setting(request):
 @permission_required("attendance.change_attendancegeneralsetting")
 def enable_disable_check_in(request):
     """
-    Enables or disables check-in check-out.
+    Check-in/check-out is locked in disabled state and cannot be enabled.
     """
     if request.method == "POST":
-        is_checked = request.POST.get("isChecked")
         setting_id = request.POST.get("setting_Id")
-        enable = bool(is_checked)
-
-        updated = AttendanceGeneralSetting.objects.filter(id=setting_id).update(
-            enable_check_in=enable
+        AttendanceGeneralSetting.objects.filter(id=setting_id).update(
+            enable_check_in=False
         )
-
-        if updated:
-            message = _("Check In/Check Out has been successfully {}.").format(
-                _("enabled") if enable else _("disabled")
-            )
-            messages.success(request, message)
-            if enable:
-                return render(request, "attendance/components/in_out_component.html")
+        messages.error(
+            request,
+            _("Check In/Check Out is locked as disabled and cannot be changed."),
+        )
 
     return HttpResponse("")
 
