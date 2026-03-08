@@ -115,29 +115,6 @@ function initializeSummernote(candId,searchWords,) {
   </div>
   <div class="oh-sidebar__menu">
     <ul class="oh-sidebar__menu-items">
-      <li
-        class="oh-sidebar__menu-item"
-        x-data="{ isOpen: getOpenState('dashboardNav') }"
-      >
-        <a
-          href="{%url 'home-page' %}"
-          onclick="window.location.href=this.href; return false;"
-          class="oh-sidebar__menu-link"
-          data-id="dashboardNav"
-          x-on:click.prevent="isOpen = !isOpen; saveOpenState('dashboardNav', isOpen)"
-          x-bind:class="isOpen ? 'oh-sidebar__menu-link--active' : ''"
-        >
-          <div class="oh-sidebar__menu-icon">
-            <img
-              src="{% static 'images/ui/dashboard.svg' %}"
-              alt="Dashboard"
-              width="24"
-              height="24"
-            />
-          </div>
-          <span>{% trans "Dashboard" %}</span>
-        </a>
-      </li>
       {% for menues in sidebar %}
       <li
         class="oh-sidebar__menu-item"
