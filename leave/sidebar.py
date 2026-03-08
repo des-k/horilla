@@ -96,3 +96,4 @@ def restrict_leave_accessibility(request, submenu, user_perms, *args, **kwargs):
         "leave.view_restrictleave"
     )
 
+
