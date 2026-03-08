@@ -25,13 +25,21 @@ from horilla.decorators import hx_request_required, login_required, permission_r
 from horilla.methods import get_horilla_model_class
 
 
+def get_company_icon_url(company):
+    """Return a safe company icon URL or empty string."""
+    try:
+        return company.icon.url if getattr(company, "icon", None) else ""
+    except Exception:
+        return ""
+
+
 class AllCompany:
     """
     Dummy class
     """
 
     class Urls:
-        url = "https://ui-avatars.com/api/?name=All+Company&background=random"
+        url = ""
 
     company = "All Company"
     icon = Urls()
@@ -53,14 +61,14 @@ def get_companies(request):
     This method will return the history additional field form
     """
     companies = list(
-        [company.id, company.company, company.icon.url, False]
+        [company.id, company.company, get_company_icon_url(company), False]
         for company in Company.objects.all()
     )
     companies = [
         [
             "all",
             "All Company",
-            "https://ui-avatars.com/api/?name=All+Company&background=random",
+            "",
             False,
         ],
     ] + companies
@@ -116,7 +124,7 @@ def update_selected_company(request):
                     text = "My Company"
                 company = {
                     "company": company.company,
-                    "icon": company.icon.url,
+                    "icon": get_company_icon_url(company),
                     "text": text,
                     "id": company.id,
                 }
@@ -139,7 +147,7 @@ def update_selected_company(request):
 
     company = {
         "company": company.company,
-        "icon": company.icon.url,
+        "icon": get_company_icon_url(company),
         "text": text,
         "id": company.id,
     }
