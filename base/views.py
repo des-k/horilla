@@ -571,7 +571,7 @@ def login_user(request):
     if request.method == "POST":
         username = request.POST.get("username")
         password = request.POST.get("password")
-        next_url = request.GET.get("next", "/")
+        next_url = request.GET.get("next") or reverse("attendance-employee-month-view")
         query_params = request.GET.dict()
         query_params.pop("next", None)
         params = urlencode(query_params)
@@ -921,36 +921,9 @@ class Workinfo:
 @login_required
 def home(request):
     """
-    This method is used to render index page
+    Redirect the default landing page to Attendance -> Attendances.
     """
-
-    today = datetime.today()
-    today_weekday = today.weekday()
-    first_day_of_week = today - timedelta(days=today_weekday)
-    last_day_of_week = first_day_of_week + timedelta(days=6)
-
-    employee_charts = DashboardEmployeeCharts.objects.get_or_create(
-        employee=request.user.employee_get
-    )[0]
-
-    user = request.user
-    today = timezone.now().date()  # Get today's date
-    is_birthday = None
-
-    if user.employee_get.dob != None:
-        is_birthday = (
-            user.employee_get.dob.month == today.month
-            and user.employee_get.dob.day == today.day
-        )
-
-    context = {
-        "first_day_of_week": first_day_of_week.strftime("%Y-%m-%d"),
-        "last_day_of_week": last_day_of_week.strftime("%Y-%m-%d"),
-        "charts": employee_charts.charts,
-        "is_birthday": is_birthday,
-    }
-
-    return render(request, "index.html", context)
+    return redirect("attendance-employee-month-view")
 
 
 @login_required
