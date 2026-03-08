@@ -1097,17 +1097,11 @@ def clock_in(request):
     Web clock-in button (HTMX).
     Note: you stated "no web attendance"; keep enable_check_in disabled to block normal users.
     """
-    selected_company = request.session.get("selected_company")
-    if selected_company == "all":
-        attendance_general_settings = AttendanceGeneralSetting.objects.filter(company_id=None).first()
-    else:
-        company = Company.objects.filter(id=selected_company).first()
-        attendance_general_settings = AttendanceGeneralSetting.objects.filter(company_id=company).first()
-
-    # Check feature enabled OR injected datetime (biometric/mobile server-side call)
+    # Web Check-In is locked as disabled.
+    # Only injected datetime/date+time requests (for server-side biometric/mobile flows)
+    # are allowed to continue.
     if not (
-        (attendance_general_settings and attendance_general_settings.enable_check_in)
-        or request.__dict__.get("datetime")
+        request.__dict__.get("datetime")
         or (request.__dict__.get("date") and request.__dict__.get("time"))
     ):
         messages.error(request, _("Check in/Check out feature is not enabled."))
@@ -1262,16 +1256,11 @@ def clock_out(request):
     Web clock-out button (HTMX).
     Note: you stated "no web attendance"; keep enable_check_in disabled to block normal users.
     """
-    selected_company = request.session.get("selected_company")
-    if selected_company == "all":
-        attendance_general_settings = AttendanceGeneralSetting.objects.filter(company_id=None).first()
-    else:
-        company = Company.objects.filter(id=selected_company).first()
-        attendance_general_settings = AttendanceGeneralSetting.objects.filter(company_id=company).first()
-
+    # Web Check-Out is locked as disabled.
+    # Only injected datetime/date+time requests (for server-side biometric/mobile flows)
+    # are allowed to continue.
     if not (
-        (attendance_general_settings and attendance_general_settings.enable_check_in)
-        or request.__dict__.get("datetime")
+        request.__dict__.get("datetime")
         or (request.__dict__.get("date") and request.__dict__.get("time"))
     ):
         messages.error(request, _("Check in/Check out feature is not enabled."))
