@@ -26,7 +26,6 @@ SUBMENUS = [
         "menu": _("Work Type Requests"),
         "redirect": reverse("attendance-work-type-request-view"),
     },
-    
     {
         "menu": _("Attendance Activities"),
         "redirect": reverse("attendance-activity-view"),
