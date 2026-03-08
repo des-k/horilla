@@ -1,4 +1,5 @@
 import json
+import re
 
 from django import template
 from django.apps import apps
@@ -153,3 +154,26 @@ def readable(value):
     except:
         value = value
     return value
+
+@register.filter(name="initials")
+def initials(value):
+    """Return up to two initials for avatar fallback."""
+    text = str(value or "").strip()
+    if not text:
+        return "C"
+
+    words = [word for word in re.split(r"\s+", text) if word]
+    letters = []
+    for word in words:
+        cleaned = re.sub(r"[^A-Za-z0-9]", "", word)
+        if cleaned:
+            letters.append(cleaned[0].upper())
+        if len(letters) == 2:
+            break
+
+    if not letters:
+        cleaned = re.sub(r"[^A-Za-z0-9]", "", text)
+        return (cleaned[:2] or "C").upper()
+
+    return "".join(letters[:2])
+
