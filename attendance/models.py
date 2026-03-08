@@ -1216,7 +1216,7 @@ class AttendanceGeneralSetting(HorillaModel):
 
     time_runner = models.BooleanField(default=True)
     enable_check_in = models.BooleanField(
-        default=True,
+        default=False,
         verbose_name=_("Enable Check in/Check out"),
         help_text=_(
             "Enabling this feature allows employees to record their attendance using the Check-In/Check-Out button."
@@ -1224,6 +1224,13 @@ class AttendanceGeneralSetting(HorillaModel):
     )
     company_id = models.ForeignKey(Company, on_delete=models.CASCADE, null=True)
     objects = HorillaCompanyManager()
+
+    def save(self, *args, **kwargs):
+        """
+        Lock web Check In/Check Out in disabled state.
+        """
+        self.enable_check_in = False
+        super().save(*args, **kwargs)
 
 
 class WorkRecords(models.Model):
