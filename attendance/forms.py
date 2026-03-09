@@ -901,7 +901,7 @@ class NewRequestForm(AttendanceRequestForm):
             except Exception:
                 # fail open on timezone issues
                 pass
-        scope = (self.data.get("scope") or self.cleaned_data.get("scope") or "BOTH").strip().upper()
+        raw_scope = (self.data.get("scope") or self.cleaned_data.get("scope") or "").strip().upper()
 
         if employee and not hasattr(employee, "employee_work_info"):
             raise ValidationError(_("Employee work info not found"))
@@ -913,6 +913,20 @@ class NewRequestForm(AttendanceRequestForm):
 
         in_time = self.cleaned_data.get("attendance_clock_in")
         out_time = self.cleaned_data.get("attendance_clock_out")
+
+        # Be backward-compatible with clients that do not explicitly send scope.
+        # Infer from the provided session values instead of defaulting to BOTH,
+        # so IN-only / OUT-only requests do not fail with the opposite field error.
+        if raw_scope in {"IN", "OUT", "BOTH"}:
+            scope = raw_scope
+        elif in_time and not out_time:
+            scope = "IN"
+        elif out_time and not in_time:
+            scope = "OUT"
+        else:
+            scope = "BOTH"
+
+        self.cleaned_data["scope"] = scope
 
         # Apply scope rules (mobile parity)
         if scope == "IN":
