@@ -114,6 +114,11 @@ class AttendanceRequestSerializer(serializers.ModelSerializer):
     status = serializers.SerializerMethodField(read_only=True)
     request_status = serializers.SerializerMethodField(read_only=True)
     action_by_name = serializers.SerializerMethodField(read_only=True)
+    action_type = serializers.SerializerMethodField(read_only=True)
+    action_at = serializers.SerializerMethodField(read_only=True)
+    approved_at = serializers.SerializerMethodField(read_only=True)
+    rejected_at = serializers.SerializerMethodField(read_only=True)
+    canceled_at = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = Attendance
@@ -243,16 +248,47 @@ class AttendanceRequestSerializer(serializers.ModelSerializer):
         return self._compute_status(obj)
 
     def get_action_by_name(self, obj):
-        ab = getattr(obj, "approved_by", None)
-        if not ab:
+        actor = getattr(obj, "action_by", None)
+        if not actor:
             return None
         try:
-            first = getattr(ab, "employee_first_name", "") or ""
-            last = getattr(ab, "employee_last_name", "") or ""
+            first = getattr(actor, "employee_first_name", "") or ""
+            last = getattr(actor, "employee_last_name", "") or ""
             name = (first + " " + last).strip()
-            return name or str(ab)
+            return name or str(actor)
         except Exception:
             return None
+
+    def _get_action_type(self, obj):
+        value = getattr(obj, "action_type", None)
+        if value:
+            return value
+        status = self._compute_status(obj)
+        if status == "APPROVED":
+            return "APPROVED"
+        if status == "REJECTED":
+            return "REJECTED"
+        if status == "CANCEL":
+            return "CANCELED"
+        return None
+
+    def get_action_type(self, obj):
+        return self._get_action_type(obj)
+
+    def _get_action_at(self, obj):
+        return getattr(obj, "action_at", None)
+
+    def get_action_at(self, obj):
+        return self._get_action_at(obj)
+
+    def get_approved_at(self, obj):
+        return self._get_action_at(obj) if self._get_action_type(obj) == "APPROVED" else None
+
+    def get_rejected_at(self, obj):
+        return self._get_action_at(obj) if self._get_action_type(obj) == "REJECTED" else None
+
+    def get_canceled_at(self, obj):
+        return self._get_action_at(obj) if self._get_action_type(obj) == "CANCELED" else None
 
 
 class AttendanceOverTimeSerializer(serializers.ModelSerializer):
@@ -354,12 +390,11 @@ class WorkModeRequestSerializer(serializers.ModelSerializer):
     )
     badge_id = serializers.CharField(source="employee_id.badge_id", read_only=True)
     employee_profile_url = serializers.SerializerMethodField(read_only=True)
-    # Attachments uploaded via AttendanceRequestComment.files
     attachment_urls = serializers.SerializerMethodField(read_only=True)
-    # Alias for UI parity with Work Type Requests
-    file_urls = serializers.SerializerMethodField(read_only=True)
     file_urls = serializers.SerializerMethodField(read_only=True)
     approved_by_name = serializers.SerializerMethodField(read_only=True)
+    action_by_name = serializers.SerializerMethodField(read_only=True)
+    action_at = serializers.SerializerMethodField(read_only=True)
 
     # UI/UX alias (read-only). Input alias is handled in to_internal_value().
     work_type = serializers.CharField(source="mode", read_only=True)
@@ -421,30 +456,32 @@ class WorkModeRequestSerializer(serializers.ModelSerializer):
         fields = "__all__"
 
     def get_attachment_urls(self, obj):
-        """Return list of attachment URLs for an attendance correction request.
-        Files are stored via AttendanceRequestComment.files (ManyToMany -> AttendanceRequestFile).
-        """
         try:
-            from attendance.models import AttendanceRequestComment
             urls = []
             seen = set()
-            qs = AttendanceRequestComment.objects.filter(request_id=obj).prefetch_related('files')
-            for c in qs:
-                for f in c.files.all():
-                    try:
-                        u = getattr(getattr(f, 'file', None), 'url', None)
-                        if u and u not in seen:
-                            seen.add(u)
-                            urls.append(u)
-                    except Exception:
-                        continue
+            for f in obj.files.all():
+                u = getattr(getattr(f, "file", None), "url", None)
+                if u and u not in seen:
+                    seen.add(u)
+                    urls.append(u)
             return urls
         except Exception:
             return []
 
     def get_file_urls(self, obj):
-        # Backward/UX compatibility with WorkModeRequestSerializer
         return self.get_attachment_urls(obj)
+
+    def get_action_by_name(self, obj):
+        actor = getattr(obj, "action_by", None)
+        if not actor:
+            return None
+        try:
+            return f"{actor.employee_first_name} {actor.employee_last_name}".strip() or str(actor)
+        except Exception:
+            return None
+
+    def get_action_at(self, obj):
+        return getattr(obj, "action_at", None) or getattr(obj, "approved_at", None)
 
     def get_employee_profile_url(self, obj):
         try:
@@ -452,16 +489,6 @@ class WorkModeRequestSerializer(serializers.ModelSerializer):
             return employee_profile.url
         except Exception:
             return None
-
-    def get_file_urls(self, obj):
-        try:
-            urls = []
-            for f in obj.files.all():
-                if getattr(f, "file", None) and getattr(f.file, "url", None):
-                    urls.append(f.file.url)
-            return urls
-        except Exception:
-            return []
 
     def get_approved_by_name(self, obj):
         try:
