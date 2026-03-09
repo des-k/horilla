@@ -214,11 +214,11 @@
             <div class="oh-timeoff-modal__stats-container mt-3 mb-3">
                 <div class="oh-timeoff-modal__stat">
                     <span class="oh-timeoff-modal__stat-title">{% trans "Shift" %}</span>
-                    <span class="oh-timeoff-modal__stat-count">{{activity.shift_id}}</span>
+                    <span class="oh-timeoff-modal__stat-count">{{ attendance.shift_id|default_if_none:"-"|default:"-" }}</span>
                 </div>
                 <div class="oh-timeoff-modal__stat" style="margin-left: 20px">
                     <span class="oh-timeoff-modal__stat-title">{% trans "Work Type" %}</span>
-                    <span class="oh-timeoff-modal__stat-count">{{activity.work_type_id}}</span>
+                    <span class="oh-timeoff-modal__stat-count">{{ attendance.work_type_id|default_if_none:"-"|default:"-" }}</span>
                 </div>
             </div>
             {% if perms.attendance.delete_attendanceactivity %}
