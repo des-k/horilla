@@ -140,8 +140,8 @@
                                 </div>
                             </div>
                             <div data-cell-index="1" class="oh-sticky-table__td dateformat_changer">{{activity.attendance_date}}</div>
-                            <div data-cell-index="2" class="oh-sticky-table__td dateformat_changer">{{activity.clock_in_date}}</div>
-                            <div data-cell-index="3" class="oh-sticky-table__td timeformat_changer">{{activity.clock_in}}</div>
+                            <div data-cell-index="2" class="oh-sticky-table__td dateformat_changer">{{ activity.clock_in_date|default_if_none:"-"|default:"-" }}</div>
+                            <div data-cell-index="3" class="oh-sticky-table__td timeformat_changer">{{ activity.clock_in|default_if_none:"-"|default:"-" }}</div>
 
                             <div data-cell-index="8" class="oh-sticky-table__td">
                               {{ activity.get_clock_in_mode_display|default:"-" }}
@@ -186,7 +186,7 @@
                               {% endif %}
                             </div>
 
-                            <div data-cell-index="4" class="oh-sticky-table__td timeformat_changer">{{activity.clock_out}}</div>
+                            <div data-cell-index="4" class="oh-sticky-table__td timeformat_changer">{{ activity.clock_out|default_if_none:"-"|default:"-" }}</div>
 
                             <div data-cell-index="9" class="oh-sticky-table__td">
                               {{ activity.get_clock_out_mode_display|default:"-" }}
@@ -230,7 +230,7 @@
                                 -
                               {% endif %}
                             </div>
-<div data-cell-index="5" class="oh-sticky-table__td dateformat_changer">{{activity.clock_out_date}}</div>
+<div data-cell-index="5" class="oh-sticky-table__td dateformat_changer">{{ activity.clock_out_date|default_if_none:"-"|default:"-" }}</div>
                             {% if perms.attendance.delete_attendanceactivity %}
                                 <div class="oh-sticky-table__td oh-sticky-table__right">
                                     <form hx-confirm="{% trans 'Are you sure want to delete this attendance?' %}"
