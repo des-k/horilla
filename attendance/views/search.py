@@ -28,7 +28,12 @@ from attendance.models import (
 )
 from attendance.views.views import paginator_qry, strtime_seconds
 from base.methods import filtersubordinates, get_key_instances, sortby
-from horilla.decorators import hx_request_required, login_required, manager_can_enter
+from horilla.decorators import (
+    hx_request_required,
+    login_required,
+    manager_can_enter,
+    permission_required,
+)
 from horilla.group_by import group_by_queryset
 
 
@@ -210,6 +215,7 @@ def attendance_overtime_search(request):
 
 
 @login_required
+@permission_required("attendance.view_attendanceactivity")
 @hx_request_required
 def attendance_activity_search(request):
     """
@@ -224,7 +230,7 @@ def attendance_activity_search(request):
         employee_id__employee_user_id=request.user
     )
     attendance_activities = filtersubordinates(
-        request, attendance_activities, "attendance.view_attendanceovertime"
+        request, attendance_activities, "attendance.view_attendanceactivity"
     )
     attendance_activities = attendance_activities | self_attendance_activities
     attendance_activities = attendance_activities.distinct()
