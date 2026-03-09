@@ -12,6 +12,8 @@ from datetime import datetime
 from typing import Iterable, Optional
 
 APPROVED_REQUEST_CHANNEL = "approved_request"
+CORRECTION_REQUEST_CHANNEL = "correction_request"
+REQUEST_PRIORITY_CHANNELS = {APPROVED_REQUEST_CHANNEL, CORRECTION_REQUEST_CHANNEL}
 
 
 @dataclass(frozen=True)
@@ -24,7 +26,7 @@ class SessionResolution:
 
 
 def is_approved_request_channel(value: Optional[str]) -> bool:
-    return (value or "").strip().lower() == APPROVED_REQUEST_CHANNEL
+    return (value or "").strip().lower() in REQUEST_PRIORITY_CHANNELS
 
 
 def resolve_final_session(
