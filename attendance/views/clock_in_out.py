@@ -26,7 +26,7 @@ from typing import Any, Optional
 from django.conf import settings
 from django.contrib import messages
 from django.core.exceptions import ValidationError
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.http import HttpResponse
 from django.utils import timezone as dj_timezone
 from django.utils.translation import gettext_lazy as _
@@ -52,6 +52,9 @@ from attendance.services.attendance_window_rules import (
     WindowConfig,
     compute_checkin_window,
     compute_checkout_window_wfo_wfa,
+)
+from attendance.services.final_session_resolution import (
+    should_accept_raw_session,
 )
 from base.context_processors import (
     enable_late_come_early_out_tracking,
@@ -592,6 +595,144 @@ def get_shift_rules(
 # ---------------------------------------------------------------------
 # Core DB writers (used by API + web)
 # ---------------------------------------------------------------------
+def _get_attendance_session_dt(attendance, session: str):
+    if not attendance:
+        return None
+    session = (session or "IN").upper()
+    if session == "IN":
+        d = getattr(attendance, "attendance_clock_in_date", None)
+        t = getattr(attendance, "attendance_clock_in", None)
+    else:
+        d = getattr(attendance, "attendance_clock_out_date", None)
+        t = getattr(attendance, "attendance_clock_out", None)
+    if not d or not t:
+        return None
+    return _combine_local_datetime(d, t)
+
+
+def _get_activity_session_dt(activity, session: str):
+    if not activity:
+        return None
+    session = (session or "IN").upper()
+    if session == "IN":
+        dt_value = getattr(activity, "in_datetime", None)
+        if dt_value is not None:
+            return _ensure_local(dt_value) if getattr(settings, "USE_TZ", False) else dt_value
+        d = getattr(activity, "clock_in_date", None)
+        t = getattr(activity, "clock_in", None)
+    else:
+        dt_value = getattr(activity, "out_datetime", None)
+        if dt_value is not None:
+            return _ensure_local(dt_value) if getattr(settings, "USE_TZ", False) else dt_value
+        d = getattr(activity, "clock_out_date", None)
+        t = getattr(activity, "clock_out", None)
+    if not d or not t:
+        return None
+    return _combine_local_datetime(d, t)
+
+
+def _get_session_channel(attendance, activity, session: str):
+    session = (session or "IN").upper()
+    if session == "IN":
+        return (
+            getattr(attendance, "attendance_clock_in_channel", None)
+            or getattr(activity, "clock_in_channel", None)
+        )
+    return (
+        getattr(attendance, "attendance_clock_out_channel", None)
+        or getattr(activity, "clock_out_channel", None)
+    )
+
+
+def _locked_attendance(employee, attendance_date: date, defaults: dict):
+    attendance = (
+        Attendance.objects.select_for_update()
+        .filter(employee_id=employee, attendance_date=attendance_date)
+        .first()
+    )
+    if attendance:
+        return attendance, False
+    try:
+        attendance = Attendance.objects.create(
+            employee_id=employee,
+            attendance_date=attendance_date,
+            **defaults,
+        )
+        return attendance, True
+    except IntegrityError:
+        attendance = Attendance.objects.select_for_update().get(
+            employee_id=employee, attendance_date=attendance_date
+        )
+        return attendance, False
+
+
+def _locked_activity(employee, attendance_date: date, defaults: dict):
+    activity = (
+        AttendanceActivity.objects.select_for_update()
+        .filter(employee_id=employee, attendance_date=attendance_date)
+        .order_by("-id")
+        .first()
+    )
+    if activity:
+        AttendanceActivity.objects.select_for_update().filter(
+            employee_id=employee, attendance_date=attendance_date
+        ).exclude(id=activity.id).delete()
+        return activity, False
+    try:
+        activity = AttendanceActivity.objects.create(
+            employee_id=employee,
+            attendance_date=attendance_date,
+            **defaults,
+        )
+        return activity, True
+    except IntegrityError:
+        activity = (
+            AttendanceActivity.objects.select_for_update()
+            .filter(employee_id=employee, attendance_date=attendance_date)
+            .order_by("-id")
+            .first()
+        )
+        AttendanceActivity.objects.select_for_update().filter(
+            employee_id=employee, attendance_date=attendance_date
+        ).exclude(id=activity.id).delete()
+        return activity, False
+
+
+def _recalculate_attendance_summary(attendance, *, shift_start_dt=None):
+    if getattr(attendance, "is_presensi_only", False):
+        attendance.attendance_worked_hour = "00:00"
+        attendance.attendance_overtime = "00:00"
+        attendance.attendance_validated = False
+        return
+
+    if getattr(attendance, "out_attendance_status", None) == "REJECTED":
+        attendance.attendance_worked_hour = "00:00"
+        attendance.attendance_overtime = "00:00"
+        attendance.attendance_validated = False
+        return
+
+    if (
+        attendance.attendance_clock_in_date
+        and attendance.attendance_clock_in
+        and attendance.attendance_clock_out_date
+        and attendance.attendance_clock_out
+    ):
+        in_dt = _combine_local_datetime(attendance.attendance_clock_in_date, attendance.attendance_clock_in)
+        out_dt = _combine_local_datetime(attendance.attendance_clock_out_date, attendance.attendance_clock_out)
+        worked_start_dt = max(in_dt, shift_start_dt) if shift_start_dt else in_dt
+        duration_seconds = int((out_dt - worked_start_dt).total_seconds())
+        if duration_seconds < 0:
+            duration_seconds = 0
+        attendance.attendance_worked_hour = format_time(duration_seconds)
+        attendance.attendance_overtime = overtime_calculation(attendance)
+        attendance.attendance_validated = attendance_validate(attendance)
+        return
+
+    attendance.attendance_worked_hour = "00:00"
+    attendance.attendance_overtime = "00:00"
+    attendance.attendance_validated = False
+
+
 @transaction.atomic
 def clock_in_attendance_and_activity(
     employee,
@@ -610,107 +751,33 @@ def clock_in_attendance_and_activity(
     clock_in_location: Optional[dict] = None,
     work_mode_request=None,
     is_presensi_only: bool = False,
+    clock_in_channel: Optional[str] = None,
 ):
-    """
-    Single-session mode:
-    - Create ONE AttendanceActivity per (employee, attendance_date).
-    - If already exists, do NOT create a new one (no-op).
-    - Attendance summary remains one per (employee, attendance_date).
+    """Persist a raw IN safely without overwriting a winning session."""
 
-    Hybrid additions:
-    - Persist mode/location/request if model fields exist.
-    - Presence-only (On Duty) sets is_presensi_only and keeps hours 00:00.
-    """
     in_datetime = _ensure_local(in_datetime) if getattr(settings, "USE_TZ", False) else in_datetime
+    in_date = in_datetime.date()
+    in_time = in_datetime.time()
 
-    # 1) AttendanceActivity: create once
-    activity, created = AttendanceActivity.objects.get_or_create(
-        employee_id=employee,
-        attendance_date=attendance_date,
-        defaults={
-            "clock_in_date": date_today,
-            "shift_day": day,
-            "clock_in": in_datetime.time(),
-            "in_datetime": in_datetime,
-            "clock_in_image": clock_in_image,
-        },
-    )
-
-    # Patch activity (keep original check-in; store metadata if missing / new)
-    act_updates = []
-    if getattr(activity, "shift_day_id", None) != day.id:
-        activity.shift_day = day
-        act_updates.append("shift_day")
-    if clock_in_image and not getattr(activity, "clock_in_image", None):
-        activity.clock_in_image = clock_in_image
-        act_updates.append("clock_in_image")
-
-    if clock_in_mode and _has_model_field(AttendanceActivity, "clock_in_mode"):
-        if getattr(activity, "clock_in_mode", None) != clock_in_mode:
-            activity.clock_in_mode = clock_in_mode
-            act_updates.append("clock_in_mode")
-    if clock_in_location is not None and _has_model_field(AttendanceActivity, "clock_in_location"):
-        activity.clock_in_location = clock_in_location
-        act_updates.append("clock_in_location")
-    if work_mode_request is not None and _has_model_field(AttendanceActivity, "work_mode_request_id"):
-        activity.work_mode_request_id = work_mode_request
-        act_updates.append("work_mode_request_id")
-
-    if act_updates:
-        activity.save(update_fields=list(dict.fromkeys(act_updates)))  # de-dup
-
-    # 2) Attendance summary: create once
     attendance_defaults = {
         "shift_id": shift,
         "work_type_id": employee.employee_work_info.work_type_id,
         "attendance_day": day,
-        "attendance_clock_in": now_hhmm,
-        "attendance_clock_in_date": date_today,
         "minimum_hour": minimum_hour,
-        "attendance_clock_in_image": clock_in_image if clock_in_image else None,
+        "attendance_validated": False,
     }
-
     if is_presensi_only and _has_model_field(Attendance, "is_presensi_only"):
-        attendance_defaults["is_presensi_only"] = True  # type: ignore
+        attendance_defaults["is_presensi_only"] = True
 
-    attendance, attendance_created = Attendance.objects.get_or_create(
-        employee_id=employee,
-        attendance_date=attendance_date,
-        defaults=attendance_defaults,
-    )
+    activity_defaults = {"shift_day": day}
 
-    # Dynamic earliest checkout (WFO/WFA): follow actual check-in time (clamped) instead of static shift_end.
-    # Window END stays governed by cutoff_out elsewhere; here we only compute the earliest allowed OUT time.
-    if not is_presensi_only:
-        try:
-            clock_in_t2 = getattr(attendance, "attendance_clock_in", None)
-            in_date2 = getattr(attendance, "attendance_clock_in_date", None) or attendance_date
-            shift_end_dt = rules.get("shift_end_dt")
-            if clock_in_t2 and shift_start_dt and shift_end_dt:
-                in_dt2 = _combine_local_datetime(in_date2, clock_in_t2)
+    attendance, attendance_created = _locked_attendance(employee, attendance_date, attendance_defaults)
+    activity, _ = _locked_activity(employee, attendance_date, activity_defaults)
 
-                grace_sec = int(rules.get("grace_seconds") or 0)
-                min_start = shift_start_dt
-                max_start = shift_start_dt + timedelta(seconds=grace_sec)
+    if getattr(activity, "shift_day_id", None) != day.id:
+        activity.shift_day = day
+        activity.save(update_fields=["shift_day"])
 
-                eff_in = in_dt2
-                if eff_in < min_start:
-                    eff_in = min_start
-                # Cap check-in used for OUT-window math at shift_start + grace.
-                # IMPORTANT: grace can be 0, in which case max_start == shift_start.
-                # We still need to cap (otherwise checkout window would drift later).
-                elif eff_in > max_start:
-                    eff_in = max_start
-
-                shift_duration = shift_end_dt - shift_start_dt
-                dyn_end = eff_in + shift_duration
-
-                early_grace_min = int(((rules.get("window_config") or {}).get("early_checkout_grace_minutes")) or 0)
-                earliest_checkout_dt = dyn_end - timedelta(minutes=early_grace_min)
-        except Exception:
-            pass
-
-    # Self-healing / metadata update (DO NOT overwrite check-in time/date)
     att_updates = []
     if not attendance.attendance_day_id or attendance.attendance_day_id != day.id:
         attendance.attendance_day = day
@@ -724,44 +791,75 @@ def clock_in_attendance_and_activity(
     if not attendance.work_type_id:
         attendance.work_type_id = employee.employee_work_info.work_type_id
         att_updates.append("work_type_id")
-    if clock_in_image and not getattr(attendance, "attendance_clock_in_image", None):
-        attendance.attendance_clock_in_image = clock_in_image
-        att_updates.append("attendance_clock_in_image")
+    if is_presensi_only and _has_model_field(Attendance, "is_presensi_only") and not getattr(attendance, "is_presensi_only", False):
+        attendance.is_presensi_only = True
+        att_updates.append("is_presensi_only")
 
-    if clock_in_mode and _has_model_field(Attendance, "attendance_clock_in_mode"):
-        if getattr(attendance, "attendance_clock_in_mode", None) != clock_in_mode:
+    existing_in_dt = _get_attendance_session_dt(attendance, "IN") or _get_activity_session_dt(activity, "IN")
+    existing_in_channel = _get_session_channel(attendance, activity, "IN")
+    accept_in = should_accept_raw_session(
+        session="IN",
+        existing_dt=existing_in_dt,
+        incoming_dt=in_datetime,
+        existing_channel=existing_in_channel,
+    )
+
+    if accept_in:
+        attendance.attendance_clock_in_date = in_date
+        attendance.attendance_clock_in = in_time
+        att_updates.extend(["attendance_clock_in_date", "attendance_clock_in"])
+        if clock_in_image is not None:
+            attendance.attendance_clock_in_image = clock_in_image
+            att_updates.append("attendance_clock_in_image")
+        if clock_in_mode and _has_model_field(Attendance, "attendance_clock_in_mode"):
             attendance.attendance_clock_in_mode = clock_in_mode
             att_updates.append("attendance_clock_in_mode")
+        if clock_in_channel and _has_model_field(Attendance, "attendance_clock_in_channel"):
+            attendance.attendance_clock_in_channel = clock_in_channel
+            att_updates.append("attendance_clock_in_channel")
+        if clock_in_location is not None and _has_model_field(Attendance, "attendance_clock_in_location"):
+            attendance.attendance_clock_in_location = clock_in_location
+            att_updates.append("attendance_clock_in_location")
+        if work_mode_request is not None and _has_model_field(Attendance, "work_mode_request_id"):
+            attendance.work_mode_request_id = work_mode_request
+            att_updates.append("work_mode_request_id")
+        if work_mode_request is not None and _has_model_field(Attendance, "in_related_work_type_request_id"):
+            attendance.in_related_work_type_request_id = getattr(work_mode_request, "id", work_mode_request)
+            att_updates.append("in_related_work_type_request_id")
+        if _has_model_field(Attendance, "in_attendance_status"):
+            attendance.in_attendance_status = "VALID"
+            att_updates.append("in_attendance_status")
+        if _has_model_field(Attendance, "in_attendance_reject_reason_code"):
+            attendance.in_attendance_reject_reason_code = None
+            att_updates.append("in_attendance_reject_reason_code")
 
-    if clock_in_location is not None and _has_model_field(Attendance, "attendance_clock_in_location"):
-        attendance.attendance_clock_in_location = clock_in_location
-        att_updates.append("attendance_clock_in_location")
+        activity.clock_in_date = in_date
+        activity.clock_in = in_time
+        activity.in_datetime = in_datetime
+        act_updates = ["clock_in_date", "clock_in", "in_datetime"]
+        if clock_in_image is not None:
+            activity.clock_in_image = clock_in_image
+            act_updates.append("clock_in_image")
+        if clock_in_mode and _has_model_field(AttendanceActivity, "clock_in_mode"):
+            activity.clock_in_mode = clock_in_mode
+            act_updates.append("clock_in_mode")
+        if clock_in_channel and _has_model_field(AttendanceActivity, "clock_in_channel"):
+            activity.clock_in_channel = clock_in_channel
+            act_updates.append("clock_in_channel")
+        if clock_in_location is not None and _has_model_field(AttendanceActivity, "clock_in_location"):
+            activity.clock_in_location = clock_in_location
+            act_updates.append("clock_in_location")
+        if work_mode_request is not None and _has_model_field(AttendanceActivity, "work_mode_request_id"):
+            activity.work_mode_request_id = work_mode_request
+            act_updates.append("work_mode_request_id")
+        activity.save(update_fields=list(dict.fromkeys(act_updates)))
 
-    if work_mode_request is not None and _has_model_field(Attendance, "work_mode_request_id"):
-        attendance.work_mode_request_id = work_mode_request
-        att_updates.append("work_mode_request_id")
-
-    # Option B (per-punch audit)
-    if work_mode_request is not None and _has_model_field(Attendance, "in_related_work_type_request_id"):
-        attendance.in_related_work_type_request_id = getattr(work_mode_request, 'id', work_mode_request)
-        att_updates.append("in_related_work_type_request_id")
-    if _has_model_field(Attendance, "in_attendance_status"):
-        attendance.in_attendance_status = 'VALID'
-        att_updates.append("in_attendance_status")
-    if _has_model_field(Attendance, "in_attendance_reject_reason_code"):
-        attendance.in_attendance_reject_reason_code = None
-        att_updates.append("in_attendance_reject_reason_code")
-
-    if is_presensi_only and _has_model_field(Attendance, "is_presensi_only"):
-        if not getattr(attendance, "is_presensi_only", False):
-            attendance.is_presensi_only = True
-            att_updates.append("is_presensi_only")
-
+    if getattr(attendance, "attendance_clock_out", None) and getattr(attendance, "attendance_clock_out_date", None):
+        _recalculate_attendance_summary(attendance)
     if att_updates:
-        attendance.save(update_fields=list(dict.fromkeys(att_updates)))  # de-dup
+        attendance.save(update_fields=list(dict.fromkeys(att_updates)))
 
-    # Late come only once on first Attendance creation (and not presence-only)
-    if attendance_created and not getattr(attendance, "is_presensi_only", False):
+    if attendance_created and accept_in and not getattr(attendance, "is_presensi_only", False):
         attendance = Attendance.find(attendance.id)
         schedule = _get_schedule(shift, day)
         late_come(
@@ -791,19 +889,12 @@ def clock_out_attendance_and_activity(
     is_presensi_only: bool = False,
     allow_update_clock_out: bool = True,
     raise_if_already_clocked_out: bool = False,
+    clock_out_channel: Optional[str] = None,
 ):
-    """
-    Single-session mode:
-    - Allow check-out even if check-in is missing.
-    - Ensure Attendance + AttendanceActivity exist for (employee, attendance_date).
-    - If check-in is missing, create placeholder: clock_in = first clock_out (duration becomes 0);
-      subsequent check-outs will create duration between first and last check-out.
-    - Keep the latest check-out (last punch wins) when allow_update_clock_out=True.
-    - Return (attendance, missing_check_in_flag_original).
-    """
+    """Persist a raw OUT safely without fabricating a check-in."""
+
     out_datetime = _ensure_local(out_datetime) if getattr(settings, "USE_TZ", False) else out_datetime
 
-    # Ensure day exists (avoid FK null issues)
     if day is None:
         day_name = attendance_date.strftime("%A").lower()
         day = EmployeeShiftDay.objects.get(day=day_name)
@@ -811,8 +902,6 @@ def clock_out_attendance_and_activity(
     out_date = out_datetime.date()
     out_time = out_datetime.time()
 
-    # Shift context (used for early checkout rejection + worked hours start)
-    # Best-effort: when schedule missing, rules may omit window boundaries.
     start_time_sec = None
     end_time_sec = None
     try:
@@ -835,44 +924,51 @@ def clock_out_attendance_and_activity(
     shift_start_dt = rules.get("shift_start_dt")
     cutoff_in_dt = rules.get("cutoff_in_dt")
     if is_presensi_only:
-        # ON_DUTY: earliest check-out starts AFTER check-in cutoff (avoid overlap at exact cutoff)
         earliest_checkout_dt = (cutoff_in_dt + timedelta(minutes=1)) if cutoff_in_dt else None
     else:
         earliest_checkout_dt = rules.get("check_out_window_start_dt")
 
-    # 1) Ensure Attendance exists (skeleton allowed)
     attendance_defaults = {
         "shift_id": shift,
         "work_type_id": employee.employee_work_info.work_type_id,
         "minimum_hour": minimum_hour,
         "attendance_day": day,
-        "attendance_clock_in": None,
-        "attendance_clock_in_date": None,
         "attendance_validated": False,
     }
     if is_presensi_only and _has_model_field(Attendance, "is_presensi_only"):
-        attendance_defaults["is_presensi_only"] = True  # type: ignore
+        attendance_defaults["is_presensi_only"] = True
 
-    attendance, _ = Attendance.objects.get_or_create(
-        employee_id=employee,
-        attendance_date=attendance_date,
-        defaults=attendance_defaults,
+    activity_defaults = {"shift_day": day}
+
+    attendance, _ = _locked_attendance(employee, attendance_date, attendance_defaults)
+    activity, _ = _locked_activity(employee, attendance_date, activity_defaults)
+
+    missing_check_in_original = not (
+        (attendance.attendance_clock_in and attendance.attendance_clock_in_date)
+        or (getattr(activity, "clock_in", None) and getattr(activity, "clock_in_date", None))
     )
 
-    # Original missing check-in (before we may fill placeholder)
-    missing_check_in_original = not attendance.attendance_clock_in or not attendance.attendance_clock_in_date
+    if getattr(activity, "shift_day_id", None) != day.id:
+        activity.shift_day = day
+        activity.save(update_fields=["shift_day"])
 
-    # If "no update" check-out and already checked-out -> reject/no-op
-    if (
-        not allow_update_clock_out
-        and attendance.attendance_clock_out
-        and attendance.attendance_clock_out_date
-    ):
+    existing_out_dt = _get_attendance_session_dt(attendance, "OUT") or _get_activity_session_dt(activity, "OUT")
+    existing_out_channel = _get_session_channel(attendance, activity, "OUT")
+
+    if not allow_update_clock_out and existing_out_dt is not None:
         if raise_if_already_clocked_out:
             raise ValidationError(_("Check-out already recorded for this date."))
         return attendance, missing_check_in_original
 
-    # Sync critical fields
+    accept_out = should_accept_raw_session(
+        session="OUT",
+        existing_dt=existing_out_dt,
+        incoming_dt=out_datetime,
+        existing_channel=existing_out_channel,
+    )
+    if not accept_out:
+        return attendance, missing_check_in_original
+
     updates = []
     if attendance.shift_id_id != (shift.id if shift else None):
         attendance.shift_id = shift
@@ -887,23 +983,24 @@ def clock_out_attendance_and_activity(
         attendance.attendance_day = day
         updates.append("attendance_day")
 
-    # If missing check-in, set placeholder check-in = FIRST check-out (so later updates can compute duration)
-    if missing_check_in_original and (attendance.attendance_clock_in is None or attendance.attendance_clock_in_date is None):
-        attendance.attendance_clock_in_date = out_date
-        attendance.attendance_clock_in = out_time
-        updates.extend(["attendance_clock_in_date", "attendance_clock_in"])
-
+    attendance.attendance_clock_out_date = out_date
+    attendance.attendance_clock_out = out_time
+    updates.extend(["attendance_clock_out_date", "attendance_clock_out"])
+    if clock_out_image is not None:
+        attendance.attendance_clock_out_image = clock_out_image
+        updates.append("attendance_clock_out_image")
     if clock_out_mode and _has_model_field(Attendance, "attendance_clock_out_mode"):
         attendance.attendance_clock_out_mode = clock_out_mode
         updates.append("attendance_clock_out_mode")
+    if clock_out_channel and _has_model_field(Attendance, "attendance_clock_out_channel"):
+        attendance.attendance_clock_out_channel = clock_out_channel
+        updates.append("attendance_clock_out_channel")
     if clock_out_location is not None and _has_model_field(Attendance, "attendance_clock_out_location"):
         attendance.attendance_clock_out_location = clock_out_location
         updates.append("attendance_clock_out_location")
     if work_mode_request is not None and _has_model_field(Attendance, "work_mode_request_id"):
         attendance.work_mode_request_id = work_mode_request
         updates.append("work_mode_request_id")
-
-    # Option B (per-punch audit)
     if work_mode_request is not None and _has_model_field(Attendance, "out_related_work_type_request_id"):
         attendance.out_related_work_type_request_id = getattr(work_mode_request, "id", work_mode_request)
         updates.append("out_related_work_type_request_id")
@@ -913,115 +1010,31 @@ def clock_out_attendance_and_activity(
     if _has_model_field(Attendance, "out_attendance_reject_reason_code"):
         attendance.out_attendance_reject_reason_code = None
         updates.append("out_attendance_reject_reason_code")
-    if is_presensi_only and _has_model_field(Attendance, "is_presensi_only"):
-        if not getattr(attendance, "is_presensi_only", False):
-            attendance.is_presensi_only = True
-            updates.append("is_presensi_only")
+    if is_presensi_only and _has_model_field(Attendance, "is_presensi_only") and not getattr(attendance, "is_presensi_only", False):
+        attendance.is_presensi_only = True
+        updates.append("is_presensi_only")
 
-    if updates:
-        attendance.save(update_fields=list(dict.fromkeys(updates)))
-
-    # 2) Ensure AttendanceActivity exists (clock_in NOT NULL -> placeholder if missing)
-    placeholder_in_date = attendance.attendance_clock_in_date or attendance_date
-    placeholder_in_time = attendance.attendance_clock_in or out_time
-    placeholder_in_dt = _combine_local_datetime(placeholder_in_date, placeholder_in_time)
-
-    activity, created = AttendanceActivity.objects.get_or_create(
-        employee_id=employee,
-        attendance_date=attendance_date,
-        defaults={
-            "shift_day": day,
-            "clock_in_date": placeholder_in_date,
-            "clock_in": placeholder_in_time,
-            "in_datetime": placeholder_in_dt,
-        },
-    )
-
-    # Patch activity placeholder if needed
-    act_updates = []
-    if activity.shift_day_id != day.id:
-        activity.shift_day = day
-        act_updates.append("shift_day")
-    if not activity.clock_in_date:
-        activity.clock_in_date = placeholder_in_date
-        act_updates.append("clock_in_date")
-    if not activity.clock_in:
-        activity.clock_in = placeholder_in_time
-        act_updates.append("clock_in")
-    if not activity.in_datetime and activity.clock_in_date and activity.clock_in:
-        activity.in_datetime = _combine_local_datetime(activity.clock_in_date, activity.clock_in)
-        act_updates.append("in_datetime")
-
+    activity.clock_out_date = out_date
+    activity.clock_out = out_time
+    activity.out_datetime = out_datetime
+    act_updates = ["clock_out_date", "clock_out", "out_datetime"]
+    if clock_out_image is not None:
+        activity.clock_out_image = clock_out_image
+        act_updates.append("clock_out_image")
     if clock_out_mode and _has_model_field(AttendanceActivity, "clock_out_mode"):
         activity.clock_out_mode = clock_out_mode
         act_updates.append("clock_out_mode")
+    if clock_out_channel and _has_model_field(AttendanceActivity, "clock_out_channel"):
+        activity.clock_out_channel = clock_out_channel
+        act_updates.append("clock_out_channel")
     if clock_out_location is not None and _has_model_field(AttendanceActivity, "clock_out_location"):
         activity.clock_out_location = clock_out_location
         act_updates.append("clock_out_location")
     if work_mode_request is not None and _has_model_field(AttendanceActivity, "work_mode_request_id"):
         activity.work_mode_request_id = work_mode_request
         act_updates.append("work_mode_request_id")
+    activity.save(update_fields=list(dict.fromkeys(act_updates)))
 
-    if act_updates:
-        activity.save(update_fields=list(dict.fromkeys(act_updates)))
-
-    # 3) Last punch wins: ignore older punches (when updates allowed)
-    if allow_update_clock_out:
-        existing_out_dt = activity.out_datetime
-        if not existing_out_dt and activity.clock_out_date and activity.clock_out:
-            existing_out_dt = _combine_local_datetime(activity.clock_out_date, activity.clock_out)
-
-        if existing_out_dt and out_datetime <= existing_out_dt:
-            return attendance, missing_check_in_original
-    else:
-        # No update allowed: if already has activity out, ignore
-        if activity.clock_out_date and activity.clock_out:
-            if raise_if_already_clocked_out:
-                raise ValidationError(_("Check-out already recorded for this date."))
-            return attendance, missing_check_in_original
-
-    # 4) Update activity OUT
-    activity.clock_out_date = out_date
-    activity.clock_out = out_time
-    activity.out_datetime = out_datetime
-    if clock_out_image:
-        activity.clock_out_image = clock_out_image
-
-    # Also persist mode/location on first write for safety
-    if clock_out_mode and _has_model_field(AttendanceActivity, "clock_out_mode"):
-        activity.clock_out_mode = clock_out_mode
-    if clock_out_location is not None and _has_model_field(AttendanceActivity, "clock_out_location"):
-        activity.clock_out_location = clock_out_location
-    activity.save()
-
-    # 5) Update Attendance OUT
-    attendance.attendance_clock_out_date = out_date
-    attendance.attendance_clock_out = out_time
-    if clock_out_image:
-        attendance.attendance_clock_out_image = clock_out_image
-
-    if clock_out_mode and _has_model_field(Attendance, "attendance_clock_out_mode"):
-        attendance.attendance_clock_out_mode = clock_out_mode
-    if clock_out_location is not None and _has_model_field(Attendance, "attendance_clock_out_location"):
-        attendance.attendance_clock_out_location = clock_out_location
-
-    if work_mode_request is not None and _has_model_field(Attendance, "work_mode_request_id"):
-        attendance.work_mode_request_id = work_mode_request
-
-    # Option B (per-punch audit)
-    if work_mode_request is not None and _has_model_field(Attendance, "out_related_work_type_request_id"):
-        attendance.out_related_work_type_request_id = getattr(work_mode_request, 'id', work_mode_request)
-    if _has_model_field(Attendance, "out_attendance_status"):
-        attendance.out_attendance_status = 'VALID'
-    if _has_model_field(Attendance, "out_attendance_reject_reason_code"):
-        attendance.out_attendance_reject_reason_code = None
-
-    # -----------------------------------------------------------------
-    # EARLY CHECK-OUT REJECT (FINAL spec)
-    # Store OUT for audit, but mark as REJECTED when outside the allowed window.
-    # - WFO/WFA: earliest = shift_end - grace
-    # - ON_DUTY: earliest = cutoff_in_dt + 1 minute
-    # -----------------------------------------------------------------
     is_early_checkout = False
     try:
         if earliest_checkout_dt and out_datetime < earliest_checkout_dt:
@@ -1031,65 +1044,27 @@ def clock_out_attendance_and_activity(
 
     if is_early_checkout:
         if _has_model_field(Attendance, "out_attendance_status"):
-            attendance.out_attendance_status = 'REJECTED'
+            attendance.out_attendance_status = "REJECTED"
+            if "out_attendance_status" not in updates:
+                updates.append("out_attendance_status")
         if _has_model_field(Attendance, "out_attendance_reject_reason_code"):
             attendance.out_attendance_reject_reason_code = (
-                'EARLY_CHECKOUT_BEFORE_CUTOFF_IN'
+                "EARLY_CHECKOUT_BEFORE_CUTOFF_IN"
                 if is_presensi_only
-                else 'EARLY_CHECKOUT_BEFORE_SHIFT_END'
+                else "EARLY_CHECKOUT_BEFORE_SHIFT_END"
             )
+            if "out_attendance_reject_reason_code" not in updates:
+                updates.append("out_attendance_reject_reason_code")
 
-    # Presence-only: keep hours 00:00
-    if is_presensi_only or getattr(attendance, "is_presensi_only", False):
-        if _has_model_field(Attendance, "is_presensi_only"):
-            attendance.is_presensi_only = True
-        attendance.attendance_worked_hour = "00:00"
-        attendance.attendance_overtime = "00:00"
-        attendance.attendance_validated = False
-        attendance.save()
-        return attendance, missing_check_in_original
-
-    # If OUT is REJECTED (early checkout), do NOT compute valid worked hours.
-    # Keep record for audit, but payroll/KPI should rely on VALID OUT.
-    if getattr(attendance, "out_attendance_status", None) == "REJECTED":
-        attendance.attendance_worked_hour = "00:00"
-        attendance.attendance_overtime = "00:00"
-        attendance.attendance_validated = False
-        attendance.save()
-        return attendance, missing_check_in_original
-
-    # Compute worked hours from Attendance summary.
-    # FINAL spec: if IN earlier than shift_start, start counting from shift_start.
-    if attendance.attendance_clock_in_date and attendance.attendance_clock_in:
-        in_dt = _combine_local_datetime(attendance.attendance_clock_in_date, attendance.attendance_clock_in)
-        out_dt = _combine_local_datetime(attendance.attendance_clock_out_date, attendance.attendance_clock_out)
-
-        worked_start_dt = in_dt
-        try:
-            if shift_start_dt:
-                worked_start_dt = max(in_dt, shift_start_dt)
-        except Exception:
-            worked_start_dt = in_dt
-
-        duration_seconds = int((out_dt - worked_start_dt).total_seconds())
-        if duration_seconds < 0:
-            duration_seconds = 0
-
-        attendance.attendance_worked_hour = format_time(duration_seconds)
-        attendance.attendance_overtime = overtime_calculation(attendance)
-        attendance.attendance_validated = attendance_validate(attendance)
-    else:
-        attendance.attendance_worked_hour = "00:00"
-        attendance.attendance_overtime = "00:00"
-        attendance.attendance_validated = False
-
-    attendance.save()
+    _recalculate_attendance_summary(attendance, shift_start_dt=shift_start_dt)
+    attendance.save(update_fields=list(dict.fromkeys(updates + [
+        "attendance_worked_hour",
+        "attendance_overtime",
+        "attendance_validated",
+    ])))
     return attendance, missing_check_in_original
 
 
-# ---------------------------------------------------------------------
-# Views: clock_in / clock_out (web UI only)
-# ---------------------------------------------------------------------
 @login_required
 @hx_request_required
 def clock_in(request):
@@ -1205,6 +1180,7 @@ def clock_in(request):
         in_datetime=datetime_now,
         clock_in_image=clock_in_image,
         clock_in_mode=getattr(AttendanceWorkMode, "WFO", None) if AttendanceWorkMode else "wfo",
+        clock_in_channel="biometric",
     )
 
     # UI response
@@ -1319,6 +1295,7 @@ def clock_out(request):
         clock_out_image=clock_out_image,
         clock_out_mode=getattr(AttendanceWorkMode, "WFO", None) if AttendanceWorkMode else "wfo",
         allow_update_clock_out=True,
+        clock_out_channel="biometric",
     )
 
     if not attendance:
