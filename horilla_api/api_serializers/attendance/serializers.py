@@ -375,10 +375,24 @@ class AttendanceActivitySerializer(serializers.ModelSerializer):
     employee_last_name = serializers.CharField(
         source="employee_id.employee_last_name", read_only=True
     )
+    clock_in_channel_display = serializers.SerializerMethodField(read_only=True)
+    clock_out_channel_display = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = AttendanceActivity
         fields = "__all__"
+
+    def get_clock_in_channel_display(self, obj):
+        try:
+            return obj.get_clock_in_channel_display()
+        except Exception:
+            return getattr(obj, "clock_in_channel", None)
+
+    def get_clock_out_channel_display(self, obj):
+        try:
+            return obj.get_clock_out_channel_display()
+        except Exception:
+            return getattr(obj, "clock_out_channel", None)
 
 
 class WorkModeRequestSerializer(serializers.ModelSerializer):
