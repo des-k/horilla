@@ -30,6 +30,10 @@ from attendance.services.attendance_correction_scope_rules import (
     load_requested_data,
     scope_to_sessions,
 )
+from attendance.services.final_session_resolution import (
+    APPROVED_REQUEST_CHANNEL,
+    resolve_final_session,
+)
 from attendance.services.monthly_recap_note import (
     NoteInputs,
     derive_note,
@@ -92,7 +96,7 @@ def _normalize_dt(dt_obj: Optional[datetime], tzinfo=None) -> Optional[datetime]
 
 def _format_punch(dt: Optional[datetime], attendance_date: date) -> str:
     if not dt:
-        return "—"
+        return "-"
     dt_local = _normalize_dt(dt)
     suffix = " D+1" if dt_local.date() > attendance_date else ""
     return dt_local.strftime("%H:%M") + suffix
@@ -172,6 +176,101 @@ def _should_use_raw_punch_source(obj, request_status_by_id: Dict[int, str], *, s
         return False
 
     return True
+
+
+def _session_channel(obj, session: str) -> Optional[str]:
+    if not obj:
+        return None
+    session_norm = (session or "IN").upper()
+    if isinstance(obj, Attendance):
+        if session_norm == "IN":
+            return getattr(obj, "attendance_clock_in_channel", None)
+        return getattr(obj, "attendance_clock_out_channel", None)
+    if session_norm == "IN":
+        return getattr(obj, "clock_in_channel", None)
+    return getattr(obj, "clock_out_channel", None)
+
+
+def _session_dt(obj, session: str, attendance_date: date) -> Optional[datetime]:
+    session_norm = (session or "IN").upper()
+    if isinstance(obj, Attendance):
+        if session_norm == "IN":
+            return _combine_dt(
+                getattr(obj, "attendance_clock_in_date", None),
+                getattr(obj, "attendance_clock_in", None),
+                attendance_date,
+            )
+        return _combine_dt(
+            getattr(obj, "attendance_clock_out_date", None),
+            getattr(obj, "attendance_clock_out", None),
+            attendance_date,
+        )
+
+    if session_norm == "IN":
+        return getattr(obj, "in_datetime", None) or _combine_dt(
+            getattr(obj, "clock_in_date", None),
+            getattr(obj, "clock_in", None),
+            attendance_date,
+        )
+    return getattr(obj, "out_datetime", None) or _combine_dt(
+        getattr(obj, "clock_out_date", None),
+        getattr(obj, "clock_out", None),
+        attendance_date,
+    )
+
+
+def _legacy_approved_request_dt(attendance: Attendance, session: str, attendance_date: date) -> Optional[datetime]:
+    if not attendance or not getattr(attendance, "is_validate_request_approved", False):
+        return None
+
+    data = load_requested_data(getattr(attendance, "requested_data", None)) or {}
+    scope = (get_current_scope(data) or infer_scope_from_values(data) or "").lower()
+    sessions = {s.lower() for s in scope_to_sessions(scope)} if scope else set()
+    want = (session or "IN").lower()
+    if want not in sessions:
+        return None
+
+    if want == "in":
+        return _combine_dt(
+            _parse_date_like(data.get("attendance_clock_in_date"), attendance_date),
+            data.get("attendance_clock_in"),
+            attendance_date,
+        )
+    return _combine_dt(
+        _parse_date_like(data.get("attendance_clock_out_date"), attendance_date),
+        data.get("attendance_clock_out"),
+        attendance_date,
+    )
+
+
+def _approved_request_dt(
+    *,
+    attendances: List[Attendance],
+    activities: List[AttendanceActivity],
+    session: str,
+    attendance_date: date,
+    tzinfo=None,
+) -> Optional[datetime]:
+    session_norm = (session or "IN").upper()
+
+    for obj in sorted(attendances, key=lambda x: x.id, reverse=True):
+        if _session_channel(obj, session_norm) == APPROVED_REQUEST_CHANNEL:
+            dt_obj = _session_dt(obj, session_norm, attendance_date)
+            if dt_obj:
+                return _normalize_dt(dt_obj, tzinfo)
+
+    for obj in sorted(activities, key=lambda x: x.id, reverse=True):
+        if _session_channel(obj, session_norm) == APPROVED_REQUEST_CHANNEL:
+            dt_obj = _session_dt(obj, session_norm, attendance_date)
+            if dt_obj:
+                return _normalize_dt(dt_obj, tzinfo)
+
+    for obj in sorted(attendances, key=lambda x: x.id, reverse=True):
+        dt_obj = _legacy_approved_request_dt(obj, session_norm, attendance_date)
+        if dt_obj:
+            return _normalize_dt(dt_obj, tzinfo)
+
+    return None
 
 
 def _work_mode_label(mode: str) -> str:
@@ -808,9 +907,9 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
                     no=i,
                     attendance_date=d,
                     shift_information=shift_info,
-                    check_in="—",
-                    check_out="—",
-                    work_type="—",
+                    check_in="-",
+                    check_out="-",
+                    work_type="-",
                     late="00:00",
                     early_out="00:00",
                     note=note,
@@ -829,7 +928,7 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
         out_dts_raw: List[datetime] = []
 
         for a in att_list:
-            if _should_use_raw_punch_source(a, request_status_by_id, session="IN"):
+            if _should_use_raw_punch_source(a, request_status_by_id, session="IN") and _session_channel(a, "IN") != APPROVED_REQUEST_CHANNEL:
                 dt_in = _combine_dt(
                     getattr(a, "attendance_clock_in_date", None),
                     getattr(a, "attendance_clock_in", None),
@@ -837,7 +936,7 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
                 )
                 if dt_in:
                     in_dts_raw.append(_normalize_dt(dt_in))
-            if _should_use_raw_punch_source(a, request_status_by_id, session="OUT"):
+            if _should_use_raw_punch_source(a, request_status_by_id, session="OUT") and _session_channel(a, "OUT") != APPROVED_REQUEST_CHANNEL:
                 dt_out = _combine_dt(
                     getattr(a, "attendance_clock_out_date", None),
                     getattr(a, "attendance_clock_out", None),
@@ -847,7 +946,7 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
                     out_dts_raw.append(_normalize_dt(dt_out))
 
         for ac in act_list:
-            if _should_use_raw_punch_source(ac, request_status_by_id, session="IN"):
+            if _should_use_raw_punch_source(ac, request_status_by_id, session="IN") and _session_channel(ac, "IN") != APPROVED_REQUEST_CHANNEL:
                 dt_in = getattr(ac, "in_datetime", None) or _combine_dt(
                     getattr(ac, "clock_in_date", None),
                     getattr(ac, "clock_in", None),
@@ -855,7 +954,7 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
                 )
                 if dt_in:
                     in_dts_raw.append(_normalize_dt(dt_in))
-            if _should_use_raw_punch_source(ac, request_status_by_id, session="OUT"):
+            if _should_use_raw_punch_source(ac, request_status_by_id, session="OUT") and _session_channel(ac, "OUT") != APPROVED_REQUEST_CHANNEL:
                 dt_out = getattr(ac, "out_datetime", None) or _combine_dt(
                     getattr(ac, "clock_out_date", None),
                     getattr(ac, "clock_out", None),
@@ -917,8 +1016,44 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
             if _within_window(dt_n, check_out_window_start_dt, check_out_window_end_dt):
                 out_dts.append(dt_n)
 
-        final_in_dt = min(in_dts) if in_dts else None
-        final_out_dt = max(out_dts) if out_dts else None
+        approved_in_dt = _approved_request_dt(
+            attendances=att_list,
+            activities=act_list,
+            session="IN",
+            attendance_date=d,
+            tzinfo=tzinfo,
+        )
+        approved_out_dt = _approved_request_dt(
+            attendances=att_list,
+            activities=act_list,
+            session="OUT",
+            attendance_date=d,
+            tzinfo=tzinfo,
+        )
+
+        if approved_in_dt and (
+            approved_in_dt in excluded_in_dts
+            or not _within_window(approved_in_dt, check_in_window_start_dt, check_in_window_end_dt)
+        ):
+            approved_in_dt = None
+        if approved_out_dt and (
+            approved_out_dt in excluded_out_dts
+            or not _within_window(approved_out_dt, check_out_window_start_dt, check_out_window_end_dt)
+        ):
+            approved_out_dt = None
+
+        final_in_dt = resolve_final_session(
+            session="IN",
+            approved_dt=approved_in_dt,
+            raw_datetimes=in_dts,
+            raw_source="raw",
+        ).final_dt
+        final_out_dt = resolve_final_session(
+            session="OUT",
+            approved_dt=approved_out_dt,
+            raw_datetimes=out_dts,
+            raw_source="raw",
+        ).final_dt
 
         shift_start_dt = _normalize_dt(rules.get("shift_start_dt"), tzinfo)
         shift_end_dt = _normalize_dt(rules.get("shift_end_dt"), tzinfo)
