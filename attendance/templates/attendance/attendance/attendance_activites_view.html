@@ -38,8 +38,8 @@
                                 </div>
                             </div>
                             <div class="oh-sticky-table__td">{{activity.attendance_date}}</div>
-                            <div class="oh-sticky-table__td">{{activity.clock_in_date}}</div>
-                            <div class="oh-sticky-table__td">{{activity.clock_in}}</div>
+                            <div class="oh-sticky-table__td">{{ activity.clock_in_date|default_if_none:"-"|default:"-" }}</div>
+                            <div class="oh-sticky-table__td">{{ activity.clock_in|default_if_none:"-"|default:"-" }}</div>
                             <div class="oh-sticky-table__td" onclick="event.stopPropagation();">
                               {% if activity.clock_in_image %}
                                 <a href="{{ activity.clock_in_image.url }}" target="_blank" onclick="event.stopPropagation();">
@@ -51,7 +51,7 @@
                               {% endif %}
                             </div>
                             
-                            <div class="oh-sticky-table__td">{{activity.clock_out}}</div>
+                            <div class="oh-sticky-table__td">{{ activity.clock_out|default_if_none:"-"|default:"-" }}</div>
                             <div class="oh-sticky-table__td" onclick="event.stopPropagation();">
                               {% if activity.clock_out_image %}
                                 <a href="{{ activity.clock_out_image.url }}" target="_blank" onclick="event.stopPropagation();">
@@ -63,7 +63,7 @@
                               {% endif %}
                             </div>
                             
-                            <div class="oh-sticky-table__td">{{activity.clock_out_date}}</div>
+                            <div class="oh-sticky-table__td">{{ activity.clock_out_date|default_if_none:"-"|default:"-" }}</div>
                         </div>
                     {% endfor %}
                 </div>
