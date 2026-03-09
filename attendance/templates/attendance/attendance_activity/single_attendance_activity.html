@@ -67,22 +67,22 @@
             <div class="oh-timeoff-modal__stats-container mt-3 mb-3">
                 <div class="oh-timeoff-modal__stat">
                     <span class="oh-timeoff-modal__stat-title">{% trans "Check In" %}</span>
-                    <span class="oh-timeoff-modal__stat-count timeformat_changer">{{activity.clock_in}}</span>
+                    <span class="oh-timeoff-modal__stat-count timeformat_changer">{{ activity.clock_in|default_if_none:"-"|default:"-" }}</span>
                 </div>
                 <div class="oh-timeoff-modal__stat" style="margin-left: 20px">
                     <span class="oh-timeoff-modal__stat-title">{% trans "Check In Date" %}</span>
-                    <span class="oh-timeoff-modal__stat-count dateformat_changer">{{activity.clock_in_date}}</span>
+                    <span class="oh-timeoff-modal__stat-count dateformat_changer">{{ activity.clock_in_date|default_if_none:"-"|default:"-" }}</span>
                 </div>
             </div>
 
             <div class="oh-timeoff-modal__stats-container mt-3 mb-3">
                 <div class="oh-timeoff-modal__stat">
                     <span class="oh-timeoff-modal__stat-title">{% trans "Check Out" %}</span>
-                    <span class="oh-timeoff-modal__stat-count timeformat_changer">{{activity.clock_out}}</span>
+                    <span class="oh-timeoff-modal__stat-count timeformat_changer">{{ activity.clock_out|default_if_none:"-"|default:"-" }}</span>
                 </div>
                 <div class="oh-timeoff-modal__stat" style="margin-left: 20px">
                     <span class="oh-timeoff-modal__stat-title">{% trans "Check Out Date" %}</span>
-                    <span class="oh-timeoff-modal__stat-count dateformat_changer">{{activity.clock_out_date}}</span>
+                    <span class="oh-timeoff-modal__stat-count dateformat_changer">{{ activity.clock_out_date|default_if_none:"-"|default:"-" }}</span>
                 </div>
             </div>
 
