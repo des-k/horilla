@@ -73,12 +73,20 @@
               {% endif %}
             
 
-              {% if r.status == 'approved' or r.status == 'rejected' %}
-                {% if r.approved_by %}
+              {% if r.status == 'approved' or r.status == 'rejected' or r.status == 'canceled' %}
+                {% if r.action_by %}
                   <div class="text-muted" style="font-size: 12px; margin-top: 4px;">
-                    {% if r.status == 'approved' %}{% trans "Approved by" %}{% else %}{% trans "Rejected by" %}{% endif %}:
-                    {{ r.approved_by.employee_first_name }} {{ r.approved_by.employee_last_name }}
-                    {% if r.approved_at %} • {{ r.approved_at|date:"Y-m-d H:i" }}{% endif %}
+                    {% if r.action_type == 'APPROVED' or r.status == 'approved' %}
+                      {% trans "Approved by" %}
+                    {% elif r.action_type == 'REJECTED' or r.status == 'rejected' %}
+                      {% trans "Rejected by" %}
+                    {% elif r.action_type == 'CANCELED' or r.status == 'canceled' %}
+                      {% trans "Canceled by" %}
+                    {% else %}
+                      {% trans "Action by" %}
+                    {% endif %}:
+                    {{ r.action_by.employee_first_name }} {{ r.action_by.employee_last_name }}
+                    {% if r.action_at %} • {{ r.action_at|date:"Y-m-d H:i" }}{% endif %}
                   </div>
                 {% endif %}
               {% endif %}
