@@ -32,6 +32,7 @@ from attendance.services.attendance_correction_scope_rules import (
 )
 from attendance.services.final_session_resolution import (
     APPROVED_REQUEST_CHANNEL,
+    is_approved_request_channel,
     resolve_final_session,
 )
 from attendance.services.monthly_recap_note import (
@@ -254,13 +255,13 @@ def _approved_request_dt(
     session_norm = (session or "IN").upper()
 
     for obj in sorted(attendances, key=lambda x: x.id, reverse=True):
-        if _session_channel(obj, session_norm) == APPROVED_REQUEST_CHANNEL:
+        if _session_channel(obj, session_norm) and is_approved_request_channel(_session_channel(obj, session_norm)):
             dt_obj = _session_dt(obj, session_norm, attendance_date)
             if dt_obj:
                 return _normalize_dt(dt_obj, tzinfo)
 
     for obj in sorted(activities, key=lambda x: x.id, reverse=True):
-        if _session_channel(obj, session_norm) == APPROVED_REQUEST_CHANNEL:
+        if _session_channel(obj, session_norm) and is_approved_request_channel(_session_channel(obj, session_norm)):
             dt_obj = _session_dt(obj, session_norm, attendance_date)
             if dt_obj:
                 return _normalize_dt(dt_obj, tzinfo)
@@ -928,7 +929,7 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
         out_dts_raw: List[datetime] = []
 
         for a in att_list:
-            if _should_use_raw_punch_source(a, request_status_by_id, session="IN") and _session_channel(a, "IN") != APPROVED_REQUEST_CHANNEL:
+            if _should_use_raw_punch_source(a, request_status_by_id, session="IN") and not is_approved_request_channel(_session_channel(a, "IN")): 
                 dt_in = _combine_dt(
                     getattr(a, "attendance_clock_in_date", None),
                     getattr(a, "attendance_clock_in", None),
@@ -936,7 +937,7 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
                 )
                 if dt_in:
                     in_dts_raw.append(_normalize_dt(dt_in))
-            if _should_use_raw_punch_source(a, request_status_by_id, session="OUT") and _session_channel(a, "OUT") != APPROVED_REQUEST_CHANNEL:
+            if _should_use_raw_punch_source(a, request_status_by_id, session="OUT") and not is_approved_request_channel(_session_channel(a, "OUT")): 
                 dt_out = _combine_dt(
                     getattr(a, "attendance_clock_out_date", None),
                     getattr(a, "attendance_clock_out", None),
@@ -946,7 +947,7 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
                     out_dts_raw.append(_normalize_dt(dt_out))
 
         for ac in act_list:
-            if _should_use_raw_punch_source(ac, request_status_by_id, session="IN") and _session_channel(ac, "IN") != APPROVED_REQUEST_CHANNEL:
+            if _should_use_raw_punch_source(ac, request_status_by_id, session="IN") and not is_approved_request_channel(_session_channel(ac, "IN")): 
                 dt_in = getattr(ac, "in_datetime", None) or _combine_dt(
                     getattr(ac, "clock_in_date", None),
                     getattr(ac, "clock_in", None),
@@ -954,7 +955,7 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
                 )
                 if dt_in:
                     in_dts_raw.append(_normalize_dt(dt_in))
-            if _should_use_raw_punch_source(ac, request_status_by_id, session="OUT") and _session_channel(ac, "OUT") != APPROVED_REQUEST_CHANNEL:
+            if _should_use_raw_punch_source(ac, request_status_by_id, session="OUT") and not is_approved_request_channel(_session_channel(ac, "OUT")): 
                 dt_out = getattr(ac, "out_datetime", None) or _combine_dt(
                     getattr(ac, "clock_out_date", None),
                     getattr(ac, "clock_out", None),
