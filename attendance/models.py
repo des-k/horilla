@@ -66,6 +66,20 @@ class WorkModeRequestStatus(models.TextChoices):
 
 
 
+class WorkModeRequestActionType(models.TextChoices):
+    """Audit action applied to a work-mode request."""
+    APPROVED = "APPROVED", _("Approved")
+    REJECTED = "REJECTED", _("Rejected")
+    CANCELED = "CANCELED", _("Canceled")
+
+
+class AttendanceRequestActionType(models.TextChoices):
+    """Audit action applied to an attendance correction request."""
+    APPROVED = "APPROVED", _("Approved")
+    REJECTED = "REJECTED", _("Rejected")
+    CANCELED = "CANCELED", _("Canceled")
+
+
 class WorkModeRequestRejectReasonCode(models.TextChoices):
     """Reason code for REJECTED WorkModeRequest."""
     MANUAL_REJECT = "MANUAL_REJECT", _("Manual Reject")
@@ -89,17 +103,6 @@ class AttendancePunchStatus(models.TextChoices):
     VALID = "VALID", _("Valid")
     REJECTED = "REJECTED", _("Rejected")
 
-
-class AttendanceSourceChannel(models.TextChoices):
-    """Origin channel of the winning attendance session."""
-
-    MOBILE = "mobile", _("Mobile")
-    BIOMETRIC = "biometric", _("Biometric")
-    APPROVED_REQUEST = "approved_request", _("Approved Request")
-    AUTO = "auto", _("Auto")
-    MANUAL = "manual", _("Manual")
-    API = "api", _("API")
-
 class AttendanceActivity(HorillaModel):
     """
     AttendanceActivity model
@@ -122,25 +125,18 @@ class AttendanceActivity(HorillaModel):
         on_delete=models.DO_NOTHING,
         verbose_name=_("Shift Day"),
     )
-    in_datetime = models.DateTimeField(null=True, blank=True)
-    clock_in_date = models.DateField(null=True, blank=True, verbose_name=_("In Date"))
-    clock_in = models.TimeField(null=True, blank=True, verbose_name=_("Check In"))
-    clock_out_date = models.DateField(null=True, blank=True, verbose_name=_("Out Date"))
-    out_datetime = models.DateTimeField(null=True, blank=True)
-    clock_out = models.TimeField(null=True, blank=True, verbose_name=_("Check Out"))
+    in_datetime = models.DateTimeField(null=True)
+    clock_in_date = models.DateField(null=True, verbose_name=_("In Date"))
+    clock_in = models.TimeField(verbose_name=_("Check In"))
+    clock_out_date = models.DateField(null=True, verbose_name=_("Out Date"))
+    out_datetime = models.DateTimeField(null=True)
+    clock_out = models.TimeField(null=True, verbose_name=_("Check Out"))
     objects = HorillaCompanyManager(
         related_company_field="employee_id__employee_work_info__company_id"
     )
     clock_in_image = models.ImageField(upload_to=upload_path, null=True, blank=True)
     clock_out_image = models.ImageField(upload_to=upload_path, null=True, blank=True)
 
-    clock_in_channel = models.CharField(
-        max_length=32,
-        null=True,
-        blank=True,
-        choices=AttendanceSourceChannel.choices,
-        verbose_name=_("Clock-In Channel"),
-    )
     clock_in_mode = models.CharField(
         max_length=20,
         null=True,
@@ -148,13 +144,6 @@ class AttendanceActivity(HorillaModel):
         choices=AttendanceWorkMode.choices,
         default=AttendanceWorkMode.WFO,
         verbose_name=_("Clock-In Mode"),
-    )
-    clock_out_channel = models.CharField(
-        max_length=32,
-        null=True,
-        blank=True,
-        choices=AttendanceSourceChannel.choices,
-        verbose_name=_("Clock-Out Channel"),
     )
     clock_out_mode = models.CharField(
         max_length=20,
@@ -197,25 +186,19 @@ class AttendanceActivity(HorillaModel):
         Duration calc b/w in-out method
         """
 
-        if not self.clock_in_date or not self.clock_in:
-            return 0
-
         if not self.clock_out or not self.clock_out_date:
-            clock_out_date = datetime.today().date()
-            clock_out_time = datetime.now().time()
-        else:
-            clock_out_date = self.clock_out_date
-            clock_out_time = self.clock_out
+            self.clock_out_date = datetime.today().date()
+            self.clock_out = datetime.now().time()
 
         clock_in_datetime = datetime.combine(self.clock_in_date, self.clock_in)
-        clock_out_datetime = datetime.combine(clock_out_date, clock_out_time)
+        clock_out_datetime = datetime.combine(self.clock_out_date, self.clock_out)
 
         time_difference = clock_out_datetime - clock_in_datetime
 
         return time_difference.total_seconds()
 
     def __str__(self):
-        return f"{self.employee_id} - {self.attendance_date} - {self.clock_in or '-'} - {self.clock_out or '-'}"
+        return f"{self.employee_id} - {self.attendance_date} - {self.clock_in} - {self.clock_out}"
 
 
 class BatchAttendance(HorillaModel):
@@ -280,6 +263,7 @@ class WorkModeRequest(HorillaModel):
     )
 
     reason = models.TextField(null=True, blank=True, verbose_name=_("Reason"))
+    action_reason = models.TextField(null=True, blank=True, verbose_name=_("Action Reason"))
 
     files = models.ManyToManyField(
         "attendance.AttendanceRequestFile",
@@ -297,6 +281,22 @@ class WorkModeRequest(HorillaModel):
         verbose_name=_("Approved By"),
     )
     approved_at = models.DateTimeField(null=True, blank=True, verbose_name=_("Approved At"))
+    action_by = models.ForeignKey(
+        Employee,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="acted_work_mode_requests",
+        verbose_name=_("Action By"),
+    )
+    action_at = models.DateTimeField(null=True, blank=True, verbose_name=_("Action At"))
+    action_type = models.CharField(
+        max_length=16,
+        null=True,
+        blank=True,
+        choices=WorkModeRequestActionType.choices,
+        verbose_name=_("Action Type"),
+    )
 
     objects = HorillaCompanyManager(
         related_company_field="employee_id__employee_work_info__company_id"
@@ -381,16 +381,16 @@ class Attendance(HorillaModel):
         verbose_name=_("Attendance day"),
     )
     attendance_clock_in_date = models.DateField(
-        null=True, blank=True, verbose_name=_("Check-In Date")
+        null=True, verbose_name=_("Check-In Date")
     )
     attendance_clock_in = models.TimeField(
-        null=True, blank=True, verbose_name=_("Check-In"), help_text=_("First Check-In Time")
+        null=True, verbose_name=_("Check-In"), help_text=_("First Check-In Time")
     )
     attendance_clock_out_date = models.DateField(
-        null=True, blank=True, verbose_name=_("Check-Out Date")
+        null=True, verbose_name=_("Check-Out Date")
     )
     attendance_clock_out = models.TimeField(
-        null=True, blank=True, verbose_name=_("Check-Out"), help_text=_("Last Check-Out Time")
+        null=True, verbose_name=_("Check-Out"), help_text=_("Last Check-Out Time")
     )
     attendance_worked_hour = models.CharField(
         null=True,
@@ -444,12 +444,22 @@ class Attendance(HorillaModel):
     )
     is_holiday = models.BooleanField(default=False)
     requested_data = models.JSONField(null=True, editable=False)
-    approved_by = models.ForeignKey(
+    action_by = models.ForeignKey(
         Employee,
         on_delete=models.PROTECT,
         null=True,
         blank=True,
-        verbose_name=_("Approved By"),
+        related_name="attendance_request_actions",
+        verbose_name=_("Action By"),
+        editable=False,
+    )
+    action_at = models.DateTimeField(null=True, blank=True, verbose_name=_("Action At"))
+    action_type = models.CharField(
+        max_length=16,
+        null=True,
+        blank=True,
+        choices=AttendanceRequestActionType.choices,
+        verbose_name=_("Action Type"),
         editable=False,
     )
     objects = HorillaCompanyManager(
@@ -465,13 +475,6 @@ class Attendance(HorillaModel):
     attendance_clock_out_image = models.ImageField(upload_to=upload_path, null=True, blank=True)
 
     # Hybrid work mode + audit data
-    attendance_clock_in_channel = models.CharField(
-        max_length=32,
-        null=True,
-        blank=True,
-        choices=AttendanceSourceChannel.choices,
-        verbose_name=_("Check-In Channel"),
-    )
     attendance_clock_in_mode = models.CharField(
         max_length=20,
         null=True,
@@ -479,13 +482,6 @@ class Attendance(HorillaModel):
         choices=AttendanceWorkMode.choices,
         default=AttendanceWorkMode.WFO,
         verbose_name=_("Check-In Mode"),
-    )
-    attendance_clock_out_channel = models.CharField(
-        max_length=32,
-        null=True,
-        blank=True,
-        choices=AttendanceSourceChannel.choices,
-        verbose_name=_("Check-Out Channel"),
     )
     attendance_clock_out_mode = models.CharField(
         max_length=20,
@@ -638,12 +634,10 @@ class Attendance(HorillaModel):
         at_work_seconds = 0
         now = datetime.now()
         for activity in activities:
-            if not activity.clock_in or not activity.clock_in_date:
-                continue
             out_time = activity.clock_out
-            if out_time is None or not activity.clock_out_date:
+            if out_time is None:
                 combined_out = datetime.combine(
-                    now.date(), dt.time(hour=now.hour, minute=now.minute, second=now.second)
+                    now, dt.time(hour=now.hour, minute=now.minute, second=now.second)
                 )
             else:
                 combined_out = datetime.combine(activity.clock_out_date, out_time)
@@ -709,10 +703,6 @@ class Attendance(HorillaModel):
                 self.attendance_overtime_approve = True
 
     def save(self, *args, **kwargs):
-        if not self.attendance_worked_hour:
-            self.attendance_worked_hour = "00:00"
-        if not self.minimum_hour:
-            self.minimum_hour = "00:00"
         if self.is_presensi_only:
             # Presence-only attendances (e.g., On Duty) must not affect hour calculations.
             self.attendance_worked_hour = "00:00"
