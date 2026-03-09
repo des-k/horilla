@@ -150,10 +150,10 @@
                                     {{attendance.attendance_day.get_day_display }}
                                 </div>
                                 <div data-cell-index="4" class="oh-sticky-table__td timeformat_changer">
-                                    {{attendance.attendance_clock_in}}
+                                    {{ attendance.attendance_clock_in|default_if_none:"-"|default:"-" }}
                                 </div>
                                 <div data-cell-index="5" class="oh-sticky-table__td dateformat_changer">
-                                    {{attendance.attendance_clock_in_date}}
+                                    {{ attendance.attendance_clock_in_date|default_if_none:"-"|default:"-" }}
                                 </div>
 
                                 <div data-cell-index="14" class="oh-sticky-table__td" onclick="event.stopPropagation();">
@@ -168,10 +168,10 @@
                                 </div>
                                 
                                 <div data-cell-index="6" class="oh-sticky-table__td timeformat_changer">
-                                    {{attendance.attendance_clock_out}}
+                                    {{ attendance.attendance_clock_out|default_if_none:"-"|default:"-" }}
                                 </div>
                                 <div data-cell-index="7" class="oh-sticky-table__td dateformat_changer">
-                                    {{attendance.attendance_clock_out_date}}
+                                    {{ attendance.attendance_clock_out_date|default_if_none:"-"|default:"-" }}
                                 </div>
 
                                 <div data-cell-index="15" class="oh-sticky-table__td" onclick="event.stopPropagation();">
@@ -412,10 +412,10 @@
                                         {{attendance.attendance_day.get_day_display }}
                                     </div>
                                     <div data-cell-index="24" class="oh-sticky-table__td timeformat_changer">
-                                        {{attendance.attendance_clock_in}}
+                                        {{ attendance.attendance_clock_in|default_if_none:"-"|default:"-" }}
                                     </div>
                                     <div data-cell-index="25" class="oh-sticky-table__td dateformat_changer">
-                                        {{attendance.attendance_clock_in_date}}
+                                        {{ attendance.attendance_clock_in_date|default_if_none:"-"|default:"-" }}
                                     </div>
 
                                     <div data-cell-index="34" class="oh-sticky-table__td" onclick="event.stopPropagation();">
@@ -428,10 +428,10 @@
                                     </div>
                                     
                                     <div data-cell-index="26" class="oh-sticky-table__td timeformat_changer">
-                                        {{attendance.attendance_clock_out}}
+                                        {{ attendance.attendance_clock_out|default_if_none:"-"|default:"-" }}
                                     </div>
                                     <div data-cell-index="27" class="oh-sticky-table__td dateformat_changer">
-                                        {{attendance.attendance_clock_out_date}}
+                                        {{ attendance.attendance_clock_out_date|default_if_none:"-"|default:"-" }}
                                     </div>
 
                                     <div data-cell-index="35" class="oh-sticky-table__td" onclick="event.stopPropagation();">
@@ -678,10 +678,10 @@
                                 {{attendance.attendance_day.get_day_display }}
                             </div>
                             <div data-cell-index="44" class="oh-sticky-table__td timeformat_changer">
-                                {{attendance.attendance_clock_in}}
+                                {{ attendance.attendance_clock_in|default_if_none:"-"|default:"-" }}
                             </div>
                             <div data-cell-index="45" class="oh-sticky-table__td dateformat_changer">
-                                {{attendance.attendance_clock_in_date}}
+                                {{ attendance.attendance_clock_in_date|default_if_none:"-"|default:"-" }}
                             </div>
 
                             <div data-cell-index="54" class="oh-sticky-table__td" onclick="event.stopPropagation();">
@@ -696,10 +696,10 @@
                             </div>
                             
                             <div data-cell-index="46" class="oh-sticky-table__td timeformat_changer">
-                                {{attendance.attendance_clock_out}}
+                                {{ attendance.attendance_clock_out|default_if_none:"-"|default:"-" }}
                             </div>
                             <div data-cell-index="47" class="oh-sticky-table__td dateformat_changer">
-                                {{attendance.attendance_clock_out_date}}
+                                {{ attendance.attendance_clock_out_date|default_if_none:"-"|default:"-" }}
                             </div>
 
                             <div data-cell-index="55" class="oh-sticky-table__td" onclick="event.stopPropagation();">
