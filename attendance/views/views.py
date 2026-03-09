@@ -2027,7 +2027,7 @@ def activity_attendance_select(request):
     page_number = request.GET.get("page")
 
     if page_number == "all":
-        if request.user.has_perm("attendance.view_attendanceovertime"):
+        if request.user.has_perm("attendance.view_attendanceactivity"):
             employees = AttendanceActivity.objects.all()
         else:
             employees = AttendanceActivity.objects.filter(
@@ -2051,7 +2051,7 @@ def activity_attendance_select_filter(request):
     filters = json.loads(filtered) if filtered else {}
 
     if page_number == "all":
-        if request.user.has_perm("attendance.view_attendanceovertime"):
+        if request.user.has_perm("attendance.view_attendanceactivity"):
             employee_filter = AttendanceActivityFilter(
                 filters, queryset=AttendanceActivity.objects.all()
             )
