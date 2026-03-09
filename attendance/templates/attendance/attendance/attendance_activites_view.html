@@ -18,9 +18,11 @@
                         <div class="oh-sticky-table__th">{% trans "Attendance Date" %}</div>
                         <div class="oh-sticky-table__th">{% trans "In Date" %}</div>
                         <div class="oh-sticky-table__th">{% trans "Clock In" %}</div>
+                        <div class="oh-sticky-table__th">{% trans "In Source" %}</div>
                         <div class="oh-sticky-table__th">{% trans "In Photo" %}</div>
                         
                         <div class="oh-sticky-table__th">{% trans "Clock Out" %}</div>
+                        <div class="oh-sticky-table__th">{% trans "Out Source" %}</div>
                         <div class="oh-sticky-table__th">{% trans "Out Photo" %}</div>
                         
                         <div class="oh-sticky-table__th">{% trans "Out Date" %}</div>
@@ -40,6 +42,13 @@
                             <div class="oh-sticky-table__td">{{activity.attendance_date}}</div>
                             <div class="oh-sticky-table__td">{{ activity.clock_in_date|default_if_none:"-"|default:"-" }}</div>
                             <div class="oh-sticky-table__td">{{ activity.clock_in|default_if_none:"-"|default:"-" }}</div>
+                            <div class="oh-sticky-table__td">
+                                {% if activity.clock_in_channel %}
+                                    <span class="oh-badge oh-badge--secondary oh-badge--small oh-badge--round">{{ activity.get_clock_in_channel_display }}</span>
+                                {% else %}
+                                    -
+                                {% endif %}
+                            </div>
                             <div class="oh-sticky-table__td" onclick="event.stopPropagation();">
                               {% if activity.clock_in_image %}
                                 <a href="{{ activity.clock_in_image.url }}" target="_blank" onclick="event.stopPropagation();">
@@ -52,6 +61,13 @@
                             </div>
                             
                             <div class="oh-sticky-table__td">{{ activity.clock_out|default_if_none:"-"|default:"-" }}</div>
+                            <div class="oh-sticky-table__td">
+                                {% if activity.clock_out_channel %}
+                                    <span class="oh-badge oh-badge--secondary oh-badge--small oh-badge--round">{{ activity.get_clock_out_channel_display }}</span>
+                                {% else %}
+                                    -
+                                {% endif %}
+                            </div>
                             <div class="oh-sticky-table__td" onclick="event.stopPropagation();">
                               {% if activity.clock_out_image %}
                                 <a href="{{ activity.clock_out_image.url }}" target="_blank" onclick="event.stopPropagation();">
