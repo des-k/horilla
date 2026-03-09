@@ -42,6 +42,7 @@ from attendance.models import (
     BatchAttendance,
 )
 from attendance.views.clock_in_out import early_out, late_come
+from attendance.services.final_session_resolution import APPROVED_REQUEST_CHANNEL
 import attendance.views.clock_in_out as cio
 from base.methods import (
     choosesubordinates,
@@ -154,31 +155,54 @@ def _build_shift_info_map(attendances):
             info[getattr(att, "id", None)] = None
     return info
 
-def _ensure_single_session_activity(attendance: Attendance, prev_attendance_date=None) -> AttendanceActivity:
-    """Sync AttendanceActivity to match Attendance for single-session mode.
+def _mark_approved_request_channels(attendance: Attendance) -> None:
+    """Stamp approved-request channel per session without changing overlap validation."""
 
-    Rules:
-    - Keep **exactly one** AttendanceActivity per (employee, attendance_date).
-    - Activity.clock_in is NOT NULL in the model, so if Attendance check-in is missing,
-      we use a placeholder clock-in (clock-out if available, else 00:00).
-    - If the request changes attendance_date, we clean up old-date activities.
+    if not attendance or not attendance.requested_data:
+        return
+
+    try:
+        from attendance.services.attendance_correction_scope_rules import get_current_scope
+
+        scope = get_current_scope(attendance.requested_data)
+    except Exception:
+        scope = None
+
+    sessions = set()
+    scope_value = (scope or "").lower()
+    if scope_value == "full":
+        sessions.update(["in", "out"])
+    elif scope_value in {"in", "out"}:
+        sessions.add(scope_value)
+
+    update_fields = []
+    if "in" in sessions:
+        attendance.attendance_clock_in_channel = APPROVED_REQUEST_CHANNEL
+        update_fields.append("attendance_clock_in_channel")
+    if "out" in sessions:
+        attendance.attendance_clock_out_channel = APPROVED_REQUEST_CHANNEL
+        update_fields.append("attendance_clock_out_channel")
+    if update_fields:
+        attendance.save(update_fields=update_fields)
+
+
+def _ensure_single_session_activity(attendance: Attendance, prev_attendance_date=None) -> AttendanceActivity:
+    """Sync the canonical AttendanceActivity to the approved Attendance values.
+
+    Missing check-in stays NULL; no placeholder times are created.
     """
 
     employee = attendance.employee_id
     target_date = attendance.attendance_date
 
-    # If the request moved the attendance_date, clean up old-date activities.
     if prev_attendance_date and prev_attendance_date != target_date:
         old_qs = AttendanceActivity.objects.filter(employee_id=employee, attendance_date=prev_attendance_date)
         if old_qs.exists():
-            # If no activity exists on the new date, move the old ones.
             if not AttendanceActivity.objects.filter(employee_id=employee, attendance_date=target_date).exists():
                 old_qs.update(attendance_date=target_date)
             else:
-                # Otherwise, delete old ones to avoid duplicates across dates.
                 old_qs.delete()
 
-    # Keep the latest activity as the canonical one, delete duplicates.
     qs = AttendanceActivity.objects.filter(employee_id=employee, attendance_date=target_date).order_by("-id")
     activity = qs.first()
     if activity:
@@ -186,30 +210,52 @@ def _ensure_single_session_activity(attendance: Attendance, prev_attendance_date
     else:
         activity = AttendanceActivity(employee_id=employee, attendance_date=target_date)
 
-    # Ensure shift day exists
     day = attendance.attendance_day
     if not day:
         day_name = target_date.strftime("%A").lower()
         day = EmployeeShiftDay.objects.get(day=day_name)
 
-    # Non-null clock_in placeholder (single-session skeleton support)
-    clock_in_date = attendance.attendance_clock_in_date or attendance.attendance_clock_out_date or target_date
-    clock_in_time = attendance.attendance_clock_in or attendance.attendance_clock_out or time(0, 0)
-
     activity.shift_day = day
-    activity.clock_in_date = clock_in_date
-    activity.clock_in = clock_in_time
-    activity.in_datetime = datetime.combine(clock_in_date, clock_in_time)
 
-    # Sync OUT fields
+    if attendance.attendance_clock_in and attendance.attendance_clock_in_date:
+        activity.clock_in_date = attendance.attendance_clock_in_date
+        activity.clock_in = attendance.attendance_clock_in
+        activity.in_datetime = datetime.combine(
+            attendance.attendance_clock_in_date,
+            attendance.attendance_clock_in,
+        )
+    else:
+        activity.clock_in_date = None
+        activity.clock_in = None
+        activity.in_datetime = None
+
     if attendance.attendance_clock_out and attendance.attendance_clock_out_date:
         activity.clock_out_date = attendance.attendance_clock_out_date
         activity.clock_out = attendance.attendance_clock_out
-        activity.out_datetime = datetime.combine(attendance.attendance_clock_out_date, attendance.attendance_clock_out)
+        activity.out_datetime = datetime.combine(
+            attendance.attendance_clock_out_date,
+            attendance.attendance_clock_out,
+        )
     else:
         activity.clock_out_date = None
         activity.clock_out = None
         activity.out_datetime = None
+
+    for source_field, target_field in (
+        ("attendance_clock_in_image", "clock_in_image"),
+        ("attendance_clock_out_image", "clock_out_image"),
+        ("attendance_clock_in_mode", "clock_in_mode"),
+        ("attendance_clock_out_mode", "clock_out_mode"),
+        ("attendance_clock_in_location", "clock_in_location"),
+        ("attendance_clock_out_location", "clock_out_location"),
+        ("attendance_clock_in_channel", "clock_in_channel"),
+        ("attendance_clock_out_channel", "clock_out_channel"),
+    ):
+        if hasattr(activity, target_field) and hasattr(attendance, source_field):
+            setattr(activity, target_field, getattr(attendance, source_field, None))
+
+    if hasattr(activity, "work_mode_request_id") and hasattr(attendance, "work_mode_request_id"):
+        activity.work_mode_request_id = getattr(attendance, "work_mode_request_id", None)
 
     activity.save()
     return activity
@@ -1052,6 +1098,7 @@ def approve_validate_attendance_request(request, attendance_id):
 
         # Re-fetch to ensure types are correct (TimeField -> datetime.time, etc.)
         attendance.refresh_from_db()
+        _mark_approved_request_channels(attendance)
 
         # Save once more to trigger Attendance.save() side effects (e.g., overtime calc)
         attendance.attendance_validated = True
@@ -1416,6 +1463,7 @@ def bulk_approve_attendance_request(request):
             requested_data = _normalize_requested_data(json.loads(attendance.requested_data))
             Attendance.objects.filter(id=attendance_id).update(**requested_data)
             attendance.refresh_from_db()
+            _mark_approved_request_channels(attendance)
             attendance.save()
 
         # Keep single-session activity consistent
