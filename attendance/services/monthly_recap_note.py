@@ -99,11 +99,9 @@ def derive_note(inp: NoteInputs, *, language: str = "en") -> str:
     Rules (FINAL spec):
     1) OFF (holiday/leave) overrides everything: never Alpha.
     2) If no check-in AND no check-out => Alpha.
-    3) Otherwise:
-       - Late if (late > 0) OR missing check-in
-       - Leave Early if (early > 0) OR missing check-out
-       - Combine deterministically.
-    4) Pending request suffixes do not change effective calculations.
+    3) If only one session exists, surface the missing session explicitly.
+    4) Otherwise derive Late / Leave Early deterministically.
+    5) Pending request suffixes do not change effective calculations.
     """
 
     lang = (language or "en").lower()
@@ -115,6 +113,8 @@ def derive_note(inp: NoteInputs, *, language: str = "en") -> str:
             "late": "Late",
             "leave_early": "Leave Early",
             "late_and_early": "Late, Leave Early",
+            "missing_check_in": "Missing Check-In",
+            "missing_check_out": "Missing Check-Out",
             "correction_pending": "Attendance correction pending",
         },
         "id": {
@@ -124,6 +124,8 @@ def derive_note(inp: NoteInputs, *, language: str = "en") -> str:
             "late": "Terlambat",
             "leave_early": "Pulang Cepat",
             "late_and_early": "Terlambat, Pulang Cepat",
+            "missing_check_in": "Check-in Tidak Ada",
+            "missing_check_out": "Check-out Tidak Ada",
             "correction_pending": "Koreksi presensi menunggu persetujuan",
         },
     }
@@ -134,11 +136,17 @@ def derive_note(inp: NoteInputs, *, language: str = "en") -> str:
         base = t["leave"] if inp.off_kind == "leave" else t["holiday"]
     elif not inp.has_check_in and not inp.has_check_out:
         base = t["alpha"]
+    elif not inp.has_check_in:
+        base = t["missing_check_in"]
+        if inp.early_out_seconds and inp.early_out_seconds > 0:
+            base = f"{base}, {t['leave_early']}"
+    elif not inp.has_check_out:
+        base = t["missing_check_out"]
+        if inp.late_seconds and inp.late_seconds > 0:
+            base = f"{t['late']}, {base}"
     else:
-        is_late = bool(inp.late_seconds and inp.late_seconds > 0) or (not inp.has_check_in)
-        is_leave_early = bool(inp.early_out_seconds and inp.early_out_seconds > 0) or (
-            not inp.has_check_out
-        )
+        is_late = bool(inp.late_seconds and inp.late_seconds > 0)
+        is_leave_early = bool(inp.early_out_seconds and inp.early_out_seconds > 0)
 
         if is_late and is_leave_early:
             base = t["late_and_early"]
