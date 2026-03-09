@@ -474,16 +474,21 @@ def _ensure_single_session_activity(attendance: Attendance, prev_attendance_date
     if not day:
         day = EmployeeShiftDay.objects.get(day=target_date.strftime("%A").lower())
 
-    # AttendanceActivity requires a non-null clock_in
-    clock_in_date = attendance.attendance_clock_in_date or attendance.attendance_clock_out_date or target_date
-    clock_in_time = attendance.attendance_clock_in or attendance.attendance_clock_out or datetime.strptime("00:00", "%H:%M").time()
-
     activity.shift_day = day
-    activity.clock_in_date = clock_in_date
-    activity.clock_in = clock_in_time
 
-    if hasattr(activity, "in_datetime"):
-        activity.in_datetime = datetime.combine(clock_in_date, clock_in_time)
+    if attendance.attendance_clock_in and attendance.attendance_clock_in_date:
+        activity.clock_in_date = attendance.attendance_clock_in_date
+        activity.clock_in = attendance.attendance_clock_in
+        if hasattr(activity, "in_datetime"):
+            activity.in_datetime = datetime.combine(
+                attendance.attendance_clock_in_date,
+                attendance.attendance_clock_in,
+            )
+    else:
+        activity.clock_in_date = None
+        activity.clock_in = None
+        if hasattr(activity, "in_datetime"):
+            activity.in_datetime = None
 
     # Sync OUT fields
     if attendance.attendance_clock_out and attendance.attendance_clock_out_date:
@@ -741,6 +746,7 @@ class ClockInAPIView(APIView):
             clock_in_location=location,
             work_mode_request=in_req,
             is_presensi_only=(in_mode == AttendanceWorkMode.ON_DUTY),
+            clock_in_channel="mobile",
         )
 
         # Re-resolve OUT side for consistent response
@@ -936,6 +942,7 @@ class ClockOutAPIView(APIView):
                 is_presensi_only=(out_mode == AttendanceWorkMode.ON_DUTY),
                 allow_update_clock_out=allow_update,
                 raise_if_already_clocked_out=(not allow_update),
+                clock_out_channel="mobile",
             )
         except Exception as error:
             logger.exception("clock_out_attendance_and_activity failed")
