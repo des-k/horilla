@@ -86,6 +86,29 @@
                 </div>
             </div>
 
+            <div class="oh-timeoff-modal__stats-container mt-3 mb-3">
+                <div class="oh-timeoff-modal__stat">
+                    <span class="oh-timeoff-modal__stat-title">{% trans "In Source" %}</span>
+                    <span class="oh-timeoff-modal__stat-count">
+                        {% if activity.clock_in_channel %}
+                            <span class="oh-badge oh-badge--secondary oh-badge--small oh-badge--round">{{ activity.get_clock_in_channel_display }}</span>
+                        {% else %}
+                            -
+                        {% endif %}
+                    </span>
+                </div>
+                <div class="oh-timeoff-modal__stat" style="margin-left: 20px">
+                    <span class="oh-timeoff-modal__stat-title">{% trans "Out Source" %}</span>
+                    <span class="oh-timeoff-modal__stat-count">
+                        {% if activity.clock_out_channel %}
+                            <span class="oh-badge oh-badge--secondary oh-badge--small oh-badge--round">{{ activity.get_clock_out_channel_display }}</span>
+                        {% else %}
+                            -
+                        {% endif %}
+                    </span>
+                </div>
+            </div>
+
             <!-- NEW: Hybrid Mode -->
             <div class="oh-timeoff-modal__stats-container mt-3 mb-3">
                 <div class="oh-timeoff-modal__stat">
