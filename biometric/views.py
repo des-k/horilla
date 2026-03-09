@@ -533,7 +533,7 @@ def biometric_device_schedule(request, device_id):
                     device.save()
                     scheduler = BackgroundScheduler()
                     scheduler.add_job(
-                        lambda: zk_biometric_attendance_scheduler(device.id),
+                        lambda device_id=device.id: zk_biometric_attendance_scheduler(device_id),
                         "interval",
                         seconds=str_time_seconds(device.scheduler_duration),
                     )
@@ -564,7 +564,7 @@ def biometric_device_schedule(request, device_id):
                 device.save()
                 scheduler = BackgroundScheduler()
                 scheduler.add_job(
-                    lambda: anviz_biometric_attendance_scheduler(device.id),
+                    lambda device_id=device.id: anviz_biometric_attendance_scheduler(device_id),
                     "interval",
                     seconds=str_time_seconds(device.scheduler_duration),
                 )
@@ -578,7 +578,7 @@ def biometric_device_schedule(request, device_id):
                 device.save()
                 scheduler = BackgroundScheduler()
                 scheduler.add_job(
-                    lambda: dahua_biometric_attendance_scheduler(device.id),
+                    lambda device_id=device.id: dahua_biometric_attendance_scheduler(device_id),
                     "interval",
                     seconds=str_time_seconds(device.scheduler_duration),
                 )
@@ -596,7 +596,7 @@ def biometric_device_schedule(request, device_id):
                     existing_thread.stop()
                     del BIO_DEVICE_THREADS[device.id]
                 scheduler.add_job(
-                    lambda: cosec_biometric_attendance_scheduler(device.id),
+                    lambda device_id=device.id: cosec_biometric_attendance_scheduler(device_id),
                     "interval",
                     seconds=str_time_seconds(device.scheduler_duration),
                 )
@@ -610,7 +610,7 @@ def biometric_device_schedule(request, device_id):
                 device.save()
                 scheduler = BackgroundScheduler()
                 scheduler.add_job(
-                    lambda: etimeoffice_biometric_attendance_scheduler(device.id),
+                    lambda device_id=device.id: etimeoffice_biometric_attendance_scheduler(device_id),
                     "interval",
                     seconds=str_time_seconds(device.scheduler_duration),
                 )
@@ -2669,7 +2669,7 @@ try:
                 if device.machine_type == "anviz":
                     scheduler = BackgroundScheduler()
                     scheduler.add_job(
-                        lambda: anviz_biometric_attendance_scheduler(device.id),
+                        lambda device_id=device.id: anviz_biometric_attendance_scheduler(device_id),
                         "interval",
                         seconds=str_time_seconds(device.scheduler_duration),
                     )
@@ -2677,7 +2677,7 @@ try:
                 elif device.machine_type == "zk":
                     scheduler = BackgroundScheduler()
                     scheduler.add_job(
-                        lambda: zk_biometric_attendance_scheduler(device.id),
+                        lambda device_id=device.id: zk_biometric_attendance_scheduler(device_id),
                         "interval",
                         seconds=str_time_seconds(device.scheduler_duration),
                         id=f"biometric_{device.id}",
@@ -2686,7 +2686,7 @@ try:
                 elif device.machine_type == "dahua":
                     scheduler = BackgroundScheduler()
                     scheduler.add_job(
-                        lambda: dahua_biometric_attendance_scheduler(device.id),
+                        lambda device_id=device.id: dahua_biometric_attendance_scheduler(device_id),
                         "interval",
                         seconds=str_time_seconds(device.scheduler_duration),
                     )
@@ -2695,7 +2695,7 @@ try:
                 elif device.machine_type == "cosec":
                     scheduler = BackgroundScheduler()
                     scheduler.add_job(
-                        lambda: cosec_biometric_attendance_scheduler(device.id),
+                        lambda device_id=device.id: cosec_biometric_attendance_scheduler(device_id),
                         "interval",
                         seconds=str_time_seconds(device.scheduler_duration),
                     )
@@ -2704,7 +2704,7 @@ try:
                 elif device.machine_type == "etimeoffice":
                     scheduler = BackgroundScheduler()
                     scheduler.add_job(
-                        lambda: etimeoffice_biometric_attendance_scheduler(device.id),
+                        lambda device_id=device.id: etimeoffice_biometric_attendance_scheduler(device_id),
                         "interval",
                         seconds=str_time_seconds(device.scheduler_duration),
                     )
