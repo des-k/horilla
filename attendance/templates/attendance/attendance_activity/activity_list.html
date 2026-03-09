@@ -78,6 +78,10 @@
                         </div>
                         <div data-cell-index="3" data-cell-title="{% trans 'Check In' %}" class='oh-sticky-table__th'>{% trans "Check In" %}</div>
 
+                        <div data-cell-index="12" data-cell-title="{% trans 'In Source' %}" class="oh-sticky-table__th">
+                          {% trans "In Source" %}
+                        </div>
+
                         <div data-cell-index="8" data-cell-title="{% trans 'In Mode' %}" class="oh-sticky-table__th">
                           {% trans "In Mode" %}
                         </div>
@@ -91,6 +95,10 @@
                         </div>
 
                         <div data-cell-index="4" data-cell-title="{% trans 'Check Out' %}" class='oh-sticky-table__th'>{% trans "Check Out" %}</div>
+
+                        <div data-cell-index="13" data-cell-title="{% trans 'Out Source' %}" class="oh-sticky-table__th">
+                          {% trans "Out Source" %}
+                        </div>
 
                         <div data-cell-index="9" data-cell-title="{% trans 'Out Mode' %}" class="oh-sticky-table__th">
                           {% trans "Out Mode" %}
@@ -143,6 +151,14 @@
                             <div data-cell-index="2" class="oh-sticky-table__td dateformat_changer">{{ activity.clock_in_date|default_if_none:"-"|default:"-" }}</div>
                             <div data-cell-index="3" class="oh-sticky-table__td timeformat_changer">{{ activity.clock_in|default_if_none:"-"|default:"-" }}</div>
 
+                            <div data-cell-index="12" class="oh-sticky-table__td">
+                              {% if activity.clock_in_channel %}
+                                <span class="oh-badge oh-badge--secondary oh-badge--small oh-badge--round">{{ activity.get_clock_in_channel_display }}</span>
+                              {% else %}
+                                -
+                              {% endif %}
+                            </div>
+
                             <div data-cell-index="8" class="oh-sticky-table__td">
                               {{ activity.get_clock_in_mode_display|default:"-" }}
                             </div>
@@ -187,6 +203,14 @@
                             </div>
 
                             <div data-cell-index="4" class="oh-sticky-table__td timeformat_changer">{{ activity.clock_out|default_if_none:"-"|default:"-" }}</div>
+
+                            <div data-cell-index="13" class="oh-sticky-table__td">
+                              {% if activity.clock_out_channel %}
+                                <span class="oh-badge oh-badge--secondary oh-badge--small oh-badge--round">{{ activity.get_clock_out_channel_display }}</span>
+                              {% else %}
+                                -
+                              {% endif %}
+                            </div>
 
                             <div data-cell-index="9" class="oh-sticky-table__td">
                               {{ activity.get_clock_out_mode_display|default:"-" }}
