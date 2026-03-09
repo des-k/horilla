@@ -36,12 +36,14 @@ from attendance.models import (
     AttendanceWorkMode,
     WorkModeRequestScope,
     WorkModeRequestStatus,
+    WorkModeRequestActionType,
     WorkModeRequestRejectReasonCode,
 )
 from attendance.views.clock_in_out import *
 from attendance.views.clock_in_out import clock_out
 import attendance.views.clock_in_out as cio  # Access underscore helpers excluded by import *
 
+from attendance.services.attachment_validation import validate_uploaded_files
 from attendance.services.work_type_request_rules import (
     effective_work_type,
     punch_allowed,
@@ -474,21 +476,16 @@ def _ensure_single_session_activity(attendance: Attendance, prev_attendance_date
     if not day:
         day = EmployeeShiftDay.objects.get(day=target_date.strftime("%A").lower())
 
-    activity.shift_day = day
+    # AttendanceActivity requires a non-null clock_in
+    clock_in_date = attendance.attendance_clock_in_date or attendance.attendance_clock_out_date or target_date
+    clock_in_time = attendance.attendance_clock_in or attendance.attendance_clock_out or datetime.strptime("00:00", "%H:%M").time()
 
-    if attendance.attendance_clock_in and attendance.attendance_clock_in_date:
-        activity.clock_in_date = attendance.attendance_clock_in_date
-        activity.clock_in = attendance.attendance_clock_in
-        if hasattr(activity, "in_datetime"):
-            activity.in_datetime = datetime.combine(
-                attendance.attendance_clock_in_date,
-                attendance.attendance_clock_in,
-            )
-    else:
-        activity.clock_in_date = None
-        activity.clock_in = None
-        if hasattr(activity, "in_datetime"):
-            activity.in_datetime = None
+    activity.shift_day = day
+    activity.clock_in_date = clock_in_date
+    activity.clock_in = clock_in_time
+
+    if hasattr(activity, "in_datetime"):
+        activity.in_datetime = datetime.combine(clock_in_date, clock_in_time)
 
     # Sync OUT fields
     if attendance.attendance_clock_out and attendance.attendance_clock_out_date:
@@ -746,7 +743,6 @@ class ClockInAPIView(APIView):
             clock_in_location=location,
             work_mode_request=in_req,
             is_presensi_only=(in_mode == AttendanceWorkMode.ON_DUTY),
-            clock_in_channel="mobile",
         )
 
         # Re-resolve OUT side for consistent response
@@ -942,7 +938,6 @@ class ClockOutAPIView(APIView):
                 is_presensi_only=(out_mode == AttendanceWorkMode.ON_DUTY),
                 allow_update_clock_out=allow_update,
                 raise_if_already_clocked_out=(not allow_update),
-                clock_out_channel="mobile",
             )
         except Exception as error:
             logger.exception("clock_out_attendance_and_activity failed")
@@ -1448,6 +1443,7 @@ class AttendanceRequestView(APIView):
             # Attach proof files (e.g., CCTV screenshots) via AttendanceRequestComment
             try:
                 from attendance.models import AttendanceRequestFile, AttendanceRequestComment
+                from attendance.services.attachment_validation import validate_uploaded_files
 
                 attendance_obj = form.new_instance
 
@@ -1477,6 +1473,7 @@ class AttendanceRequestView(APIView):
                             uploaded = [f_single]
 
                 if attendance_obj and uploaded:
+                    validate_uploaded_files(uploaded)
                     try:
                         actor_emp = request.user.employee_get
                     except Exception:
@@ -1491,6 +1488,8 @@ class AttendanceRequestView(APIView):
                     for up in uploaded:
                         arf = AttendanceRequestFile.objects.create(file=up)
                         c.files.add(arf)
+            except ValidationError as ve:
+                return Response({"files": getattr(ve, "messages", [str(ve)])}, status=400)
             except Exception:
                 pass
 
@@ -1587,6 +1586,7 @@ class AttendanceRequestView(APIView):
             # Attach proof files (optional) via AttendanceRequestComment
             try:
                 from attendance.models import AttendanceRequestFile, AttendanceRequestComment
+                from attendance.services.attachment_validation import validate_uploaded_files
                 uploaded = []
                 if hasattr(request, "FILES"):
                     uploaded = request.FILES.getlist("files") or request.FILES.getlist("files[]") or []
@@ -1595,6 +1595,7 @@ class AttendanceRequestView(APIView):
                         if f_single:
                             uploaded = [f_single]
                 if uploaded:
+                    validate_uploaded_files(uploaded)
                     try:
                         actor_emp = request.user.employee_get
                     except Exception:
@@ -1608,6 +1609,8 @@ class AttendanceRequestView(APIView):
                     for up in uploaded:
                         arf = AttendanceRequestFile.objects.create(file=up)
                         c.files.add(arf)
+            except ValidationError as ve:
+                return Response({"files": getattr(ve, "messages", [str(ve)])}, status=400)
             except Exception:
                 pass
 
@@ -1673,9 +1676,11 @@ class AttendanceRequestApproveView(APIView):
             attendance.is_validate_request = False
             attendance.request_description = None
             try:
-                attendance.approved_by = request.user.employee_get
+                attendance.action_by = request.user.employee_get
             except Exception:
-                attendance.approved_by = None
+                attendance.action_by = None
+            attendance.action_type = AttendanceRequestActionType.APPROVED
+            attendance.action_at = dj_timezone.now()
             attendance.save()
 
             if attendance.requested_data is not None:
@@ -1695,7 +1700,16 @@ class AttendanceRequestApproveView(APIView):
                 requested_data = _normalize_requested_data(json.loads(attendance.requested_data))
                 Attendance.objects.filter(id=pk).update(**requested_data)
                 attendance.refresh_from_db()
+                attendance.action_by = attendance.action_by or getattr(request.user, "employee_get", None)
+                attendance.action_type = attendance.action_type or AttendanceRequestActionType.APPROVED
+                attendance.action_at = attendance.action_at or dj_timezone.now()
                 attendance.save()
+
+            try:
+                _mark_approved_request_channels(attendance)
+                attendance.refresh_from_db()
+            except Exception:
+                pass
 
             _ensure_single_session_activity(attendance, prev_attendance_date=prev_attendance_date)
             _rebuild_late_early(attendance)
@@ -1819,9 +1833,11 @@ class AttendanceRequestCancelView(APIView):
             attendance.requested_data = None
             attendance.request_type = "cancel_request"
             try:
-                attendance.approved_by = request.user.employee_get
+                attendance.action_by = request.user.employee_get
             except Exception:
-                attendance.approved_by = None
+                attendance.action_by = None
+            attendance.action_type = AttendanceRequestActionType.CANCELED
+            attendance.action_at = dj_timezone.now()
             attendance.save()
 
             # For create_request, remove created daily artifacts so it won't affect reporting.
@@ -1907,9 +1923,11 @@ class AttendanceRequestRejectView(APIView):
             attendance.requested_data = None
             attendance.request_type = "reject_request"
             try:
-                attendance.approved_by = request.user.employee_get
+                attendance.action_by = request.user.employee_get
             except Exception:
-                attendance.approved_by = None
+                attendance.action_by = None
+            attendance.action_type = AttendanceRequestActionType.REJECTED
+            attendance.action_at = dj_timezone.now()
             attendance.save()
 
             if req_type == "create_request":
@@ -1997,6 +2015,7 @@ class WorkModeRequestView(APIView):
                 f_single = request.FILES.get("file")
                 if f_single:
                     uploaded = [f_single]
+        validate_uploaded_files(uploaded)
         return uploaded
 
     def _attach_files(self, obj: WorkModeRequest, uploaded_files):
@@ -2281,7 +2300,10 @@ class WorkModeRequestApproveView(APIView):
         except Exception:
             obj.approved_by = None
         obj.approved_at = dj_timezone.now()
-        obj.save(update_fields=["status", "reason_code", "approved_by", "approved_at"])
+        obj.action_by = obj.approved_by
+        obj.action_at = obj.approved_at
+        obj.action_type = WorkModeRequestActionType.APPROVED
+        obj.save(update_fields=["status", "reason_code", "approved_by", "approved_at", "action_by", "action_at", "action_type"])
         return Response({"status": "approved"}, status=200)
 
 
@@ -2322,7 +2344,7 @@ class WorkModeRequestRejectView(APIView):
             or None
         )
         if comment_text:
-            obj.reason = str(comment_text)
+            obj.action_reason = str(comment_text)
 
         obj.status = WorkModeRequestStatus.REJECTED
         obj.reason_code = WorkModeRequestRejectReasonCode.MANUAL_REJECT
@@ -2331,7 +2353,10 @@ class WorkModeRequestRejectView(APIView):
         except Exception:
             obj.approved_by = None
         obj.approved_at = dj_timezone.now()
-        obj.save(update_fields=["status", "reason_code", "reason", "approved_by", "approved_at"])
+        obj.action_by = obj.approved_by
+        obj.action_at = obj.approved_at
+        obj.action_type = WorkModeRequestActionType.REJECTED
+        obj.save(update_fields=["status", "reason_code", "action_reason", "approved_by", "approved_at", "action_by", "action_at", "action_type"])
 
         # Option B: mark any attendance that already used this request
         try:
@@ -2366,7 +2391,13 @@ class WorkModeRequestCancelView(APIView):
             return Response({"error": "Only PENDING/WAITING requests can be canceled."}, status=400)
 
         obj.status = WorkModeRequestStatus.CANCELED
-        obj.save(update_fields=["status"])
+        try:
+            obj.action_by = request.user.employee_get
+        except Exception:
+            obj.action_by = None
+        obj.action_at = dj_timezone.now()
+        obj.action_type = WorkModeRequestActionType.CANCELED
+        obj.save(update_fields=["status", "action_by", "action_at", "action_type"])
         return Response({"status": "canceled"}, status=200)
 
 
