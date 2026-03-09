@@ -18,6 +18,7 @@ from django.http import HttpResponse, HttpResponseRedirect, JsonResponse, HttpRe
 from django.shortcuts import redirect, render
 from django.template.loader import render_to_string
 from django.urls import reverse
+from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
 from attendance.filters import AttendanceFilters, AttendanceRequestReGroup
@@ -37,12 +38,18 @@ from attendance.models import (
     Attendance,
     AttendanceActivity,
     AttendanceLateComeEarlyOut,
+    AttendanceRequestActionType,
     AttendanceRequestComment,
     AttendanceRequestFile,
     BatchAttendance,
 )
 from attendance.views.clock_in_out import early_out, late_come
 import attendance.views.clock_in_out as cio
+from attendance.services.activity_sync import (
+    mark_approved_request_channels,
+    sync_single_session_activity,
+    validate_requested_data_with_windows,
+)
 from base.methods import (
     choosesubordinates,
     closest_numbers,
@@ -155,64 +162,18 @@ def _build_shift_info_map(attendances):
     return info
 
 def _ensure_single_session_activity(attendance: Attendance, prev_attendance_date=None) -> AttendanceActivity:
-    """Sync AttendanceActivity to match Attendance for single-session mode.
+    """Delegate single-session activity sync to the centralized null-safe helper."""
 
-    Rules:
-    - Keep **exactly one** AttendanceActivity per (employee, attendance_date).
-    - Activity.clock_in is NOT NULL in the model, so if Attendance check-in is missing,
-      we use a placeholder clock-in (clock-out if available, else 00:00).
-    - If the request changes attendance_date, we clean up old-date activities.
-    """
+    return sync_single_session_activity(
+        attendance,
+        prev_attendance_date=prev_attendance_date,
+    )
 
-    employee = attendance.employee_id
-    target_date = attendance.attendance_date
 
-    # If the request moved the attendance_date, clean up old-date activities.
-    if prev_attendance_date and prev_attendance_date != target_date:
-        old_qs = AttendanceActivity.objects.filter(employee_id=employee, attendance_date=prev_attendance_date)
-        if old_qs.exists():
-            # If no activity exists on the new date, move the old ones.
-            if not AttendanceActivity.objects.filter(employee_id=employee, attendance_date=target_date).exists():
-                old_qs.update(attendance_date=target_date)
-            else:
-                # Otherwise, delete old ones to avoid duplicates across dates.
-                old_qs.delete()
+def _mark_approved_request_channels(attendance: Attendance) -> Attendance:
+    """Persist approved/correction request channels on final attendance."""
 
-    # Keep the latest activity as the canonical one, delete duplicates.
-    qs = AttendanceActivity.objects.filter(employee_id=employee, attendance_date=target_date).order_by("-id")
-    activity = qs.first()
-    if activity:
-        qs.exclude(id=activity.id).delete()
-    else:
-        activity = AttendanceActivity(employee_id=employee, attendance_date=target_date)
-
-    # Ensure shift day exists
-    day = attendance.attendance_day
-    if not day:
-        day_name = target_date.strftime("%A").lower()
-        day = EmployeeShiftDay.objects.get(day=day_name)
-
-    # Non-null clock_in placeholder (single-session skeleton support)
-    clock_in_date = attendance.attendance_clock_in_date or attendance.attendance_clock_out_date or target_date
-    clock_in_time = attendance.attendance_clock_in or attendance.attendance_clock_out or time(0, 0)
-
-    activity.shift_day = day
-    activity.clock_in_date = clock_in_date
-    activity.clock_in = clock_in_time
-    activity.in_datetime = datetime.combine(clock_in_date, clock_in_time)
-
-    # Sync OUT fields
-    if attendance.attendance_clock_out and attendance.attendance_clock_out_date:
-        activity.clock_out_date = attendance.attendance_clock_out_date
-        activity.clock_out = attendance.attendance_clock_out
-        activity.out_datetime = datetime.combine(attendance.attendance_clock_out_date, attendance.attendance_clock_out)
-    else:
-        activity.clock_out_date = None
-        activity.clock_out = None
-        activity.out_datetime = None
-
-    activity.save()
-    return activity
+    return mark_approved_request_channels(attendance)
 
 
 def _refresh_late_come_early_out(attendance: Attendance):
@@ -1021,6 +982,11 @@ def approve_validate_attendance_request(request, attendance_id):
 
     prev_attendance_date = attendance.attendance_date
 
+    is_valid_request, validation_error = validate_requested_data_with_windows(attendance)
+    if not is_valid_request:
+        messages.error(request, validation_error or _("Requested attendance is outside the allowed attendance window."))
+        return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+
     # Approve request flags (these fields are NOT included in serialize/requested_data)
     attendance.attendance_validated = True
     attendance.is_validate_request_approved = True
@@ -1063,6 +1029,9 @@ def approve_validate_attendance_request(request, attendance_id):
         attendance.action_type = attendance.action_type or AttendanceRequestActionType.APPROVED
         attendance.action_at = attendance.action_at or timezone.now()
         attendance.save()
+
+    _mark_approved_request_channels(attendance)
+    attendance.refresh_from_db()
 
     # -----------------------------------------------------------------
     # SINGLE-SESSION SYNC
@@ -1402,10 +1371,20 @@ def bulk_approve_attendance_request(request):
 
         prev_attendance_date = attendance.attendance_date
 
+        is_valid_request, _validation_error = validate_requested_data_with_windows(attendance)
+        if not is_valid_request:
+            continue
+
         # Mark approved
         attendance.attendance_validated = True
         attendance.is_validate_request_approved = True
         attendance.is_validate_request = False
+        try:
+            attendance.action_by = request.user.employee_get
+        except Exception:
+            attendance.action_by = None
+        attendance.action_type = AttendanceRequestActionType.APPROVED
+        attendance.action_at = timezone.now()
         attendance.save()
 
         # Apply requested changes
@@ -1425,7 +1404,16 @@ def bulk_approve_attendance_request(request):
             requested_data = _normalize_requested_data(json.loads(attendance.requested_data))
             Attendance.objects.filter(id=attendance_id).update(**requested_data)
             attendance.refresh_from_db()
+            attendance.attendance_validated = True
+            attendance.is_validate_request_approved = True
+            attendance.is_validate_request = False
+            attendance.action_by = attendance.action_by or getattr(request.user, "employee_get", None)
+            attendance.action_type = attendance.action_type or AttendanceRequestActionType.APPROVED
+            attendance.action_at = attendance.action_at or timezone.now()
             attendance.save()
+
+        _mark_approved_request_channels(attendance)
+        attendance.refresh_from_db()
 
         # Keep single-session activity consistent
         _ensure_single_session_activity(attendance, prev_attendance_date=prev_attendance_date)
