@@ -51,6 +51,11 @@ from attendance.services.work_type_request_rules import (
     apply_rejection_to_attendance,
     has_attachments,
 )
+from attendance.services.activity_sync import (
+    mark_approved_request_channels,
+    sync_single_session_activity,
+    validate_requested_data_with_windows,
+)
 
 from attendance.views.dashboard import (
     find_expected_attendances,
@@ -446,65 +451,18 @@ def _api_resolve_attendance_date_and_day(shift, dt_now: datetime):
     return attendance_date, day, minimum_hour, start_time_sec, end_time_sec, now_hhmm, now_sec
 
 def _ensure_single_session_activity(attendance: Attendance, prev_attendance_date: date | None = None) -> AttendanceActivity:
-    """
-    Ensure exactly one AttendanceActivity exists for (employee, attendance_date),
-    aligned to the approved Attendance values.
+    """Delegate single-session activity sync to the centralized null-safe helper."""
 
-    If attendance_date changed, old-date activities are either moved (if no target exists)
-    or deleted (if a target already exists).
-    """
-    employee = attendance.employee_id
-    target_date = attendance.attendance_date
+    return sync_single_session_activity(
+        attendance,
+        prev_attendance_date=prev_attendance_date,
+    )
 
-    if prev_attendance_date and prev_attendance_date != target_date:
-        old_qs = AttendanceActivity.objects.filter(employee_id=employee, attendance_date=prev_attendance_date)
-        if old_qs.exists():
-            if not AttendanceActivity.objects.filter(employee_id=employee, attendance_date=target_date).exists():
-                old_qs.update(attendance_date=target_date)
-            else:
-                old_qs.delete()
 
-    qs = AttendanceActivity.objects.filter(employee_id=employee, attendance_date=target_date).order_by("-id")
-    activity = qs.first()
-    if activity:
-        qs.exclude(id=activity.id).delete()
-    else:
-        activity = AttendanceActivity(employee_id=employee, attendance_date=target_date)
+def _mark_approved_request_channels(attendance: Attendance) -> Attendance:
+    """Persist approved/correction request channels on final attendance."""
 
-    # Resolve shift day
-    day = attendance.attendance_day
-    if not day:
-        day = EmployeeShiftDay.objects.get(day=target_date.strftime("%A").lower())
-
-    # AttendanceActivity requires a non-null clock_in
-    clock_in_date = attendance.attendance_clock_in_date or attendance.attendance_clock_out_date or target_date
-    clock_in_time = attendance.attendance_clock_in or attendance.attendance_clock_out or datetime.strptime("00:00", "%H:%M").time()
-
-    activity.shift_day = day
-    activity.clock_in_date = clock_in_date
-    activity.clock_in = clock_in_time
-
-    if hasattr(activity, "in_datetime"):
-        activity.in_datetime = datetime.combine(clock_in_date, clock_in_time)
-
-    # Sync OUT fields
-    if attendance.attendance_clock_out and attendance.attendance_clock_out_date:
-        if hasattr(activity, "clock_out_date"):
-            activity.clock_out_date = attendance.attendance_clock_out_date
-        if hasattr(activity, "clock_out"):
-            activity.clock_out = attendance.attendance_clock_out
-        if hasattr(activity, "out_datetime"):
-            activity.out_datetime = datetime.combine(attendance.attendance_clock_out_date, attendance.attendance_clock_out)
-    else:
-        if hasattr(activity, "clock_out_date"):
-            activity.clock_out_date = None
-        if hasattr(activity, "clock_out"):
-            activity.clock_out = None
-        if hasattr(activity, "out_datetime"):
-            activity.out_datetime = None
-
-    activity.save()
-    return activity
+    return mark_approved_request_channels(attendance)
 
 
 def _rebuild_late_early(attendance: Attendance):
@@ -743,6 +701,7 @@ class ClockInAPIView(APIView):
             clock_in_location=location,
             work_mode_request=in_req,
             is_presensi_only=(in_mode == AttendanceWorkMode.ON_DUTY),
+            clock_in_channel="mobile",
         )
 
         # Re-resolve OUT side for consistent response
@@ -938,6 +897,7 @@ class ClockOutAPIView(APIView):
                 is_presensi_only=(out_mode == AttendanceWorkMode.ON_DUTY),
                 allow_update_clock_out=allow_update,
                 raise_if_already_clocked_out=(not allow_update),
+                clock_out_channel="mobile",
             )
         except Exception as error:
             logger.exception("clock_out_attendance_and_activity failed")
@@ -1671,6 +1631,13 @@ class AttendanceRequestApproveView(APIView):
 
             prev_attendance_date = attendance.attendance_date
 
+            is_valid_request, validation_error = validate_requested_data_with_windows(attendance)
+            if not is_valid_request:
+                return Response(
+                    {"error": validation_error or "Requested attendance is outside the allowed attendance window."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
             attendance.attendance_validated = True
             attendance.is_validate_request_approved = True
             attendance.is_validate_request = False
@@ -1705,11 +1672,8 @@ class AttendanceRequestApproveView(APIView):
                 attendance.action_at = attendance.action_at or dj_timezone.now()
                 attendance.save()
 
-            try:
-                _mark_approved_request_channels(attendance)
-                attendance.refresh_from_db()
-            except Exception:
-                pass
+            _mark_approved_request_channels(attendance)
+            attendance.refresh_from_db()
 
             _ensure_single_session_activity(attendance, prev_attendance_date=prev_attendance_date)
             _rebuild_late_early(attendance)
@@ -2489,18 +2453,29 @@ class LateComeEarlyOutView(APIView):
 
 
 class AttendanceActivityView(APIView):
-    """
-    Retrieves attendance activity records.
-
-    Method:
-        get(request, pk=None): Retrieves a list of all attendance activity records.
-    """
+    """Retrieve permission-scoped attendance activity records."""
 
     permission_classes = [IsAuthenticated]
 
+    def get_queryset(self, request):
+        queryset = AttendanceActivity.objects.select_related("employee_id").all()
+        perm = "attendance.view_attendanceactivity"
+        try:
+            return permission_based_queryset(request.user, perm, queryset, user_obj=True)
+        except Exception:
+            employee = getattr(request.user, "employee_get", None)
+            if not employee:
+                return AttendanceActivity.objects.none()
+            return queryset.filter(employee_id=employee)
+
     def get(self, request, pk=None):
-        data = AttendanceActivity.objects.all()
-        serializer = AttendanceActivitySerializer(data, many=True)
+        queryset = self.get_queryset(request)
+        if pk is not None:
+            activity = get_object_or_404(queryset, pk=pk)
+            serializer = AttendanceActivitySerializer(activity)
+            return Response(serializer.data, status=200)
+
+        serializer = AttendanceActivitySerializer(queryset.order_by("-attendance_date", "-id"), many=True)
         return Response(serializer.data, status=200)
 
 
