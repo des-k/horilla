@@ -41,7 +41,6 @@ from django.utils.html import format_html
 from django.utils.translation import gettext_lazy as _
 
 from attendance.filters import AttendanceFilters
-from attendance.methods.utils import shift_schedule_today
 from attendance.models import (
     Attendance,
     AttendanceActivity,
@@ -56,6 +55,7 @@ from attendance.models import (
     strtime_seconds,
     validate_time_format,
 )
+from attendance.services.attachment_validation import validate_uploaded_files
 from base.forms import ModelForm as BaseModelForm
 from base.methods import (
     filtersubordinatesemployeemodel,
@@ -73,6 +73,9 @@ from horilla_widgets.widgets.horilla_multi_select_field import HorillaMultiSelec
 from horilla_widgets.widgets.select_widgets import HorillaMultiSelectWidget
 
 logger = logging.getLogger(__name__)
+
+def _fmt_dt_value(value, fmt):
+    return value.strftime(fmt) if value is not None else None
 
 
 class AttendanceUpdateForm(BaseModelForm):
@@ -134,22 +137,17 @@ class AttendanceUpdateForm(BaseModelForm):
                 if condition and condition.minimum_overtime_to_approve
                 else 0
             )
-            initial = {
-                "attendance_date": instance.attendance_date.strftime("%Y-%m-%d"),
-            }
-            if getattr(instance, "attendance_clock_in", None) is not None:
-                initial["attendance_clock_in"] = instance.attendance_clock_in.strftime("%H:%M")
-            if getattr(instance, "attendance_clock_in_date", None) is not None:
-                initial["attendance_clock_in_date"] = instance.attendance_clock_in_date.strftime(
-                    "%Y-%m-%d"
-                )
-            if instance.attendance_clock_out_date is not None and instance.attendance_clock_out is not None:
-                initial["attendance_clock_out"] = (
-                    instance.attendance_clock_out.strftime("%H:%M")
-                )
-                initial["attendance_clock_out_date"] = (
-                    instance.attendance_clock_out_date.strftime("%Y-%m-%d")
-                )
+            initial = {}
+            if instance.attendance_date is not None:
+                initial["attendance_date"] = _fmt_dt_value(instance.attendance_date, "%Y-%m-%d")
+            if instance.attendance_clock_in is not None:
+                initial["attendance_clock_in"] = _fmt_dt_value(instance.attendance_clock_in, "%H:%M")
+            if instance.attendance_clock_in_date is not None:
+                initial["attendance_clock_in_date"] = _fmt_dt_value(instance.attendance_clock_in_date, "%Y-%m-%d")
+            if instance.attendance_clock_out is not None:
+                initial["attendance_clock_out"] = _fmt_dt_value(instance.attendance_clock_out, "%H:%M")
+            if instance.attendance_clock_out_date is not None:
+                initial["attendance_clock_out_date"] = _fmt_dt_value(instance.attendance_clock_out_date, "%Y-%m-%d")
             kwargs["initial"] = initial
         super().__init__(*args, **kwargs)
         self.fields["employee_id"].widget.attrs.update({"id": str(uuid.uuid4())})
@@ -278,24 +276,16 @@ class AttendanceForm(BaseModelForm):
 
         # If an instance is provided, override the default initial values
         if instance := kwargs.get("instance"):
-            initial.update({
-                "attendance_date": instance.attendance_date.strftime("%Y-%m-%d"),
-            })
-            if getattr(instance, "attendance_clock_in", None) is not None:
-                initial["attendance_clock_in"] = instance.attendance_clock_in.strftime(
-                    "%H:%M"
-                )
-            if getattr(instance, "attendance_clock_in_date", None) is not None:
-                initial["attendance_clock_in_date"] = instance.attendance_clock_in_date.strftime(
-                    "%Y-%m-%d"
-                )
-            if instance.attendance_clock_out_date is not None and instance.attendance_clock_out is not None:
-                initial["attendance_clock_out"] = (
-                    instance.attendance_clock_out.strftime("%H:%M")
-                )
-                initial["attendance_clock_out_date"] = (
-                    instance.attendance_clock_out_date.strftime("%Y-%m-%d")
-                )
+            if instance.attendance_date is not None:
+                initial["attendance_date"] = _fmt_dt_value(instance.attendance_date, "%Y-%m-%d")
+            if instance.attendance_clock_in is not None:
+                initial["attendance_clock_in"] = _fmt_dt_value(instance.attendance_clock_in, "%H:%M")
+            if instance.attendance_clock_in_date is not None:
+                initial["attendance_clock_in_date"] = _fmt_dt_value(instance.attendance_clock_in_date, "%Y-%m-%d")
+            if instance.attendance_clock_out is not None:
+                initial["attendance_clock_out"] = _fmt_dt_value(instance.attendance_clock_out, "%H:%M")
+            if instance.attendance_clock_out_date is not None:
+                initial["attendance_clock_out_date"] = _fmt_dt_value(instance.attendance_clock_out_date, "%Y-%m-%d")
 
         # Merge with initial values passed from the view
         initial.update(view_initial)
@@ -429,16 +419,17 @@ class AttendanceActivityForm(BaseModelForm):
             # django forms not showing value inside the date, time html element.
             # so here overriding default forms instance method to set initial value
 
-            initial = {
-                "attendance_date": instance.attendance_date.strftime("%Y-%m-%d"),
-            }
-            if getattr(instance, "clock_in_date", None) is not None:
-                initial["clock_in_date"] = instance.clock_in_date.strftime("%Y-%m-%d")
-            if getattr(instance, "clock_in", None) is not None:
-                initial["clock_in"] = instance.clock_in.strftime("%H:%M")
-            if instance.clock_out is not None and instance.clock_out_date is not None:
-                initial["clock_out"] = instance.clock_out.strftime("%H:%M")
-                initial["clock_out_date"] = instance.clock_out_date.strftime("%Y-%m-%d")
+            initial = {}
+            if instance.attendance_date is not None:
+                initial["attendance_date"] = _fmt_dt_value(instance.attendance_date, "%Y-%m-%d")
+            if instance.clock_in_date is not None:
+                initial["clock_in_date"] = _fmt_dt_value(instance.clock_in_date, "%Y-%m-%d")
+            if instance.clock_in is not None:
+                initial["clock_in"] = _fmt_dt_value(instance.clock_in, "%H:%M")
+            if instance.clock_out is not None:
+                initial["clock_out"] = _fmt_dt_value(instance.clock_out, "%H:%M")
+            if instance.clock_out_date is not None:
+                initial["clock_out_date"] = _fmt_dt_value(instance.clock_out_date, "%Y-%m-%d")
             kwargs["initial"] = initial
         super().__init__(*args, **kwargs)
 
@@ -587,17 +578,17 @@ class AttendanceRequestForm(BaseModelForm):
         if instance is not None:
             # django forms not showing value inside the date, time html element.
             # so here overriding default forms instance method to set initial value
-            initial = {
-                "attendance_date": instance.attendance_date.strftime("%Y-%m-%d"),
-            }
+            initial = {}
+            if instance.attendance_date is not None:
+                initial["attendance_date"] = _fmt_dt_value(instance.attendance_date, "%Y-%m-%d")
             if getattr(instance, 'attendance_clock_in', None) is not None:
-                initial["attendance_clock_in"] = instance.attendance_clock_in.strftime("%H:%M")
+                initial["attendance_clock_in"] = _fmt_dt_value(instance.attendance_clock_in, "%H:%M")
             if getattr(instance, 'attendance_clock_in_date', None) is not None:
-                initial["attendance_clock_in_date"] = instance.attendance_clock_in_date.strftime("%Y-%m-%d")
+                initial["attendance_clock_in_date"] = _fmt_dt_value(instance.attendance_clock_in_date, "%Y-%m-%d")
             if getattr(instance, 'attendance_clock_out', None) is not None:
-                initial["attendance_clock_out"] = instance.attendance_clock_out.strftime("%H:%M")
+                initial["attendance_clock_out"] = _fmt_dt_value(instance.attendance_clock_out, "%H:%M")
             if getattr(instance, 'attendance_clock_out_date', None) is not None:
-                initial["attendance_clock_out_date"] = instance.attendance_clock_out_date.strftime("%Y-%m-%d")
+                initial["attendance_clock_out_date"] = _fmt_dt_value(instance.attendance_clock_out_date, "%Y-%m-%d")
             kwargs["initial"] = initial
 
         super().__init__(*args, **kwargs)
@@ -770,8 +761,11 @@ class MultipleFileField(forms.FileField):
                     errors.extend(e.error_list)
             if errors:
                 raise ValidationError(errors)
+            validate_uploaded_files(cleaned)
             return cleaned
-        return [super().clean(data, initial)]
+        cleaned = [super().clean(data, initial)]
+        validate_uploaded_files(cleaned)
+        return cleaned
 
 class NewRequestForm(AttendanceRequestForm):
     """
@@ -886,116 +880,60 @@ class NewRequestForm(AttendanceRequestForm):
         return form_html
 
     @staticmethod
-    def _window_label(start_dt, end_dt):
-        if not start_dt or not end_dt:
-            return None
-        try:
-            if start_dt.date() == end_dt.date():
-                return f"{start_dt.strftime('%Y-%m-%d %H:%M')} - {end_dt.strftime('%H:%M')}"
-            return f"{start_dt.strftime('%Y-%m-%d %H:%M')} - {end_dt.strftime('%Y-%m-%d %H:%M')}"
-        except Exception:
-            return None
+    def _infer_scope(raw_scope, in_time, out_time):
+        scope = (raw_scope or "").strip().upper()
+        if scope in ("IN", "OUT", "BOTH"):
+            return scope
+        if in_time and out_time:
+            return "BOTH"
+        if in_time:
+            return "IN"
+        if out_time:
+            return "OUT"
+        return "BOTH"
 
     @staticmethod
-    def _build_local_datetime(target_date, time_value, combine_local_datetime):
-        if not target_date or not time_value:
-            return None
-        return combine_local_datetime(target_date, time_value)
+    def _time_in_window(target_time, start_dt, end_dt):
+        if target_time is None or start_dt is None or end_dt is None:
+            return False
+        candidate = datetime.datetime.combine(start_dt.date(), target_time)
+        start = start_dt
+        end = end_dt
+        if end < start:
+            end = end + datetime.timedelta(days=1)
+        if candidate < start and end.date() > start.date():
+            candidate = candidate + datetime.timedelta(days=1)
+        return start <= candidate <= end
 
-    def _resolve_request_window_rules(self, employee, attendance_date, shift):
-        if not employee or not attendance_date or not shift:
-            return None
+    def _get_request_windows(self, attendance_date, shift):
+        if not attendance_date or not shift:
+            return {}
         try:
+            from attendance.methods.utils import shift_schedule_today
             from attendance.views.clock_in_out import get_shift_rules
 
-            day_name = attendance_date.strftime("%A").lower()
-            day = EmployeeShiftDay.objects.get(day=day_name)
-            _min_hour, start_time_sec, end_time_sec = shift_schedule_today(day=day, shift=shift)
+            day_obj = EmployeeShiftDay.objects.filter(day=attendance_date.strftime("%A").lower()).first()
+            if not day_obj:
+                return {}
+            _min_h, start_sec, end_sec = shift_schedule_today(day=day_obj, shift=shift)
             return get_shift_rules(
-                attendance_date=attendance_date,
-                day=day,
-                shift=shift,
-                start_time_sec=start_time_sec,
-                end_time_sec=end_time_sec,
-            )
+                attendance_date,
+                shift,
+                day_obj,
+                start_time_sec=start_sec,
+                end_time_sec=end_sec,
+            ) or {}
         except Exception:
-            return None
+            return {}
 
-    def _match_time_in_window(self, *, attendance_date, time_value, window_start, window_end):
-        if not time_value or not window_start or not window_end:
-            return None
-
-        from attendance.views.clock_in_out import _combine_local_datetime
-
-        candidate_dates = [
-            attendance_date - datetime.timedelta(days=1),
-            attendance_date,
-            attendance_date + datetime.timedelta(days=1),
-        ]
-        for candidate_date in candidate_dates:
-            candidate_dt = self._build_local_datetime(candidate_date, time_value, _combine_local_datetime)
-            if candidate_dt and window_start <= candidate_dt <= window_end:
-                return candidate_dt
-        return None
-
-    def _validate_requested_time_windows(self, *, employee, attendance_date, shift, in_time, out_time):
-        rules = self._resolve_request_window_rules(employee, attendance_date, shift)
-        matched = {"in": None, "out": None}
-        if not rules:
-            errors = {}
-            if in_time:
-                errors["attendance_clock_in"] = _(
-                    "Check In time is not allowed because no check-in window is configured for the selected date/shift."
-                )
-            if out_time:
-                errors["attendance_clock_out"] = _(
-                    "Check Out time is not allowed because no check-out window is configured for the selected date/shift."
-                )
-            if errors:
-                raise ValidationError(errors)
-            return matched
-
-        in_start = rules.get("check_in_window_start_dt")
-        in_end = rules.get("check_in_window_end_dt")
-        out_start = rules.get("check_out_window_start_dt")
-        out_end = rules.get("check_out_window_end_dt")
-
-        errors = {}
-        if in_time:
-            matched_in = self._match_time_in_window(
-                attendance_date=attendance_date,
-                time_value=in_time,
-                window_start=in_start,
-                window_end=in_end,
-            )
-            if matched_in is None:
-                label = self._window_label(in_start, in_end)
-                errors["attendance_clock_in"] = (
-                    _("Check In time must be within the check-in window: %(window)s")
-                    % {"window": label or "-"}
-                )
-            else:
-                matched["in"] = matched_in
-
-        if out_time:
-            matched_out = self._match_time_in_window(
-                attendance_date=attendance_date,
-                time_value=out_time,
-                window_start=out_start,
-                window_end=out_end,
-            )
-            if matched_out is None:
-                label = self._window_label(out_start, out_end)
-                errors["attendance_clock_out"] = (
-                    _("Check Out time must be within the check-out window: %(window)s")
-                    % {"window": label or "-"}
-                )
-            else:
-                matched["out"] = matched_out
-
-        if errors:
-            raise ValidationError(errors)
-        return matched
+    def _validate_window(self, field_name, label, value, start_dt, end_dt):
+        if value is None:
+            return
+        if start_dt is None or end_dt is None:
+            kind = "check-in" if field_name == "attendance_clock_in" else "check-out"
+            raise ValidationError({field_name: _("%(label)s is not allowed because no %(kind)s window is configured for the selected date/shift") % {"label": label, "kind": kind}})
+        if not self._time_in_window(value, start_dt, end_dt):
+            raise ValidationError({field_name: _("%(label)s must be within %(start)s - %(end)s") % {"label": label, "start": start_dt.strftime("%H:%M"), "end": end_dt.strftime("%H:%M")}})
 
     def clean(self) -> Dict[str, Any]:
         super().clean()
@@ -1014,8 +952,6 @@ class NewRequestForm(AttendanceRequestForm):
             except Exception:
                 # fail open on timezone issues
                 pass
-        scope = (self.data.get("scope") or self.cleaned_data.get("scope") or "").strip().upper()
-
         if employee and not hasattr(employee, "employee_work_info"):
             raise ValidationError(_("Employee work info not found"))
 
@@ -1026,17 +962,9 @@ class NewRequestForm(AttendanceRequestForm):
 
         in_time = self.cleaned_data.get("attendance_clock_in")
         out_time = self.cleaned_data.get("attendance_clock_out")
+        scope = self._infer_scope(self.data.get("scope") or self.cleaned_data.get("scope"), in_time, out_time)
 
         # Apply scope rules (mobile parity)
-        if scope not in ("IN", "OUT", "BOTH"):
-            if in_time and not out_time:
-                scope = "IN"
-            elif out_time and not in_time:
-                scope = "OUT"
-            else:
-                scope = "BOTH"
-            self.cleaned_data["scope"] = scope
-
         if scope == "IN":
             out_time = None
             self.cleaned_data["attendance_clock_out"] = None
@@ -1077,21 +1005,23 @@ class NewRequestForm(AttendanceRequestForm):
             work_type = employee.employee_work_info.work_type_id
             self.cleaned_data["work_type_id"] = work_type
 
-        matched_windows = self._validate_requested_time_windows(
-            employee=employee,
-            attendance_date=attendance_date,
-            shift=shift,
-            in_time=in_time,
-            out_time=out_time,
-        )
-        matched_in_dt = matched_windows.get("in")
-        matched_out_dt = matched_windows.get("out")
-        if matched_in_dt is not None:
-            in_date = matched_in_dt.date()
-            self.cleaned_data["attendance_clock_in_date"] = in_date
-        if matched_out_dt is not None:
-            out_date = matched_out_dt.date()
-            self.cleaned_data["attendance_clock_out_date"] = out_date
+        rules = self._get_request_windows(attendance_date, shift)
+        if needs_in:
+            self._validate_window(
+                "attendance_clock_in",
+                "Check In Time",
+                in_time,
+                rules.get("check_in_window_start_dt"),
+                rules.get("check_in_window_end_dt"),
+            )
+        if needs_out:
+            self._validate_window(
+                "attendance_clock_out",
+                "Check Out Time",
+                out_time,
+                rules.get("check_out_window_start_dt"),
+                rules.get("check_out_window_end_dt"),
+            )
 
         # Default minimum_hour and worked_hour (hidden fields)
         minimum_hour = self.cleaned_data.get("minimum_hour") or self.data.get("minimum_hour") or "00:00"
