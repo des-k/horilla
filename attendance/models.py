@@ -103,6 +103,18 @@ class AttendancePunchStatus(models.TextChoices):
     VALID = "VALID", _("Valid")
     REJECTED = "REJECTED", _("Rejected")
 
+
+class AttendanceChannel(models.TextChoices):
+    """Explicit source/channel persisted on final attendance and activity."""
+    MOBILE = "mobile", _("Mobile")
+    BIOMETRIC = "biometric", _("Biometric")
+    APPROVED_REQUEST = "approved_request", _("Approved Request")
+    CORRECTION_REQUEST = "correction_request", _("Correction Request")
+    AUTO = "auto", _("Auto")
+    MANUAL = "manual", _("Manual")
+    API = "api", _("API")
+
+
 class AttendanceActivity(HorillaModel):
     """
     AttendanceActivity model
@@ -125,12 +137,26 @@ class AttendanceActivity(HorillaModel):
         on_delete=models.DO_NOTHING,
         verbose_name=_("Shift Day"),
     )
-    in_datetime = models.DateTimeField(null=True)
-    clock_in_date = models.DateField(null=True, verbose_name=_("In Date"))
-    clock_in = models.TimeField(verbose_name=_("Check In"))
-    clock_out_date = models.DateField(null=True, verbose_name=_("Out Date"))
-    out_datetime = models.DateTimeField(null=True)
-    clock_out = models.TimeField(null=True, verbose_name=_("Check Out"))
+    in_datetime = models.DateTimeField(null=True, blank=True)
+    clock_in_date = models.DateField(null=True, blank=True, verbose_name=_("In Date"))
+    clock_in = models.TimeField(null=True, blank=True, verbose_name=_("Check In"))
+    clock_in_channel = models.CharField(
+        max_length=32,
+        null=True,
+        blank=True,
+        choices=AttendanceChannel.choices,
+        verbose_name=_("Check-In Source"),
+    )
+    clock_out_date = models.DateField(null=True, blank=True, verbose_name=_("Out Date"))
+    out_datetime = models.DateTimeField(null=True, blank=True)
+    clock_out = models.TimeField(null=True, blank=True, verbose_name=_("Check Out"))
+    clock_out_channel = models.CharField(
+        max_length=32,
+        null=True,
+        blank=True,
+        choices=AttendanceChannel.choices,
+        verbose_name=_("Check-Out Source"),
+    )
     objects = HorillaCompanyManager(
         related_company_field="employee_id__employee_work_info__company_id"
     )
@@ -182,23 +208,21 @@ class AttendanceActivity(HorillaModel):
             )
         ]
     def duration(self):
-        """
-        Duration calc b/w in-out method
-        """
+        """Return duration in seconds when both IN and OUT are available."""
 
-        if not self.clock_out or not self.clock_out_date:
-            self.clock_out_date = datetime.today().date()
-            self.clock_out = datetime.now().time()
+        if not (self.clock_in_date and self.clock_in and self.clock_out_date and self.clock_out):
+            return 0
 
         clock_in_datetime = datetime.combine(self.clock_in_date, self.clock_in)
         clock_out_datetime = datetime.combine(self.clock_out_date, self.clock_out)
-
         time_difference = clock_out_datetime - clock_in_datetime
-
-        return time_difference.total_seconds()
+        return max(0, time_difference.total_seconds())
 
     def __str__(self):
-        return f"{self.employee_id} - {self.attendance_date} - {self.clock_in} - {self.clock_out}"
+        return (
+            f"{self.employee_id} - {self.attendance_date} - "
+            f"{self.clock_in or '-'} - {self.clock_out or '-'}"
+        )
 
 
 class BatchAttendance(HorillaModel):
@@ -386,11 +410,25 @@ class Attendance(HorillaModel):
     attendance_clock_in = models.TimeField(
         null=True, verbose_name=_("Check-In"), help_text=_("First Check-In Time")
     )
+    attendance_clock_in_channel = models.CharField(
+        max_length=32,
+        null=True,
+        blank=True,
+        choices=AttendanceChannel.choices,
+        verbose_name=_("Check-In Source"),
+    )
     attendance_clock_out_date = models.DateField(
         null=True, verbose_name=_("Check-Out Date")
     )
     attendance_clock_out = models.TimeField(
         null=True, verbose_name=_("Check-Out"), help_text=_("Last Check-Out Time")
+    )
+    attendance_clock_out_channel = models.CharField(
+        max_length=32,
+        null=True,
+        blank=True,
+        choices=AttendanceChannel.choices,
+        verbose_name=_("Check-Out Source"),
     )
     attendance_worked_hour = models.CharField(
         null=True,
@@ -633,18 +671,22 @@ class Attendance(HorillaModel):
         ).order_by("clock_in")
         at_work_seconds = 0
         now = datetime.now()
+        now_dt = datetime.combine(now.date(), dt.time(hour=now.hour, minute=now.minute, second=now.second))
         for activity in activities:
-            out_time = activity.clock_out
-            if out_time is None:
-                combined_out = datetime.combine(
-                    now, dt.time(hour=now.hour, minute=now.minute, second=now.second)
-                )
-            else:
-                combined_out = datetime.combine(activity.clock_out_date, out_time)
-            in_time = activity.clock_in
-            combined_in = datetime.combine(activity.clock_in_date, in_time)
-            diffs = combined_out - combined_in
-            at_work_seconds = at_work_seconds + diffs.total_seconds()
+            in_dt = getattr(activity, "in_datetime", None)
+            if in_dt is None and getattr(activity, "clock_in_date", None) and getattr(activity, "clock_in", None):
+                in_dt = datetime.combine(activity.clock_in_date, activity.clock_in)
+            if in_dt is None:
+                continue
+
+            out_dt = getattr(activity, "out_datetime", None)
+            if out_dt is None and getattr(activity, "clock_out_date", None) and getattr(activity, "clock_out", None):
+                out_dt = datetime.combine(activity.clock_out_date, activity.clock_out)
+            if out_dt is None:
+                out_dt = now_dt
+
+            diffs = out_dt - in_dt
+            at_work_seconds = at_work_seconds + max(0, diffs.total_seconds())
         return at_work_seconds
 
     def hours_pending(self):
