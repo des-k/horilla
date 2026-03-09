@@ -272,27 +272,23 @@ def attendance_date_validate(date):
 
 
 def activity_datetime(attendance_activity):
-    """
-    This method is used to convert clock-in and clock-out of activity as datetime object
-    args:
-        attendance_activity : attendance activity instance
-    """
+    """Return (in_datetime, out_datetime) for an activity, null-safe."""
 
-    # in
-    in_year = attendance_activity.clock_in_date.year
-    in_month = attendance_activity.clock_in_date.month
-    in_day = attendance_activity.clock_in_date.day
-    in_hour = attendance_activity.clock_in.hour
-    in_minute = attendance_activity.clock_in.minute
-    # out
-    out_year = attendance_activity.clock_out_date.year
-    out_month = attendance_activity.clock_out_date.month
-    out_day = attendance_activity.clock_out_date.day
-    out_hour = attendance_activity.clock_out.hour
-    out_minute = attendance_activity.clock_out.minute
-    return datetime(in_year, in_month, in_day, in_hour, in_minute), datetime(
-        out_year, out_month, out_day, out_hour, out_minute
-    )
+    in_dt = getattr(attendance_activity, "in_datetime", None)
+    if in_dt is None:
+        in_date = getattr(attendance_activity, "clock_in_date", None)
+        in_time = getattr(attendance_activity, "clock_in", None)
+        if in_date and in_time:
+            in_dt = datetime.combine(in_date, in_time)
+
+    out_dt = getattr(attendance_activity, "out_datetime", None)
+    if out_dt is None:
+        out_date = getattr(attendance_activity, "clock_out_date", None)
+        out_time = getattr(attendance_activity, "clock_out", None)
+        if out_date and out_time:
+            out_dt = datetime.combine(out_date, out_time)
+
+    return in_dt, out_dt
 
 
 def get_week_start_end_dates(week):
