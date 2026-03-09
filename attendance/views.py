@@ -834,6 +834,8 @@ def clock_out_attendance_and_activity(employee, date_today, now):
     duration = 0
     for attendance_activity in attendance_activities:
         in_datetime, out_datetime = activity_datetime(attendance_activity)
+        if not in_datetime or not out_datetime:
+            continue
         difference = out_datetime - in_datetime
         days_second = difference.days * 24 * 3600
         seconds = difference.seconds
