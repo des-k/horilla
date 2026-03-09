@@ -135,12 +135,14 @@ class AttendanceUpdateForm(BaseModelForm):
             )
             initial = {
                 "attendance_date": instance.attendance_date.strftime("%Y-%m-%d"),
-                "attendance_clock_in": instance.attendance_clock_in.strftime("%H:%M"),
-                "attendance_clock_in_date": instance.attendance_clock_in_date.strftime(
-                    "%Y-%m-%d"
-                ),
             }
-            if instance.attendance_clock_out_date is not None:
+            if getattr(instance, "attendance_clock_in", None) is not None:
+                initial["attendance_clock_in"] = instance.attendance_clock_in.strftime("%H:%M")
+            if getattr(instance, "attendance_clock_in_date", None) is not None:
+                initial["attendance_clock_in_date"] = instance.attendance_clock_in_date.strftime(
+                    "%Y-%m-%d"
+                )
+            if instance.attendance_clock_out_date is not None and instance.attendance_clock_out is not None:
                 initial["attendance_clock_out"] = (
                     instance.attendance_clock_out.strftime("%H:%M")
                 )
@@ -275,18 +277,18 @@ class AttendanceForm(BaseModelForm):
 
         # If an instance is provided, override the default initial values
         if instance := kwargs.get("instance"):
-            initial.update(
-                {
-                    "attendance_date": instance.attendance_date.strftime("%Y-%m-%d"),
-                    "attendance_clock_in": instance.attendance_clock_in.strftime(
-                        "%H:%M"
-                    ),
-                    "attendance_clock_in_date": instance.attendance_clock_in_date.strftime(
-                        "%Y-%m-%d"
-                    ),
-                }
-            )
-            if instance.attendance_clock_out_date is not None:
+            initial.update({
+                "attendance_date": instance.attendance_date.strftime("%Y-%m-%d"),
+            })
+            if getattr(instance, "attendance_clock_in", None) is not None:
+                initial["attendance_clock_in"] = instance.attendance_clock_in.strftime(
+                    "%H:%M"
+                )
+            if getattr(instance, "attendance_clock_in_date", None) is not None:
+                initial["attendance_clock_in_date"] = instance.attendance_clock_in_date.strftime(
+                    "%Y-%m-%d"
+                )
+            if instance.attendance_clock_out_date is not None and instance.attendance_clock_out is not None:
                 initial["attendance_clock_out"] = (
                     instance.attendance_clock_out.strftime("%H:%M")
                 )
@@ -428,10 +430,12 @@ class AttendanceActivityForm(BaseModelForm):
 
             initial = {
                 "attendance_date": instance.attendance_date.strftime("%Y-%m-%d"),
-                "clock_in_date": instance.clock_in_date.strftime("%Y-%m-%d"),
-                "clock_in": instance.clock_in.strftime("%H:%M"),
             }
-            if instance.clock_out is not None:
+            if getattr(instance, "clock_in_date", None) is not None:
+                initial["clock_in_date"] = instance.clock_in_date.strftime("%Y-%m-%d")
+            if getattr(instance, "clock_in", None) is not None:
+                initial["clock_in"] = instance.clock_in.strftime("%H:%M")
+            if instance.clock_out is not None and instance.clock_out_date is not None:
                 initial["clock_out"] = instance.clock_out.strftime("%H:%M")
                 initial["clock_out_date"] = instance.clock_out_date.strftime("%Y-%m-%d")
             kwargs["initial"] = initial
