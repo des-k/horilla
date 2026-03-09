@@ -906,12 +906,12 @@ class NewRequestForm(AttendanceRequestForm):
         if not employee or not attendance_date or not shift:
             return None
         try:
-            from attendance.views.clock_in_out import compute_shift_rules
+            from attendance.views.clock_in_out import get_shift_rules
 
             day_name = attendance_date.strftime("%A").lower()
             day = EmployeeShiftDay.objects.get(day=day_name)
             _min_hour, start_time_sec, end_time_sec = shift_schedule_today(day=day, shift=shift)
-            return compute_shift_rules(
+            return get_shift_rules(
                 attendance_date=attendance_date,
                 day=day,
                 shift=shift,
