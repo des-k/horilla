@@ -1160,7 +1160,9 @@ def _scoped_punching_history_queryset(request):
 def attendance_punching_history_view(request):
     if not _can_access_punching_history(request):
         return _punching_history_forbidden_response(request)
-    previous_data = request.GET.urlencode()
+    request_copy = request.GET.copy()
+    request_copy.pop("page", None)
+    previous_data = request_copy.urlencode()
     queryset = _scoped_punching_history_queryset(request).order_by("-punch_timestamp", "-id")
     filter_obj = AttendancePunchingHistoryFilter(request.GET, queryset)
     data = filter_obj.qs.order_by("-punch_timestamp", "-id")
