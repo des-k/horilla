@@ -15,6 +15,7 @@ from typing import Optional, Tuple
 
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError
+from django.utils import timezone
 
 from attendance.methods.utils import shift_schedule_today
 from attendance.models import Attendance, AttendanceActivity
@@ -50,7 +51,15 @@ def _combine_dt(d, t):
     if not d or not t:
         return None
     try:
-        return datetime.combine(d, t)
+        value = datetime.combine(d, t)
+        if timezone.is_aware(timezone.now()):
+            if timezone.is_naive(value):
+                value = timezone.make_aware(value, timezone.get_current_timezone())
+            else:
+                value = timezone.localtime(value, timezone.get_current_timezone())
+        elif timezone.is_aware(value):
+            value = timezone.make_naive(value, timezone.get_current_timezone())
+        return value
     except Exception:
         return None
 
@@ -200,9 +209,28 @@ def sync_single_session_activity(attendance: Attendance, prev_attendance_date: O
 def _time_in_window(target_time, start_dt, end_dt) -> bool:
     if target_time is None or start_dt is None or end_dt is None:
         return False
-    candidate = datetime.combine(start_dt.date(), target_time)
-    start = start_dt
-    end = end_dt
+
+    current_tz = timezone.get_current_timezone()
+    windows_are_aware = timezone.is_aware(start_dt) or timezone.is_aware(end_dt)
+
+    def normalize_dt(value):
+        if value is None:
+            return None
+        if windows_are_aware:
+            if timezone.is_naive(value):
+                return timezone.make_aware(value, current_tz)
+            return timezone.localtime(value, current_tz)
+        if timezone.is_aware(value):
+            return timezone.make_naive(value, current_tz)
+        return value
+
+    candidate = normalize_dt(datetime.combine(start_dt.date(), target_time))
+    start = normalize_dt(start_dt)
+    end = normalize_dt(end_dt)
+
+    if candidate is None or start is None or end is None:
+        return False
+
     if end < start:
         end = end + timedelta(days=1)
     if candidate < start and end.date() > start.date():
