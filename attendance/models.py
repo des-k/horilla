@@ -670,18 +670,37 @@ class Attendance(HorillaModel):
             attendance_date=self.attendance_date, employee_id=self.employee_id
         ).order_by("clock_in")
         at_work_seconds = 0
-        now = datetime.now()
-        now_dt = datetime.combine(now.date(), dt.time(hour=now.hour, minute=now.minute, second=now.second))
+        now_dt = timezone.now()
+        current_tz = timezone.get_current_timezone()
+        use_tz = timezone.is_aware(now_dt)
+
+        def normalize_dt(value, date_value=None, time_value=None):
+            if value is None and date_value and time_value:
+                value = datetime.combine(date_value, time_value)
+            if value is None:
+                return None
+            if use_tz:
+                if timezone.is_naive(value):
+                    return timezone.make_aware(value, current_tz)
+                return timezone.localtime(value, current_tz)
+            if timezone.is_aware(value):
+                return timezone.localtime(value, current_tz).replace(tzinfo=None)
+            return value
+
         for activity in activities:
-            in_dt = getattr(activity, "in_datetime", None)
-            if in_dt is None and getattr(activity, "clock_in_date", None) and getattr(activity, "clock_in", None):
-                in_dt = datetime.combine(activity.clock_in_date, activity.clock_in)
+            in_dt = normalize_dt(
+                getattr(activity, "in_datetime", None),
+                getattr(activity, "clock_in_date", None),
+                getattr(activity, "clock_in", None),
+            )
             if in_dt is None:
                 continue
 
-            out_dt = getattr(activity, "out_datetime", None)
-            if out_dt is None and getattr(activity, "clock_out_date", None) and getattr(activity, "clock_out", None):
-                out_dt = datetime.combine(activity.clock_out_date, activity.clock_out)
+            out_dt = normalize_dt(
+                getattr(activity, "out_datetime", None),
+                getattr(activity, "clock_out_date", None),
+                getattr(activity, "clock_out", None),
+            )
             if out_dt is None:
                 out_dt = now_dt
 
