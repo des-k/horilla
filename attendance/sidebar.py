@@ -31,6 +31,11 @@ SUBMENUS = [
         "redirect": reverse("attendance-activity-view"),
     },
     {
+        "menu": _("Punching History"),
+        "redirect": reverse("attendance-punching-history-view"),
+        "accessibility": "attendance.sidebar.punching_history_accessibility",
+    },
+    {
         "menu": _("Late Come Early Out"),
         "redirect": reverse("late-come-early-out-view"),
         "accessibility": "attendance.sidebar.tracking_accessibility",
@@ -52,3 +57,12 @@ def tracking_accessibility(request, submenu, user_perms, *args, **kwargs):
     Determine if late come/early out tracking is enabled.
     """
     return enable_late_come_early_out_tracking(None).get("tracking")
+
+
+def punching_history_accessibility(request, submenu, user_perms, *args, **kwargs):
+    """Allow explicit audit permission or self-service employee access."""
+    if request.user.is_superuser:
+        return True
+    if request.user.has_perm("attendance.view_attendancepunchinghistory"):
+        return True
+    return bool(getattr(request.user, "employee_get", None))
