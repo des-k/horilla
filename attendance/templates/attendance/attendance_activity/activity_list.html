@@ -252,7 +252,7 @@
                                 -
                               {% endif %}
                             </div>
-                            <div data-cell-index="5" class="oh-sticky-table__td dateformat_changer">{{ activity.clock_out_date|default_if_none:"-"|default:"-" }}</div>
+                            <div data-cell-index="5" class="oh-sticky-table__td dateformat_changer">{% if activity.clock_out_date %}<span class="dateformat_changer">{{ activity.clock_out_date }}</span>{% else %}-{% endif %}</div>
                         </div>
                     {% endfor %}
                 </div>
