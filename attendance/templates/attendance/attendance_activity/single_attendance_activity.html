@@ -169,9 +169,9 @@
                     <span class="oh-timeoff-modal__stat-title">{% trans "In Location" %}</span>
                     <span class="oh-timeoff-modal__stat-count" style="display:block;">
                         {% if activity.clock_in_location %}
-                            {% with lat=activity.clock_in_location.lat lng=activity.clock_in_location.lng acc=activity.clock_in_location.accuracy %}
-                                {% if lat and lng %}
-                                    {{lat}}, {{lng}}{% if acc %} (±{{acc}}m){% endif %}
+                            {% with lat=activity.clock_in_location.lat lng=activity.clock_in_location.lng %}
+                                {% if lat != None and lng != None %}
+                                    {{lat}}, {{lng}}
                                     <a href="https://www.google.com/maps?q={{lat}},{{lng}}"
                                        target="_blank"
                                        style="margin-left:10px;"
@@ -191,9 +191,9 @@
                     <span class="oh-timeoff-modal__stat-title">{% trans "Out Location" %}</span>
                     <span class="oh-timeoff-modal__stat-count" style="display:block;">
                         {% if activity.clock_out_location %}
-                            {% with lat=activity.clock_out_location.lat lng=activity.clock_out_location.lng acc=activity.clock_out_location.accuracy %}
-                                {% if lat and lng %}
-                                    {{lat}}, {{lng}}{% if acc %} (±{{acc}}m){% endif %}
+                            {% with lat=activity.clock_out_location.lat lng=activity.clock_out_location.lng %}
+                                {% if lat != None and lng != None %}
+                                    {{lat}}, {{lng}}
                                     <a href="https://www.google.com/maps?q={{lat}},{{lng}}"
                                        target="_blank"
                                        style="margin-left:10px;"
