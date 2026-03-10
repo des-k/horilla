@@ -38,6 +38,7 @@ from django.forms import ValidationError
 from django.http import (
     HttpResponse,
     HttpResponseBadRequest,
+    HttpResponseForbidden,
     HttpResponseRedirect,
     JsonResponse,
 )
@@ -54,6 +55,8 @@ from xhtml2pdf import pisa
 from attendance.filters import (
     AttendanceActivityFilter,
     AttendanceActivityReGroup,
+    AttendancePunchingHistoryFilter,
+    AttendancePunchingHistoryReGroup,
     AttendanceFilters,
     AttendanceOverTimeFilter,
     AttendanceOvertimeReGroup,
@@ -92,6 +95,7 @@ from attendance.models import (
     Attendance,
     AttendanceActivity,
     AttendanceGeneralSetting,
+    AttendancePunchingHistory,
     AttendanceLateComeEarlyOut,
     AttendanceOverTime,
     AttendanceRequestComment,
@@ -103,6 +107,7 @@ from attendance.models import (
 )
 from attendance.views.handle_attendance_errors import handle_attendance_errors
 from attendance.views.process_attendance_data import process_attendance_data
+from attendance.services.punching_history import reconcile_attendance_punches
 from base.forms import AttendanceAllowedIPForm, TrackLateComeEarlyOutForm
 from base.methods import (
     choosesubordinates,
@@ -1128,6 +1133,74 @@ def attendance_activity_bulk_delete(request):
         )
 
     return HttpResponse("<script>$('.filterButton')[0].click()</script>")
+
+
+def _can_access_punching_history(request) -> bool:
+    if getattr(request.user, "is_superuser", False):
+        return True
+    if request.user.has_perm("attendance.view_attendancepunchinghistory"):
+        return True
+    return bool(getattr(request.user, "employee_get", None))
+
+
+def _punching_history_forbidden_response(request):
+    if request.headers.get("HX-Request") == "true":
+        return render(request, "decorator_404.html", status=403)
+    return HttpResponseForbidden(_("You dont have permission."))
+
+
+def _scoped_punching_history_queryset(request):
+    queryset = AttendancePunchingHistory.objects.select_related("employee_id", "attendance_id").all()
+    self_qs = queryset.filter(employee_id__employee_user_id=request.user)
+    scoped_qs = filtersubordinates(request, queryset, "attendance.view_attendancepunchinghistory")
+    return (scoped_qs | self_qs).distinct()
+
+
+@login_required
+def attendance_punching_history_view(request):
+    if not _can_access_punching_history(request):
+        return _punching_history_forbidden_response(request)
+    previous_data = request.GET.urlencode()
+    queryset = _scoped_punching_history_queryset(request).order_by("-punch_timestamp", "-id")
+    filter_obj = AttendancePunchingHistoryFilter(request.GET, queryset)
+    data = filter_obj.qs.order_by("-punch_timestamp", "-id")
+    punch_ids = json.dumps([instance.id for instance in paginator_qry(data, None)])
+    template = "attendance/punching_history/punching_history_view.html" if data.exists() else "attendance/punching_history/punching_history_empty.html"
+    return render(
+        request,
+        template,
+        {
+            "data": paginator_qry(data, request.GET.get("page")),
+            "pd": previous_data,
+            "f": filter_obj,
+            "gp_fields": AttendancePunchingHistoryReGroup.fields,
+            "punch_ids": punch_ids,
+            "show_employee_filter": request.user.is_superuser or request.user.has_perm("attendance.view_attendancepunchinghistory"),
+        },
+    )
+
+
+@login_required
+def punching_history_single_view(request, obj_id):
+    if not _can_access_punching_history(request):
+        return _punching_history_forbidden_response(request)
+    request_copy = request.GET.copy()
+    request_copy.pop("instances_ids", None)
+    previous_data = request_copy.urlencode()
+    punch = _scoped_punching_history_queryset(request).filter(id=obj_id).first()
+    instance_ids_json, instance_ids = _safe_request_instance_ids(request)
+    previous_instance, next_instance = closest_numbers(instance_ids, obj_id)
+    return render(
+        request,
+        "attendance/punching_history/single_punching_history.html",
+        {
+            "pd": previous_data,
+            "punch": punch,
+            "previous_instance": previous_instance,
+            "next_instance": next_instance,
+            "instance_ids_json": instance_ids_json,
+        },
+    )
 
 
 def process_activity_dicts(activity_dicts):
