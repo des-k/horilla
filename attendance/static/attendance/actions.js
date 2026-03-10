@@ -1578,13 +1578,25 @@ getCurrentLanguageCode(function (code) {
     languageCode = code;
 });
 
+function isDatePlaceholder(value) {
+    var normalized = String(value || "").trim().toLowerCase();
+    return !normalized || normalized === "-" || normalized === "none" || normalized === "null" || normalized === "invalid date";
+}
+
+function setSafeFormattedDate(element, value) {
+    if (isDatePlaceholder(value)) {
+        $(element).text("-");
+        return true;
+    }
+    return false;
+}
+
 if (languageCode != 'de') {
 
     $(".dateformat_changer").each(function (index, element) {
         var currentDate = $(element).text().trim();
 
-        if (!currentDate || currentDate === "-" || currentDate.toLowerCase() === "none") {
-            $(element).text("-");
+        if (setSafeFormattedDate(element, currentDate)) {
             return;
         }
 
@@ -1593,7 +1605,7 @@ if (languageCode != 'de') {
             formattedDate = dateFormatter.getFormattedDate(currentDate);
         }
 
-        if (!formattedDate || String(formattedDate).toLowerCase() === "invalid date") {
+        if (isDatePlaceholder(formattedDate)) {
             formattedDate = "-";
         }
 
@@ -1612,10 +1624,7 @@ if (languageCode === 'de') {
             var currentDate = $(element).text().trim();
             let eng_date = '';  // Initialize eng_date at the start of each iteration
 
-            // Check if currentDate is empty or equals "None"
-            if (!currentDate || currentDate.toLowerCase() === "none") {
-                eng_date = 'None';  // Reset the eng_date to 'None' if it's invalid
-                $(element).text(eng_date);  // Set to 'None' in the DOM
+            if (setSafeFormattedDate(element, currentDate)) {
                 return;
             }
             // Create a mapping of month names from different languages to English
@@ -1633,7 +1642,7 @@ if (languageCode === 'de') {
 
             // Check if the date is valid
             if (isNaN(date.getTime())) {
-                $(element).text(currentDate);  // Set to 'Invalid Date' in the DOM
+                $(element).text(currentDate);
                 return;
             }
             // Format the date in English using Intl.DateTimeFormat
@@ -1644,7 +1653,7 @@ if (languageCode === 'de') {
             } else if (currentDate) {
                 var formattedDate = eng_date;  // Use the formatted English date
             } else {
-                var formattedDate = "None";
+                var formattedDate = "-";
             }
             if (["MMM. D, YYYY", "D MMM. YYYY"].includes(for_mat)) {
                 formattedDate = formattedDate.replace(/Mar. /g, ' Mär. ');
@@ -1652,12 +1661,18 @@ if (languageCode === 'de') {
                 formattedDate = formattedDate.replace(/Oct. /g, ' Okt. ');
                 formattedDate = formattedDate.replace(/Dec. /g, ' Dez. ');
             }
-            $(element).text(formattedDate);  // Set the formatted date in the DOM
+            if (isDatePlaceholder(formattedDate)) {
+                formattedDate = "-";
+            }
+            $(element).text(formattedDate);
         });
     }
     else {
         $(".dateformat_changer").each(function (index, element) {
             var currentDate = $(element).text().trim();
+            if (setSafeFormattedDate(element, currentDate)) {
+                return;
+            }
             if (["MMMM D, YYYY", "DD MMMM, YYYY"].includes(for_mat) & languageCode === 'de') {
                 if (isNaN(currentDate)) {
                     $(element).text(currentDate);
@@ -1670,16 +1685,19 @@ if (languageCode === 'de') {
             } else if (currentDate) {
                 var formattedDate = currentDate;  // Use the formatted English date
             } else {
-                var formattedDate = "None";
+                var formattedDate = "-";
             }
-            $(element).text(formattedDate);  // Set the formatted date in the DOM
+            if (isDatePlaceholder(formattedDate)) {
+                formattedDate = "-";
+            }
+            $(element).text(formattedDate);
         });
     }
 }
 
 // Display the formatted date wherever needed
 var currentDate = $(".dateformat_changer").first().text();
-var formattedDate = dateFormatter.getFormattedDate(currentDate);
+var formattedDate = isDatePlaceholder(currentDate) ? "-" : dateFormatter.getFormattedDate(currentDate);
 
 // ******************************************************************
 // *     THIS IS FOR SWITCHING THE TIME FORMAT IN THE ALL VIEWS     *
