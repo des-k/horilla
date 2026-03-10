@@ -1703,35 +1703,45 @@ var formattedDate = isDatePlaceholder(currentDate) ? "-" : dateFormatter.getForm
 // *     THIS IS FOR SWITCHING THE TIME FORMAT IN THE ALL VIEWS     *
 // ******************************************************************
 
+function isTimePlaceholder(value) {
+    const normalized = (value || '').toString().trim().replace(/,+$/, '');
+    return ['', '-', 'None', 'none', 'null', 'Invalid date'].includes(normalized);
+}
+
 // Iterate through all elements with the 'timeformat_changer' class and format their content
 $(".timeformat_changer").each(function (index, element) {
-    var currentTime = $(element).text().trim();
+    var currentTime = $(element).text().trim().replace(/,+$/, '');
+    var formattedTime = '-';
 
     if (currentTime === 'midnight') {
         if (timeFormatter.timeFormat === 'hh:mm A') {
-            formattedTime = '12:00 AM'
+            formattedTime = '12:00 AM';
         } else {
-            formattedTime = '00:00'
+            formattedTime = '00:00';
         }
     }
     else if (currentTime === 'noon') {
         if (timeFormatter.timeFormat === 'hh:mm A') {
-            formattedTime = '12:00 PM'
+            formattedTime = '12:00 PM';
         } else {
-            formattedTime = '12:00'
+            formattedTime = '12:00';
         }
     }
-    // Checking currentTime value is a valid time.
+    else if (isTimePlaceholder(currentTime)) {
+        formattedTime = '-';
+    }
     else if (/[\.:]/.test(currentTime)) {
-        var formattedTime = timeFormatter.getFormattedTime(currentTime);
+        formattedTime = timeFormatter.getFormattedTime(currentTime);
     } else if (currentTime) {
-        var formattedTime = currentTime;
-    } else {
-        var formattedTime = "None";
+        formattedTime = currentTime;
+    }
+
+    if (isTimePlaceholder(formattedTime)) {
+        formattedTime = '-';
     }
     $(element).text(formattedTime);
 });
 
 // Display the formatted time wherever needed
 var currentTime = $(".timeformat_changer").first().text();
-var formattedTime = timeFormatter.getFormattedTime(currentTime);
+var formattedTime = isTimePlaceholder(currentTime) ? '-' : timeFormatter.getFormattedTime(currentTime);
