@@ -84,12 +84,6 @@
                                             hx-target="#objectUpdateModalTarget">{% trans "Export" %}</a>
                                     </li>
                                 {% endif %}
-                                {% if perms.attendance.delete_attendanceactivity %}
-                                    <li class="oh-dropdown__item">
-                                        <a href="#" data-action="delete" onclick="validateActivityIds(event)"
-                                            class="oh-dropdown__link oh-dropdown__link--danger">{% trans "Delete" %}</a>
-                                    </li>
-                                {% endif %}
                             </ul>
                         </div>
                     </div>
@@ -109,11 +103,3 @@
         })
     </script>
 </section>
-<form id="bulkDeleteForm" hx-post="{% url 'attendance-activity-bulk-delete' %}" hx-trigger="submit"
-        hx-confirm="{% trans 'Do you really want to delete all the selected activities?' %}"
-        hx-on-htmx-after-request="$('#unselectAllActivity').click(); $('#bulkDeleteIds').val('');"
-        hx-target="#activity-table" hx-swap="afterend">
-        {% csrf_token %}
-        <input type="hidden" name="ids" id="bulkDeleteIds" value="">
-
-</form>
