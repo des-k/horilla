@@ -1,0 +1,9 @@
+{% extends 'index.html' %}
+{% load i18n %}
+{% block content %}
+<div class="oh-wrapper">
+  {% include 'attendance/punching_history/nav.html' %}
+  {% include 'attendance/punching_history/punching_history_filters.html' %}
+  <div class="oh-alert oh-alert--info">{% trans "No punching history found." %}</div>
+</div>
+{% endblock %}

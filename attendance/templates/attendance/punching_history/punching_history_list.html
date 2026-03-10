@@ -1,0 +1,36 @@
+{% load i18n %}
+{% if data %}
+<div class="oh-sticky-table">
+  <div class="oh-sticky-table__table oh-table--sortable">
+    <div class="oh-sticky-table__thead">
+      <div class="oh-sticky-table__tr">
+        <div class="oh-sticky-table__th">{% trans "Employee" %}</div>
+        <div class="oh-sticky-table__th">{% trans "Punch Date" %}</div>
+        <div class="oh-sticky-table__th">{% trans "Punch Time" %}</div>
+        <div class="oh-sticky-table__th">{% trans "Source" %}</div>
+        <div class="oh-sticky-table__th">{% trans "Device Info" %}</div>
+        <div class="oh-sticky-table__th">{% trans "Photo" %}</div>
+        <div class="oh-sticky-table__th">{% trans "Location" %}</div>
+        <div class="oh-sticky-table__th">{% trans "Accepted to Attendance" %}</div>
+        <div class="oh-sticky-table__th">{% trans "Reason" %}</div>
+      </div>
+    </div>
+    <div class="oh-sticky-table__tbody">
+      {% for punch in data %}
+      <div class="oh-sticky-table__tr">
+        <div class="oh-sticky-table__td">{{ punch.employee_display }}</div>
+        <div class="oh-sticky-table__td">{{ punch.punch_timestamp|date:'Y-m-d' }}</div>
+        <div class="oh-sticky-table__td">{{ punch.punch_timestamp|date:'H:i:s' }}</div>
+        <div class="oh-sticky-table__td">{{ punch.get_source_display|default:'-' }}</div>
+        <div class="oh-sticky-table__td">{{ punch.device_info|default:'-' }}</div>
+        <div class="oh-sticky-table__td">{% if punch.photo %}<a href="{{ punch.photo.url }}" target="_blank">{% trans "View" %}</a>{% else %}-{% endif %}</div>
+        <div class="oh-sticky-table__td">{{ punch.location_display }}</div>
+        <div class="oh-sticky-table__td">{% if punch.accepted_to_attendance %}{% trans "Yes" %}{% else %}{% trans "No" %}{% endif %}</div>
+        <div class="oh-sticky-table__td">{{ punch.reason|default:'-' }}</div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+</div>
+<div class="oh-pagination">{% include 'horilla_paginations.html' with page_obj=data %}</div>
+{% endif %}
