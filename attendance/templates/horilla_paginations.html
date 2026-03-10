@@ -1,0 +1,38 @@
+{% load i18n %}
+{% if page_obj and page_obj.paginator.num_pages > 1 %}
+<span class="oh-pagination__page">
+  {% trans "Page" %} {{ page_obj.number }} {% trans "of" %} {{ page_obj.paginator.num_pages }}
+</span>
+<nav class="oh-pagination__nav">
+  <div class="oh-pagination__input-container me-3">
+    <span class="oh-pagination__label me-1">{% trans "Page" %}</span>
+    <input
+      type="number"
+      class="oh-pagination__input"
+      min="1"
+      max="{{ page_obj.paginator.num_pages }}"
+      value="{{ page_obj.number }}"
+      onkeydown="if(event.key === 'Enter'){ window.location.href='?{% if pd %}{{ pd|escapejs }}&{% endif %}page=' + this.value; }"
+    />
+    <span class="oh-pagination__label">{% trans "of" %} {{ page_obj.paginator.num_pages }}</span>
+  </div>
+  <ul class="oh-pagination__items">
+    {% if page_obj.has_previous %}
+      <li class="oh-pagination__item oh-pagination__item--wide">
+        <a href="?{% if pd %}{{ pd }}&{% endif %}page=1" class="oh-pagination__link">{% trans "First" %}</a>
+      </li>
+      <li class="oh-pagination__item oh-pagination__item--wide">
+        <a href="?{% if pd %}{{ pd }}&{% endif %}page={{ page_obj.previous_page_number }}" class="oh-pagination__link">{% trans "Previous" %}</a>
+      </li>
+    {% endif %}
+    {% if page_obj.has_next %}
+      <li class="oh-pagination__item oh-pagination__item--wide">
+        <a href="?{% if pd %}{{ pd }}&{% endif %}page={{ page_obj.next_page_number }}" class="oh-pagination__link">{% trans "Next" %}</a>
+      </li>
+      <li class="oh-pagination__item oh-pagination__item--wide">
+        <a href="?{% if pd %}{{ pd }}&{% endif %}page={{ page_obj.paginator.num_pages }}" class="oh-pagination__link">{% trans "Last" %}</a>
+      </li>
+    {% endif %}
+  </ul>
+</nav>
+{% endif %}
