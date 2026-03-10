@@ -63,9 +63,6 @@
                                                 hx-get="{% url 'attendance-activity-search' %}?{{pd}}&orderby=clock_out_date">
                                                 {% trans "Out Date" %}
                                             </div>
-                                            {% if perms.attendance.delete_attendanceactivity %}
-                                                <div class='oh-sticky-table__th oh-sticky-table__right' scope="col" style="width: 80px;">{% trans "Actions" %}</div>
-                                            {% endif %}
                                         </div>
                                     </div>
                                     <div class="oh-sticky-table__tbody">
@@ -111,18 +108,6 @@
                                                 
                                                 <div class="oh-sticky-table__td dateformat_changer">{{activity.clock_out_date}}
                                                 </div>
-                                                {% if perms.attendance.delete_attendanceactivity %}
-                                                    <div class="oh-sticky-table__td oh-sticky-table__right">
-                                                        <form hx-confirm="{% trans 'Are you sure want to delete this attendance?' %}"
-                                                            hx-post="{% url 'attendance-activity-delete' activity.id  %}?{{pd}}"
-                                                            onclick="event.stopPropagation()" hx-target="#activity-table">
-                                                            {% csrf_token %}
-                                                            <button type='submit' class="oh-btn oh-btn--danger-outline oh-btn--light-bkg w-100" title="{% trans 'Remove' %}">
-                                                                <ion-icon name="trash-outline"></ion-icon>
-                                                            </button>
-                                                        </form>
-                                                    </div>
-                                                {% endif %}
                                             </div>
                                         {% endfor %}
                                     </div>
