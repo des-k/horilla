@@ -108,6 +108,11 @@ urlpatterns = [
         name="attendance-activity-view",
     ),
     path(
+        "punching-history/",
+        views.attendance_punching_history_view,
+        name="attendance-punching-history-view",
+    ),
+    path(
         "attendance-activity-single-view/<int:obj_id>/",
         views.activity_single_view,
         name="attendance-activity-single-view",
