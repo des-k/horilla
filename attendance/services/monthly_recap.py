@@ -104,6 +104,45 @@ def _format_punch(dt: Optional[datetime], attendance_date: date) -> str:
     suffix = " D+1" if dt_local.date() > attendance_date else ""
     return dt_local.strftime("%H:%M") + suffix
 
+def _localize_leave_session_label(kind: str, language: str) -> str:
+    lang = (language or "en").lower()
+    labels = {
+        "full": "Cuti" if lang.startswith("id") else "On Leave",
+        "in": "Cuti Setengah Hari (Awal)" if lang.startswith("id") else "Half Day Leave (Check-In)",
+        "out": "Cuti Setengah Hari (Akhir)" if lang.startswith("id") else "Half Day Leave (Check-Out)",
+    }
+    return labels[kind]
+
+
+def _approved_leave_coverage(leave_qs, first_day: date, last_day: date) -> Dict[date, Dict[str, bool]]:
+    coverage: Dict[date, Dict[str, bool]] = {}
+    for lr in leave_qs:
+        sd = lr.start_date
+        ed = lr.end_date or lr.start_date
+        cur = sd
+        while cur <= ed:
+            if first_day <= cur <= last_day:
+                info = coverage.setdefault(cur, {"full_day": False, "in_excused": False, "out_excused": False})
+                if sd == ed:
+                    breakdown = lr.start_date_breakdown or lr.end_date_breakdown or "full_day"
+                elif cur == sd:
+                    breakdown = lr.start_date_breakdown or "full_day"
+                elif cur == ed:
+                    breakdown = lr.end_date_breakdown or "full_day"
+                else:
+                    breakdown = "full_day"
+
+                if breakdown == "full_day":
+                    info["full_day"] = True
+                    info["in_excused"] = True
+                    info["out_excused"] = True
+                elif breakdown == "first_half":
+                    info["in_excused"] = True
+                elif breakdown == "second_half":
+                    info["out_excused"] = True
+            cur = cur + timedelta(days=1)
+    return coverage
+
 
 def _localize_shift_information(text: str, language: str) -> str:
     """Localize only the *phrases* inside the Shift Information string."""
@@ -937,15 +976,7 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
         start_date__lte=last_day,
         end_date__gte=first_day,
     )
-    leave_dates: Set[date] = set()
-    for lr in leave_qs:
-        sd = lr.start_date
-        ed = lr.end_date or lr.start_date
-        cur = sd
-        while cur <= ed:
-            if first_day <= cur <= last_day:
-                leave_dates.add(cur)
-            cur = cur + timedelta(days=1)
+    leave_coverage = _approved_leave_coverage(leave_qs, first_day, last_day)
 
     day_objs = {d.day: d for d in EmployeeShiftDay.objects.all()}
 
@@ -961,7 +992,8 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
     i = 1
     for d in _iter_month_dates(first_day, last_day):
         holiday_obj = is_holiday(d)
-        is_leave = d in leave_dates
+        leave_info = leave_coverage.get(d, {"full_day": False, "in_excused": False, "out_excused": False})
+        is_leave = leave_info["full_day"]
 
         att_list = att_by_date.get(d, [])
         act_list = act_by_date.get(d, [])
@@ -990,7 +1022,7 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
 
         if is_off:
             if is_leave:
-                shift_info = _localize_shift_information("On Leave", language)
+                shift_info = _localize_shift_information(_localize_leave_session_label("full", language), language)
                 note = derive_note(NoteInputs(is_off=True, off_kind="leave"), language=language)
             else:
                 shift_info = _localize_shift_information("Holiday", language)
@@ -1226,6 +1258,7 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
 
         late_sec = 0.0
         early_sec = 0.0
+        leave_note_suffixes: List[str] = []
 
         if shift_start_dt and cutoff_in_dt:
             if final_in_dt:
@@ -1246,6 +1279,13 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
                     early_sec = max(0.0, (ref - final_out_dt).total_seconds())
             else:
                 early_sec = max(0.0, (shift_end_dt - cutoff_in_dt).total_seconds())
+
+        if leave_info["in_excused"]:
+            late_sec = 0.0
+            leave_note_suffixes.append(_localize_leave_session_label("in", language))
+        if leave_info["out_excused"]:
+            early_sec = 0.0
+            leave_note_suffixes.append(_localize_leave_session_label("out", language))
 
         late_txt = seconds_to_hhmm(late_sec)
         early_txt = seconds_to_hhmm(early_sec)
@@ -1268,7 +1308,7 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
             shift_start_time=rules.get("start_time"),
             shift_end_time=rules.get("end_time"),
         )
-        note_suffixes = attendance_request_suffixes + work_mode_pending_suffixes
+        note_suffixes = attendance_request_suffixes + work_mode_pending_suffixes + leave_note_suffixes
         correction_pending = bool(
             any(getattr(att, "is_validate_request", False) for att in att_list)
             and not used_detailed_pending
@@ -1277,8 +1317,8 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
         note = derive_note(
             NoteInputs(
                 is_off=False,
-                has_check_in=final_in_dt is not None,
-                has_check_out=final_out_dt is not None,
+                has_check_in=final_in_dt is not None or leave_info["in_excused"],
+                has_check_out=final_out_dt is not None or leave_info["out_excused"],
                 late_seconds=late_sec,
                 early_out_seconds=early_sec,
                 pending_suffixes=note_suffixes,
@@ -1295,8 +1335,8 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
                 no=i,
                 attendance_date=d,
                 shift_information=shift_info,
-                check_in=_format_punch(final_in_dt, d),
-                check_out=_format_punch(final_out_dt, d),
+                check_in=final_in_dt is not None and _format_punch(final_in_dt, d) or (leave_info["in_excused"] and _localize_leave_session_label("in", language) or "-"),
+                check_out=final_out_dt is not None and _format_punch(final_out_dt, d) or (leave_info["out_excused"] and _localize_leave_session_label("out", language) or "-"),
                 work_type=work_type_disp,
                 late=late_txt,
                 early_out=early_txt,
