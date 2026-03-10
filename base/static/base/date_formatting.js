@@ -83,22 +83,27 @@ class DateFormattingUtility {
         }
         // Use the stored date format
         const storedDateFormat = localStorage.getItem('selectedDateFormat') || 'MMM. D, YYYY';
-
-
-        // Preprocess the date string based on the selected format
-        let processedDate = date;
-        if (storedDateFormat === 'DD-MM-YYYY') {
-            processedDate = date.replace(/(\d{2})-(\d{2})-(\d{4})/, '$3-$2-$1');
-        } else if (storedDateFormat === 'DD.MM.YYYY') {
-            processedDate = date.replace(/(\d{2})\.(\d{2})\.(\d{4})/, '$3-$2-$1');
-        } else if (storedDateFormat === 'DD/MM/YYYY') {
-            processedDate = date.replace(/(\d{2})\/(\d{2})\/(\d{4})/, '$3-$2-$1');
+        
+        if (!date || date === '-' || String(date).toLowerCase() === 'none') {
+            return '-';
         }
-
-        // Format the processed date using moment.js
-        const formattedDate = moment(processedDate).format(storedDateFormat);
-
-        return formattedDate;
+        
+        // Preprocess the date string based on the selected format
+        let processedDate = String(date).trim();
+        if (storedDateFormat === 'DD-MM-YYYY') {
+            processedDate = processedDate.replace(/(\d{2})-(\d{2})-(\d{4})/, '$3-$2-$1');
+        } else if (storedDateFormat === 'DD.MM.YYYY') {
+            processedDate = processedDate.replace(/(\d{2})\.(\d{2})\.(\d{4})/, '$3-$2-$1');
+        } else if (storedDateFormat === 'DD/MM/YYYY') {
+            processedDate = processedDate.replace(/(\d{2})\/(\d{2})\/(\d{4})/, '$3-$2-$1');
+        }
+        
+        const parsedDate = moment(processedDate);
+        if (!parsedDate.isValid()) {
+            return '-';
+        }
+        
+        return parsedDate.format(storedDateFormat);
     }
 
 
