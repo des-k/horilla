@@ -115,6 +115,21 @@ class AttendanceChannel(models.TextChoices):
     API = "api", _("API")
 
 
+class AttendancePunchSource(models.TextChoices):
+    """Source of a raw punch entry."""
+    MOBILE = "mobile", _("Mobile")
+    BIOMETRIC = "biometric", _("Biometric")
+    API = "api", _("API")
+    UNKNOWN = "unknown", _("Unknown")
+
+
+class AttendancePunchDirection(models.TextChoices):
+    """Direction of a raw punch event."""
+    IN = "in", _("IN")
+    OUT = "out", _("OUT")
+    UNKNOWN = "unknown", _("Unknown")
+
+
 class AttendanceActivity(HorillaModel):
     """
     AttendanceActivity model
@@ -223,6 +238,75 @@ class AttendanceActivity(HorillaModel):
             f"{self.employee_id} - {self.attendance_date} - "
             f"{self.clock_in or '-'} - {self.clock_out or '-'}"
         )
+
+
+class AttendancePunchingHistory(HorillaModel):
+    """Dedicated raw punch history for audit/debugging."""
+
+    employee_id = models.ForeignKey(
+        Employee,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="employee_punching_histories",
+        verbose_name=_("Employee"),
+    )
+    attendance_id = models.ForeignKey(
+        "attendance.Attendance",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="punching_history_entries",
+        verbose_name=_("Attendance"),
+    )
+    attendance_date = models.DateField(null=True, blank=True, verbose_name=_("Attendance Date"))
+    punch_timestamp = models.DateTimeField(verbose_name=_("Punch Timestamp"))
+    source = models.CharField(
+        max_length=24,
+        choices=AttendancePunchSource.choices,
+        default=AttendancePunchSource.UNKNOWN,
+        verbose_name=_("Source"),
+    )
+    punch_direction = models.CharField(
+        max_length=12,
+        choices=AttendancePunchDirection.choices,
+        default=AttendancePunchDirection.UNKNOWN,
+        verbose_name=_("Punch Direction"),
+    )
+    device_info = models.CharField(max_length=255, null=True, blank=True, verbose_name=_("Device Info"))
+    photo = models.ImageField(upload_to=upload_path, null=True, blank=True, verbose_name=_("Photo"))
+    location = models.JSONField(null=True, blank=True, verbose_name=_("Location"))
+    accepted_to_attendance = models.BooleanField(default=False, verbose_name=_("Accepted to Attendance"))
+    reason = models.CharField(max_length=255, null=True, blank=True, verbose_name=_("Reason"))
+    raw_payload = models.JSONField(null=True, blank=True, verbose_name=_("Raw Payload"))
+    raw_employee_identifier = models.CharField(max_length=128, null=True, blank=True, verbose_name=_("Raw Employee Identifier"))
+
+    objects = HorillaCompanyManager(
+        related_company_field="employee_id__employee_work_info__company_id"
+    )
+
+    class Meta:
+        ordering = ["-punch_timestamp", "-id"]
+        verbose_name = _("Attendance Punching History")
+        verbose_name_plural = _("Attendance Punching Histories")
+
+    @property
+    def employee_display(self):
+        return self.employee_id or self.raw_employee_identifier or "-"
+
+    @property
+    def location_display(self):
+        if not isinstance(self.location, dict):
+            return "-"
+        lat = self.location.get("lat", self.location.get("latitude"))
+        lng = self.location.get("lng", self.location.get("longitude"))
+        if lat is None or lng is None:
+            return "-"
+        return f"{lat}, {lng}"
+
+    def __str__(self):
+        employee = self.employee_id or self.raw_employee_identifier or "Unknown"
+        return f"{employee} - {self.punch_timestamp}"
 
 
 class BatchAttendance(HorillaModel):
