@@ -163,21 +163,15 @@
 
                             <div data-cell-index="10" class="oh-sticky-table__td" onclick="event.stopPropagation();">
                               {% if activity.clock_in_location %}
-                                {% if activity.clock_in_location.lat and activity.clock_in_location.lng %}
+                                {% if activity.clock_in_location.lat != None and activity.clock_in_location.lng != None %}
                                   <div class="oh-text--sm">
                                     {{ activity.clock_in_location.lat }}, {{ activity.clock_in_location.lng }}
-                                    {% if activity.clock_in_location.accuracy %}
-                                      <span class="oh-text--muted">({{ activity.clock_in_location.accuracy }}m)</span>
-                                    {% endif %}
                                   </div>
                                   <a href="https://www.google.com/maps?q={{ activity.clock_in_location.lat }},{{ activity.clock_in_location.lng }}"
                                      target="_blank" onclick="event.stopPropagation();">{% trans "Map" %}</a>
-                                {% elif activity.clock_in_location.latitude and activity.clock_in_location.longitude %}
+                                {% elif activity.clock_in_location.latitude != None and activity.clock_in_location.longitude != None %}
                                   <div class="oh-text--sm">
                                     {{ activity.clock_in_location.latitude }}, {{ activity.clock_in_location.longitude }}
-                                    {% if activity.clock_in_location.accuracy %}
-                                      <span class="oh-text--muted">({{ activity.clock_in_location.accuracy }}m)</span>
-                                    {% endif %}
                                   </div>
                                   <a href="https://www.google.com/maps?q={{ activity.clock_in_location.latitude }},{{ activity.clock_in_location.longitude }}"
                                      target="_blank" onclick="event.stopPropagation();">{% trans "Map" %}</a>
@@ -216,21 +210,15 @@
 
                             <div data-cell-index="11" class="oh-sticky-table__td" onclick="event.stopPropagation();">
                               {% if activity.clock_out_location %}
-                                {% if activity.clock_out_location.lat and activity.clock_out_location.lng %}
+                                {% if activity.clock_out_location.lat != None and activity.clock_out_location.lng != None %}
                                   <div class="oh-text--sm">
                                     {{ activity.clock_out_location.lat }}, {{ activity.clock_out_location.lng }}
-                                    {% if activity.clock_out_location.accuracy %}
-                                      <span class="oh-text--muted">({{ activity.clock_out_location.accuracy }}m)</span>
-                                    {% endif %}
                                   </div>
                                   <a href="https://www.google.com/maps?q={{ activity.clock_out_location.lat }},{{ activity.clock_out_location.lng }}"
                                      target="_blank" onclick="event.stopPropagation();">{% trans "Map" %}</a>
-                                {% elif activity.clock_out_location.latitude and activity.clock_out_location.longitude %}
+                                {% elif activity.clock_out_location.latitude != None and activity.clock_out_location.longitude != None %}
                                   <div class="oh-text--sm">
                                     {{ activity.clock_out_location.latitude }}, {{ activity.clock_out_location.longitude }}
-                                    {% if activity.clock_out_location.accuracy %}
-                                      <span class="oh-text--muted">({{ activity.clock_out_location.accuracy }}m)</span>
-                                    {% endif %}
                                   </div>
                                   <a href="https://www.google.com/maps?q={{ activity.clock_out_location.latitude }},{{ activity.clock_out_location.longitude }}"
                                      target="_blank" onclick="event.stopPropagation();">{% trans "Map" %}</a>
