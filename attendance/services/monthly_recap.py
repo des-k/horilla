@@ -35,6 +35,7 @@ from attendance.services.final_session_resolution import (
     is_approved_request_channel,
     resolve_final_session,
 )
+from attendance.services.month_params import require_month_yyyy_mm
 from attendance.services.monthly_recap_note import (
     NoteInputs,
     derive_note,
@@ -53,6 +54,7 @@ from leave.models import LeaveRequest
 
 def _month_range(month_yyyy_mm: str) -> Tuple[date, date]:
     """Parse YYYY-MM and return (first_day, last_day)."""
+    month_yyyy_mm = require_month_yyyy_mm(month_yyyy_mm)
     y, m = month_yyyy_mm.split("-")
     year = int(y)
     month = int(m)
@@ -182,35 +184,37 @@ def _should_use_raw_punch_source(obj, request_status_by_id: Dict[int, str], *, s
 def _session_channel(obj, session: str) -> Optional[str]:
     if not obj:
         return None
+
     session_norm = (session or "IN").upper()
-    if isinstance(obj, Attendance):
-        if session_norm == "IN":
-            return getattr(obj, "attendance_clock_in_channel", None)
-        return getattr(obj, "attendance_clock_out_channel", None)
     if session_norm == "IN":
+        if hasattr(obj, "attendance_clock_in_channel"):
+            return getattr(obj, "attendance_clock_in_channel", None)
         return getattr(obj, "clock_in_channel", None)
+
+    if hasattr(obj, "attendance_clock_out_channel"):
+        return getattr(obj, "attendance_clock_out_channel", None)
     return getattr(obj, "clock_out_channel", None)
 
 
 def _session_dt(obj, session: str, attendance_date: date) -> Optional[datetime]:
     session_norm = (session or "IN").upper()
-    if isinstance(obj, Attendance):
-        if session_norm == "IN":
+    if session_norm == "IN":
+        if hasattr(obj, "attendance_clock_in") or hasattr(obj, "attendance_clock_in_date"):
             return _combine_dt(
                 getattr(obj, "attendance_clock_in_date", None),
                 getattr(obj, "attendance_clock_in", None),
                 attendance_date,
             )
-        return _combine_dt(
-            getattr(obj, "attendance_clock_out_date", None),
-            getattr(obj, "attendance_clock_out", None),
-            attendance_date,
-        )
-
-    if session_norm == "IN":
         return getattr(obj, "in_datetime", None) or _combine_dt(
             getattr(obj, "clock_in_date", None),
             getattr(obj, "clock_in", None),
+            attendance_date,
+        )
+
+    if hasattr(obj, "attendance_clock_out") or hasattr(obj, "attendance_clock_out_date"):
+        return _combine_dt(
+            getattr(obj, "attendance_clock_out_date", None),
+            getattr(obj, "attendance_clock_out", None),
             attendance_date,
         )
     return getattr(obj, "out_datetime", None) or _combine_dt(
@@ -280,6 +284,95 @@ def _work_mode_label(mode: str) -> str:
     if mode == AttendanceWorkMode.WFA:
         return "WFA"
     return "WFO"
+
+
+def _normalize_work_mode(mode: Optional[str]) -> Optional[str]:
+    raw = (mode or "").strip().lower().replace("-", " ").replace("_", " ")
+    if not raw:
+        return None
+    if raw in {"on duty", "onduty"}:
+        return AttendanceWorkMode.ON_DUTY
+    if raw in {"wfa", "work from anywhere", "remote"}:
+        return AttendanceWorkMode.WFA
+    if raw in {"wfo", "office"}:
+        return AttendanceWorkMode.WFO
+    return None
+
+
+def _mode_from_work_type_obj(work_type_obj) -> Optional[str]:
+    if not work_type_obj:
+        return None
+    return _normalize_work_mode(getattr(work_type_obj, "work_type", None))
+
+
+def _attendance_level_mode(attendance) -> Optional[str]:
+    if not attendance:
+        return None
+    return _mode_from_work_type_obj(getattr(attendance, "work_type_id", None))
+
+
+def _session_mode(obj, session: str) -> Optional[str]:
+    if not obj:
+        return None
+    session_norm = (session or "IN").upper()
+    if session_norm == "IN":
+        return _normalize_work_mode(
+            getattr(obj, "attendance_clock_in_mode", None)
+            or getattr(obj, "clock_in_mode", None)
+        )
+    return _normalize_work_mode(
+        getattr(obj, "attendance_clock_out_mode", None)
+        or getattr(obj, "clock_out_mode", None)
+    )
+
+
+def _resolve_final_session_mode(
+    *,
+    attendances: List[Attendance],
+    activities: List[AttendanceActivity],
+    session: str,
+    attendance_date: date,
+    final_dt: Optional[datetime],
+    final_source: Optional[str],
+    request_status_by_id: Dict[int, str],
+    excluded_dts: Set[datetime],
+    window_start_dt: Optional[datetime],
+    window_end_dt: Optional[datetime],
+    tzinfo,
+    fallback_mode: str,
+) -> str:
+    if final_dt is None:
+        return fallback_mode
+
+    want_approved = is_approved_request_channel(final_source)
+    session_norm = (session or "IN").upper()
+    candidates = sorted(
+        [*attendances, *activities],
+        key=lambda obj: getattr(obj, "id", 0) or 0,
+        reverse=True,
+    )
+
+    for obj in candidates:
+        if not _should_use_raw_punch_source(obj, request_status_by_id, session=session_norm):
+            continue
+
+        channel = _session_channel(obj, session_norm)
+        if is_approved_request_channel(channel) != want_approved:
+            continue
+
+        candidate_dt = _normalize_dt(_session_dt(obj, session_norm, attendance_date), tzinfo)
+        if candidate_dt is None or candidate_dt != final_dt:
+            continue
+        if candidate_dt in excluded_dts:
+            continue
+        if not _within_window(candidate_dt, window_start_dt, window_end_dt):
+            continue
+
+        mode = _session_mode(obj, session_norm)
+        if mode:
+            return mode
+
+    return fallback_mode
 
 
 def _pick_best_attendance(att_list: List[Attendance]) -> Optional[Attendance]:
@@ -1043,18 +1136,20 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
         ):
             approved_out_dt = None
 
-        final_in_dt = resolve_final_session(
+        final_in_resolution = resolve_final_session(
             session="IN",
             approved_dt=approved_in_dt,
             raw_datetimes=in_dts,
             raw_source="raw",
-        ).final_dt
-        final_out_dt = resolve_final_session(
+        )
+        final_out_resolution = resolve_final_session(
             session="OUT",
             approved_dt=approved_out_dt,
             raw_datetimes=out_dts,
             raw_source="raw",
-        ).final_dt
+        )
+        final_in_dt = final_in_resolution.final_dt
+        final_out_dt = final_out_resolution.final_dt
 
         shift_start_dt = _normalize_dt(rules.get("shift_start_dt"), tzinfo)
         shift_end_dt = _normalize_dt(rules.get("shift_end_dt"), tzinfo)
@@ -1074,19 +1169,7 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
         except Exception:
             grace_out_sec = 0
 
-        baseline_mode = scheduled_attendance_mode(employee, d)
-        if best_att and getattr(best_att, "work_type_id", None):
-            try:
-                wt_name = getattr(best_att.work_type_id, "work_type", "") or ""
-                n = wt_name.strip().lower().replace("-", " ").replace("_", " ")
-                if "on duty" in n or "onduty" in n:
-                    baseline_mode = AttendanceWorkMode.ON_DUTY
-                elif "wfa" in n or "work from anywhere" in n or "remote" in n:
-                    baseline_mode = AttendanceWorkMode.WFA
-                elif "wfo" in n or "office" in n:
-                    baseline_mode = AttendanceWorkMode.WFO
-            except Exception:
-                pass
+        baseline_mode = _attendance_level_mode(best_att) or scheduled_attendance_mode(employee, d)
 
         eff_in_mode = _resolve_effective_mode_approved(
             requests=requests,
@@ -1101,16 +1184,45 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
             baseline_mode=baseline_mode,
         )
 
-        if eff_in_mode == AttendanceWorkMode.ON_DUTY and eff_out_mode == AttendanceWorkMode.ON_DUTY:
+        display_in_mode = _resolve_final_session_mode(
+            attendances=att_list,
+            activities=act_list,
+            session="IN",
+            attendance_date=d,
+            final_dt=final_in_dt,
+            final_source=final_in_resolution.final_source,
+            request_status_by_id=request_status_by_id,
+            excluded_dts=excluded_in_dts,
+            window_start_dt=check_in_window_start_dt,
+            window_end_dt=check_in_window_end_dt,
+            tzinfo=tzinfo,
+            fallback_mode=eff_in_mode,
+        )
+        display_out_mode = _resolve_final_session_mode(
+            attendances=att_list,
+            activities=act_list,
+            session="OUT",
+            attendance_date=d,
+            final_dt=final_out_dt,
+            final_source=final_out_resolution.final_source,
+            request_status_by_id=request_status_by_id,
+            excluded_dts=excluded_out_dts,
+            window_start_dt=check_out_window_start_dt,
+            window_end_dt=check_out_window_end_dt,
+            tzinfo=tzinfo,
+            fallback_mode=eff_out_mode,
+        )
+
+        if display_in_mode == AttendanceWorkMode.ON_DUTY and display_out_mode == AttendanceWorkMode.ON_DUTY:
             work_type_disp = "On Duty FULL"
-        elif eff_in_mode == AttendanceWorkMode.ON_DUTY and eff_out_mode != AttendanceWorkMode.ON_DUTY:
+        elif display_in_mode == AttendanceWorkMode.ON_DUTY and display_out_mode != AttendanceWorkMode.ON_DUTY:
             work_type_disp = "On Duty IN"
-        elif eff_out_mode == AttendanceWorkMode.ON_DUTY and eff_in_mode != AttendanceWorkMode.ON_DUTY:
+        elif display_out_mode == AttendanceWorkMode.ON_DUTY and display_in_mode != AttendanceWorkMode.ON_DUTY:
             work_type_disp = "On Duty OUT"
-        elif eff_in_mode == eff_out_mode:
-            work_type_disp = _work_mode_label(eff_in_mode)
+        elif display_in_mode == display_out_mode:
+            work_type_disp = _work_mode_label(display_in_mode)
         else:
-            work_type_disp = f"IN: {_work_mode_label(eff_in_mode)}<br>OUT: {_work_mode_label(eff_out_mode)}"
+            work_type_disp = f"IN: {_work_mode_label(display_in_mode)}<br>OUT: {_work_mode_label(display_out_mode)}"
 
         late_sec = 0.0
         early_sec = 0.0
