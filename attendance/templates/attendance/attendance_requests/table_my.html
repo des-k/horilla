@@ -39,10 +39,10 @@
                   {% endwith %}
                 </div>
                 <div class="oh-sticky-table__td">
-                  {% if r.attendance_clock_in %}{{ r.attendance_clock_in }}{% else %}-{% endif %}
+                  {% if r.attendance_clock_in %}{{ r.attendance_clock_in|time:"H:i" }}{% else %}-{% endif %}
                 </div>
                 <div class="oh-sticky-table__td">
-                  {% if r.attendance_clock_out %}{{ r.attendance_clock_out }}{% else %}-{% endif %}
+                  {% if r.attendance_clock_out %}{{ r.attendance_clock_out|time:"H:i" }}{% else %}-{% endif %}
                 </div>
                 <div class="oh-sticky-table__td">
                   {% if r.request_type == 'cancel_request' %}
