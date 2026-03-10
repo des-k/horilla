@@ -795,7 +795,7 @@ class NewRequestForm(AttendanceRequestForm):
 
     def __init__(self, *args, **kwargs):
         # Get the initial data passed from views.py file (employee_id, etc.)
-        view_initial = kwargs.get("initial", {})
+        view_initial = kwargs.get("initial") or {}
         super().__init__(*args, **kwargs)
 
         # Rebuild field order to match mobile:
