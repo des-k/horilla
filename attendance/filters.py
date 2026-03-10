@@ -10,6 +10,7 @@ import uuid
 
 import django_filters
 from django import forms
+from django.db.models import Q
 from django.forms import DateTimeInput
 from django.utils.translation import gettext_lazy as _
 
@@ -18,6 +19,7 @@ from attendance.models import (
     AttendanceActivity,
     AttendanceLateComeEarlyOut,
     AttendanceOverTime,
+    AttendancePunchingHistory,
     strtime_seconds,
 )
 from base.filters import FilterSet
@@ -686,3 +688,54 @@ def online_init(self, *args, **kwargs):
 
 
 EmployeeFilter.__init__ = online_init
+
+
+class AttendancePunchingHistoryFilter(FilterSet):
+    search = django_filters.CharFilter(method="filter_search")
+    device_info = django_filters.CharFilter(field_name="device_info", lookup_expr="icontains")
+    reason = django_filters.CharFilter(field_name="reason", lookup_expr="icontains")
+    punch_date_from = django_filters.DateFilter(
+        field_name="punch_timestamp", lookup_expr="date__gte", widget=forms.DateInput(attrs={"type": "date"})
+    )
+    punch_date_till = django_filters.DateFilter(
+        field_name="punch_timestamp", lookup_expr="date__lte", widget=forms.DateInput(attrs={"type": "date"})
+    )
+    attendance_date = django_filters.DateFilter(
+        field_name="attendance_date", widget=forms.DateInput(attrs={"type": "date"})
+    )
+    accepted_to_attendance = django_filters.BooleanFilter(field_name="accepted_to_attendance")
+
+    class Meta:
+        model = AttendancePunchingHistory
+        fields = [
+            "employee_id",
+            "source",
+            "punch_direction",
+            "accepted_to_attendance",
+            "reason",
+            "attendance_date",
+        ]
+
+    def filter_search(self, queryset, _name, value):
+        if not value:
+            return queryset
+        return queryset.filter(
+            Q(employee_id__employee_first_name__icontains=value)
+            | Q(employee_id__employee_last_name__icontains=value)
+            | Q(device_info__icontains=value)
+            | Q(reason__icontains=value)
+            | Q(raw_employee_identifier__icontains=value)
+        )
+
+
+
+class AttendancePunchingHistoryReGroup:
+    fields = [
+        ("", "Select"),
+        ("employee_id", "Employee"),
+        ("attendance_date", "Attendance Date"),
+        ("source", "Source"),
+        ("punch_direction", "Direction"),
+        ("accepted_to_attendance", "Accepted"),
+        ("reason", "Reason"),
+    ]
