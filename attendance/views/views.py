@@ -133,6 +133,7 @@ from horilla.decorators import (
 from notifications.signals import notify
 
 # Monthly recap (Attendance → Attendances)
+from attendance.services.month_params import normalize_month_yyyy_mm, require_month_yyyy_mm
 from attendance.services.monthly_recap import get_monthly_attendance_rows
 
 
@@ -170,20 +171,12 @@ def attendance_employee_month_view(request):
     )
 
     # Resolve month
-    month = request.GET.get("month") or django_timezone.localdate().strftime("%Y-%m")
-    # Basic guard: fallback to current month if malformed
-    try:
-        if len(month) != 7 or month[4] != "-":
-            raise ValueError
-        int(month[:4])
-        int(month[5:7])
-    except Exception:
-        month = django_timezone.localdate().strftime("%Y-%m")
-
-    # Disallow future months (UI also limits selection).
     current_month = django_timezone.localdate().strftime("%Y-%m")
-    if month > current_month:
-        month = current_month
+    month = normalize_month_yyyy_mm(
+        request.GET.get("month"),
+        fallback_month=current_month,
+        max_month=current_month,
+    )
 
     # Resolve employee
     emp_id = request.GET.get("employee_id") or request.GET.get("employee")
@@ -250,21 +243,15 @@ def attendance_employee_month_export_pdf(request):
 
     # Validate month
     try:
-        if len(month) != 7 or month[4] != "-":
-            raise ValueError
-        year = int(month[:4])
-        month_no = int(month[5:7])
-        if month_no < 1 or month_no > 12:
-            raise ValueError
-    except Exception:
+        month = require_month_yyyy_mm(month)
+    except ValueError:
         return HttpResponseBadRequest("Invalid month format. Expected YYYY-MM")
 
     # Disallow future months (keep output aligned with UI)
     current_month = django_timezone.localdate().strftime("%Y-%m")
-    if month > current_month:
-        month = current_month
-        year = int(month[:4])
-        month_no = int(month[5:7])
+    month = normalize_month_yyyy_mm(month, fallback_month=current_month, max_month=current_month)
+    year = int(month[:4])
+    month_no = int(month[5:7])
 
     # Resolve employee within allowed queryset
     try:
