@@ -1582,14 +1582,19 @@ if (languageCode != 'de') {
 
     $(".dateformat_changer").each(function (index, element) {
         var currentDate = $(element).text().trim();
-        // Checking currentDate value is a date or None value.
-        if (/[\.,\-\/]/.test(currentDate)) {
-            var formattedDate = dateFormatter.getFormattedDate(currentDate);
 
-        } else if (currentDate) {
-            var formattedDate = currentDate;
-        } else {
-            var formattedDate = "None";
+        if (!currentDate || currentDate === "-" || currentDate.toLowerCase() === "none") {
+            $(element).text("-");
+            return;
+        }
+
+        var formattedDate = currentDate;
+        if (/[\.,\-\/]/.test(currentDate)) {
+            formattedDate = dateFormatter.getFormattedDate(currentDate);
+        }
+
+        if (!formattedDate || String(formattedDate).toLowerCase() === "invalid date") {
+            formattedDate = "-";
         }
 
         $(element).text(formattedDate);
