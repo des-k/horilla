@@ -11,47 +11,55 @@ class TimeFormattingUtility {
     }
 
     getFormattedTime(time) {
-        if (localStorage.getItem('selectedTimeFormat')){
-
+        const rawTime = (time || '').toString().trim().replace(/,+$/, '');
+        const placeholderValues = new Set(['', '-', 'None', 'none', 'null', 'Invalid date']);
+        if (placeholderValues.has(rawTime)) {
+            return '-';
         }
-        else{
-            function fetchData(callback) {
 
+        if (!localStorage.getItem('selectedTimeFormat')) {
+            function fetchData(callback) {
                 $.ajax({
                     url: '/settings/get-time-format/',
                     method: 'GET',
                     data: { csrfmiddlewaretoken: getCookie('csrftoken') },
                     success: function(response) {
                         var time_format = response.selected_format;
-
-                        // Call the callback function and pass the value of 'time_format'
                         callback(time_format);
                     },
                 });
             }
 
-            // Use the fetchData function with a callback
             fetchData(function(time_format) {
-
-                // If any time format is found setting it to the local storage.
-                if(time_format){
+                if (time_format) {
                     localStorage.setItem('selectedTimeFormat', time_format);
-
-                }
-                // Setting a default time format hh:mm A
-                else{
+                } else {
                     localStorage.setItem('selectedTimeFormat', 'hh:mm A');
                 }
             });
-
         }
-        // Use the stored time format
-        const storedTimeFormat = localStorage.getItem('selectedTimeFormat') || 'hh:mm A';
 
-        // Format the time using moment.js
-        const formattedTime = moment(time, 'hh:mm A').format(storedTimeFormat);
+        const storedTimeFormat = (localStorage.getItem('selectedTimeFormat') || 'hh:mm A')
+            .replace(/:ss/g, '')
+            .replace(/ss/g, '');
 
-        return formattedTime;
+        const parsed = moment(rawTime, [
+            'HH:mm:ss',
+            'HH:mm',
+            'H:mm:ss',
+            'H:mm',
+            'hh:mm A',
+            'h:mm A',
+            'hh:mm:ss A',
+            'h:mm:ss A',
+        ], true);
+
+        if (!parsed.isValid()) {
+            const compactMatch = rawTime.match(/^(\d{1,2}:\d{2})(?::\d{2})?$/);
+            return compactMatch ? compactMatch[1] : rawTime;
+        }
+
+        return parsed.format(storedTimeFormat);
     }
 
     // Additional method for getting formatted time in 12-hour format
