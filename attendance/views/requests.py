@@ -264,20 +264,19 @@ def request_attendance_view(request):
     # ----------------------------
     # Build My Requests queryset
     # ----------------------------
-    my_qs = Attendance.objects.filter(employee_id__employee_user_id=request.user).filter(
+    request_history_filter = (
         Q(is_validate_request=True)
         | Q(is_validate_request_approved=True)
-        | Q(
-            request_type__in=[
-                "create_request",
-                "update_request",
-                "revalidate_request",
-                "cancel_request",
-                "reject_request",
-            ]
-        )
-        | Q(request_description__isnull=False)
-        | Q(requested_data__isnull=False)
+        | Q(action_type__in=[
+            AttendanceRequestActionType.APPROVED,
+            AttendanceRequestActionType.REJECTED,
+            AttendanceRequestActionType.CANCELED,
+        ])
+        | Q(request_type__in=["create_request", "cancel_request", "reject_request"])
+    )
+
+    my_qs = Attendance.objects.filter(employee_id__employee_user_id=request.user).filter(
+        request_history_filter
     ).distinct()
 
     # My Requests status filter
