@@ -27,6 +27,12 @@ from zk import exception as zk_exception
 from attendance.methods.utils import Request
 from attendance.models import AttendanceActivity
 from attendance.views.clock_in_out import clock_in, clock_out
+from attendance.services.punching_history import (
+    create_biometric_punch_history,
+    humanize_biometric_error,
+    reconcile_single_punch_against_attendance,
+    update_punch_history,
+)
 from base.methods import get_key_instances, get_pagination
 from employee.models import Employee, EmployeeWorkInformation
 from horilla.decorators import (
@@ -127,6 +133,135 @@ def ensure_aware_datetime(dt_obj):
     return dt_obj
 
 
+class _SyntheticMessageRecorder:
+    def __init__(self):
+        self.messages = []
+
+    def add(self, level, message, extra_tags=""):
+        self.messages.append(str(message))
+
+
+def _attach_message_recorder(request_data):
+    recorder = _SyntheticMessageRecorder()
+    request_data._messages = recorder
+    return recorder
+
+
+def _response_text(response) -> str:
+    if response is None:
+        return ""
+    try:
+        content = getattr(response, "content", b"")
+        if isinstance(content, bytes):
+            return content.decode("utf-8", errors="ignore").strip()
+        return str(content).strip()
+    except Exception:
+        return str(response).strip()
+
+
+def _looks_like_success_response(text: str) -> bool:
+    lower = (text or "").lower()
+    return "<button" in lower and ("clock-out" in lower or "clock-in" in lower or "hx-get" in lower)
+
+
+def _serialize_raw_payload(payload):
+    try:
+        return json.loads(json.dumps(payload, default=str))
+    except Exception:
+        return {"raw": str(payload)}
+
+
+def _create_biometric_issue_log(*, device, raw_employee_identifier, punch_code=None, reason, punch_timestamp=None, raw_payload=None):
+    return create_biometric_punch_history(
+        device=device,
+        employee=None,
+        punch_timestamp=punch_timestamp,
+        direction="unknown",
+        raw_employee_identifier=str(raw_employee_identifier or ""),
+        punch_code=punch_code,
+        reason=reason,
+        raw_payload=_serialize_raw_payload(raw_payload) if raw_payload is not None else None,
+    )
+
+
+def _parse_vendor_datetime(value, *, fmt=None):
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return ensure_aware_datetime(value)
+    if isinstance(value, str):
+        fmts = []
+        if fmt:
+            fmts.append(fmt)
+        fmts.extend([
+            "%Y-%m-%dT%H:%M:%S%z",
+            "%Y-%m-%d %H:%M:%S%z",
+            "%Y-%m-%d %H:%M:%S",
+            "%d/%m/%Y %H:%M:%S",
+        ])
+        for item in fmts:
+            try:
+                return ensure_aware_datetime(datetime.strptime(value, item))
+            except Exception:
+                continue
+        try:
+            return ensure_aware_datetime(datetime.fromisoformat(value))
+        except Exception:
+            return None
+    return None
+
+
+def _parse_cosec_attendance_datetime(attendance):
+    try:
+        return ensure_aware_datetime(
+            datetime.combine(
+                datetime.strptime(attendance["date"], "%d/%m/%Y").date(),
+                datetime.strptime(attendance["time"], "%H:%M:%S").time(),
+            )
+        )
+    except Exception:
+        return None
+
+
+def _parse_anviz_attendance_datetime(attendance):
+    return _parse_vendor_datetime(attendance.get("checktime"), fmt="%Y-%m-%dT%H:%M:%S%z")
+
+
+def _parse_dahua_attendance_datetime(log):
+    return _parse_vendor_datetime(log.get("create_time"))
+
+
+def _parse_etimeoffice_attendance_datetime(log, user_tz):
+    punch_dt = _parse_vendor_datetime(log.get("PunchDate"))
+    if not punch_dt:
+        return None
+    try:
+        return punch_dt.astimezone(user_tz)
+    except Exception:
+        return punch_dt
+
+
+def _run_biometric_action(*, raw_log, request_data, action, direction):
+    recorder = _attach_message_recorder(request_data)
+    try:
+        response = action(request_data)
+    except Exception as error:
+        update_punch_history(raw_log, accepted=False, reason=humanize_biometric_error(str(error), direction=direction))
+        raise
+
+    response_text = _response_text(response)
+    joined_messages = " | ".join([msg for msg in recorder.messages if msg]).strip()
+    response_error_text = response_text if response_text and not response_text.lstrip().startswith("<script") and not response_text.lstrip().startswith("<button") else ""
+    error_text = joined_messages or response_error_text
+    if error_text and not _looks_like_success_response(response_text):
+        update_punch_history(
+            raw_log,
+            accepted=False,
+            reason=humanize_biometric_error(error_text, direction=direction),
+        )
+    return response
+
+
 def _system_direction_decision(machine_type, punch_code):
     """Return True for IN, False for OUT, or None if punch_code is not recognized."""
     if punch_code is None:
@@ -162,15 +297,7 @@ def _system_direction_decision(machine_type, punch_code):
 
 
 def process_biometric_punch(*, device, employee, attendance_dt, punch_code=None):
-    """
-    Process a single biometric event and call Horilla's clock_in/clock_out logic.
-
-    device.device_direction supported values:
-      - system: decide IN/OUT from punch_code (fallback to alternate if unknown)
-      - in: always clock_in
-      - out: always clock_out
-      - alternate: toggle based on open AttendanceActivity (clock_out is NULL)
-    """
+    """Process a single biometric event and persist raw punch history."""
     attendance_dt = ensure_aware_datetime(attendance_dt)
 
     request_data = Request(
@@ -181,9 +308,27 @@ def process_biometric_punch(*, device, employee, attendance_dt, punch_code=None)
     )
 
     direction = (getattr(device, "device_direction", None) or "system").lower()
+    raw_direction = "unknown"
+    raw_log = None
+
+    def _execute(direction_name, action):
+        raw_log_local = create_biometric_punch_history(
+            device=device,
+            employee=employee,
+            punch_timestamp=attendance_dt,
+            direction=direction_name,
+            punch_code=punch_code,
+        )
+        _run_biometric_action(
+            raw_log=raw_log_local,
+            request_data=request_data,
+            action=action,
+            direction=direction_name,
+        )
+        reconcile_single_punch_against_attendance(raw_log_local)
+        return raw_log_local
 
     def _toggle_by_open_activity():
-        # Align with mobile behavior: if there's an open activity, close it; otherwise open a new one.
         open_activity = (
             AttendanceActivity.objects.filter(employee_id=employee, clock_out=None)
             .order_by("-in_datetime")
@@ -192,36 +337,34 @@ def process_biometric_punch(*, device, employee, attendance_dt, punch_code=None)
         if open_activity and getattr(open_activity, "in_datetime", None):
             open_in = ensure_aware_datetime(open_activity.in_datetime)
             if open_in and open_in > attendance_dt:
-                # Out-of-order event; treat as IN to avoid negative/invalid duration.
-                clock_in(request_data)
-                return
-            clock_out(request_data)
-            return
-        clock_in(request_data)
+                return _execute("in", clock_in)
+            return _execute("out", clock_out)
+        return _execute("in", clock_in)
 
     if direction == "in":
-        clock_in(request_data)
-        return
+        raw_direction = "in"
+        raw_log = _execute(raw_direction, clock_in)
+        return raw_log
 
     if direction == "out":
-        clock_out(request_data)
-        return
+        raw_direction = "out"
+        raw_log = _execute(raw_direction, clock_out)
+        return raw_log
 
     if direction == "alternate":
-        _toggle_by_open_activity()
-        return
+        return _toggle_by_open_activity()
 
-    # system
     decision = _system_direction_decision(getattr(device, "machine_type", None), punch_code)
     if decision is True:
-        clock_in(request_data)
-        return
+        raw_direction = "in"
+        raw_log = _execute(raw_direction, clock_in)
+        return raw_log
     if decision is False:
-        clock_out(request_data)
-        return
+        raw_direction = "out"
+        raw_log = _execute(raw_direction, clock_out)
+        return raw_log
 
-    # Unknown/missing punch → fallback to alternate
-    _toggle_by_open_activity()
+    return _toggle_by_open_activity()
 
 
 class ZKBioAttendance(Thread):
@@ -289,6 +432,7 @@ class ZKBioAttendance(Thread):
                         user_id=user_id, device_id=device
                     ).first()
                     if not bio_id:
+                        create_biometric_punch_history(device=device, employee=None, punch_timestamp=date_time, direction="unknown", raw_employee_identifier=str(user_id), punch_code=punch_code, reason="Employee Not Matched")
                         continue
 
                     process_biometric_punch(
@@ -385,19 +529,30 @@ class COSECBioAttendanceThread(Thread):
                     continue
 
                 for attendance in attendances:
-                    ref_user_id = attendance["detail-1"]
-                    employee = BiometricEmployees.objects.filter(ref_user_id=ref_user_id, device_id=device).first()
-                    if not employee:
+                    ref_user_id = attendance.get("detail-1")
+                    punch_code = attendance.get("detail-2")
+                    attendance_datetime = _parse_cosec_attendance_datetime(attendance)
+                    if not attendance_datetime:
+                        _create_biometric_issue_log(
+                            device=device,
+                            raw_employee_identifier=ref_user_id,
+                            punch_code=punch_code,
+                            reason="Invalid Payload",
+                            raw_payload=attendance,
+                        )
                         continue
 
-                    date_str = attendance["date"]
-                    time_str = attendance["time"]
-                    attendance_date = datetime.strptime(date_str, "%d/%m/%Y").date()
-                    attendance_time = datetime.strptime(time_str, "%H:%M:%S").time()
-                    attendance_datetime = datetime.combine(
-                        attendance_date, attendance_time
-                    )
-                    punch_code = attendance["detail-2"]
+                    employee = BiometricEmployees.objects.filter(ref_user_id=ref_user_id, device_id=device).first()
+                    if not employee:
+                        _create_biometric_issue_log(
+                            device=device,
+                            raw_employee_identifier=ref_user_id,
+                            punch_code=punch_code,
+                            reason="Employee Not Matched",
+                            punch_timestamp=attendance_datetime,
+                            raw_payload=attendance,
+                        )
+                        continue
 
                     try:
                         process_biometric_punch(
@@ -2338,6 +2493,7 @@ def zk_biometric_attendance_logs(device_or_devices):
         device_id = attendance.device.id
         bio_id = bio_id_map.get((device_id, user_id))
         if not bio_id:
+            create_biometric_punch_history(device=attendance.device, employee=None, punch_timestamp=date_time, direction="unknown", raw_employee_identifier=str(user_id), punch_code=punch_code, reason="Employee Not Matched")
             continue
 
         try:
@@ -2399,16 +2555,29 @@ def anviz_biometric_attendance_logs(device):
     processed_count = 0
 
     for attendance in attendance_records.get("list", []):
-        badge_id = attendance["employee"]["workno"]
-        punch_code = attendance["checktype"]
-
-        date_time_utc = datetime.strptime(
-            attendance["checktime"], "%Y-%m-%dT%H:%M:%S%z"
-        )
-        date_time_obj = date_time_utc.astimezone(django_timezone.get_current_timezone())
+        badge_id = attendance.get("employee", {}).get("workno")
+        punch_code = attendance.get("checktype")
+        date_time_obj = _parse_anviz_attendance_datetime(attendance)
+        if not date_time_obj:
+            _create_biometric_issue_log(
+                device=device,
+                raw_employee_identifier=badge_id,
+                punch_code=punch_code,
+                reason="Invalid Payload",
+                raw_payload=attendance,
+            )
+            continue
 
         employee = Employee.objects.filter(badge_id=badge_id).first()
         if not employee:
+            _create_biometric_issue_log(
+                device=device,
+                raw_employee_identifier=badge_id,
+                punch_code=punch_code,
+                reason="Employee Not Matched",
+                punch_timestamp=date_time_obj,
+                raw_payload=attendance,
+            )
             continue
 
         try:
@@ -2464,17 +2633,30 @@ def cosec_biometric_attendance_logs(device):
         return
 
     for attendance in attendances:
-        ref_user_id = attendance["detail-1"]
-        employee = BiometricEmployees.objects.filter(ref_user_id=ref_user_id, device_id=device).first()
-        if not employee:
+        ref_user_id = attendance.get("detail-1")
+        punch_code = attendance.get("detail-2")
+        attendance_datetime = _parse_cosec_attendance_datetime(attendance)
+        if not attendance_datetime:
+            _create_biometric_issue_log(
+                device=device,
+                raw_employee_identifier=ref_user_id,
+                punch_code=punch_code,
+                reason="Invalid Payload",
+                raw_payload=attendance,
+            )
             continue
 
-        date_str = attendance["date"]
-        time_str = attendance["time"]
-        attendance_date = datetime.strptime(date_str, "%d/%m/%Y").date()
-        attendance_time = datetime.strptime(time_str, "%H:%M:%S").time()
-        attendance_datetime = datetime.combine(attendance_date, attendance_time)
-        punch_code = attendance["detail-2"]
+        employee = BiometricEmployees.objects.filter(ref_user_id=ref_user_id, device_id=device).first()
+        if not employee:
+            _create_biometric_issue_log(
+                device=device,
+                raw_employee_identifier=ref_user_id,
+                punch_code=punch_code,
+                reason="Employee Not Matched",
+                punch_timestamp=attendance_datetime,
+                raw_payload=attendance,
+            )
+            continue
 
         try:
             process_biometric_punch(
@@ -2545,15 +2727,33 @@ def dahua_biometric_attendance_logs(device):
             if not user_id:
                 continue
 
+            attendance_datetime = _parse_dahua_attendance_datetime(log)
+            if not attendance_datetime:
+                _create_biometric_issue_log(
+                    device=device,
+                    raw_employee_identifier=user_id,
+                    punch_code=None,
+                    reason="Invalid Payload",
+                    raw_payload=log,
+                )
+                continue
+
+            user_tz = pytz.timezone(TIME_ZONE)
+            attendance_datetime = attendance_datetime.astimezone(user_tz)
+
             employee = BiometricEmployees.objects.filter(
                 user_id=user_id, device_id=device
             ).first()
             if not employee:
+                _create_biometric_issue_log(
+                    device=device,
+                    raw_employee_identifier=user_id,
+                    punch_code=None,
+                    reason="Employee Not Matched",
+                    punch_timestamp=attendance_datetime,
+                    raw_payload=log,
+                )
                 continue
-
-            attendance_datetime = log.get("create_time")
-            user_tz = pytz.timezone(TIME_ZONE)
-            attendance_datetime = attendance_datetime.astimezone(user_tz)
 
             try:
                 process_biometric_punch(
@@ -2618,11 +2818,28 @@ def etimeoffice_biometric_attendance_logs(device):
 
     for log in reversed(punch_data):
         user_id = log.get("Empcode")
+        attendance_datetime = _parse_etimeoffice_attendance_datetime(log, user_tz)
+        if not attendance_datetime:
+            _create_biometric_issue_log(
+                device=device,
+                raw_employee_identifier=user_id,
+                punch_code=None,
+                reason="Invalid Payload",
+                raw_payload=log,
+            )
+            continue
         if not user_id or user_id not in employee_map:
+            _create_biometric_issue_log(
+                device=device,
+                raw_employee_identifier=user_id,
+                punch_code=None,
+                reason="Employee Not Matched",
+                punch_timestamp=attendance_datetime,
+                raw_payload=log,
+            )
             continue
 
         employee = employee_map[user_id]
-        attendance_datetime = log["PunchDate"].astimezone(user_tz)
 
         request_data = Request(
             user=employee.employee_id.employee_user_id,
