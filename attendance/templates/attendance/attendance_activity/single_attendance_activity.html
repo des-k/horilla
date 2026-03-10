@@ -82,7 +82,7 @@
                 </div>
                 <div class="oh-timeoff-modal__stat" style="margin-left: 20px">
                     <span class="oh-timeoff-modal__stat-title">{% trans "Check Out Date" %}</span>
-                    <span class="oh-timeoff-modal__stat-count dateformat_changer">{{ activity.clock_out_date|default_if_none:"-"|default:"-" }}</span>
+                    <span class="oh-timeoff-modal__stat-count dateformat_changer">{% if activity.clock_out_date %}<span class="dateformat_changer">{{ activity.clock_out_date }}</span>{% else %}-{% endif %}</span>
                 </div>
             </div>
 
