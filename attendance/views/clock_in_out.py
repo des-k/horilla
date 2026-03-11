@@ -56,7 +56,11 @@ from attendance.services.attendance_window_rules import (
 from attendance.services.final_session_resolution import (
     should_accept_raw_session,
 )
-from attendance.services.punching_history import assign_raw_punch_to_attendance
+from attendance.services.image_compression import _extract_error_message
+from attendance.services.punching_history import (
+    assign_raw_punch_to_attendance,
+    canonical_punch_image_reference,
+)
 from base.context_processors import (
     enable_late_come_early_out_tracking,
     timerunner_enabled,
@@ -807,11 +811,15 @@ def clock_in_attendance_and_activity(
     )
 
     if accept_in:
+        canonical_clock_in_image = canonical_punch_image_reference(
+            punch=raw_punch_history,
+            uploaded=clock_in_image,
+        )
         attendance.attendance_clock_in_date = in_date
         attendance.attendance_clock_in = in_time
         att_updates.extend(["attendance_clock_in_date", "attendance_clock_in"])
-        if clock_in_image is not None:
-            attendance.attendance_clock_in_image = clock_in_image
+        if canonical_clock_in_image is not None:
+            attendance.attendance_clock_in_image = canonical_clock_in_image
             att_updates.append("attendance_clock_in_image")
         if clock_in_mode and _has_model_field(Attendance, "attendance_clock_in_mode"):
             attendance.attendance_clock_in_mode = clock_in_mode
@@ -842,8 +850,8 @@ def clock_in_attendance_and_activity(
         activity.clock_in = in_time
         activity.in_datetime = in_datetime
         act_updates = ["clock_in_date", "clock_in", "in_datetime"]
-        if clock_in_image is not None:
-            activity.clock_in_image = clock_in_image
+        if canonical_clock_in_image is not None:
+            activity.clock_in_image = canonical_clock_in_image
             act_updates.append("clock_in_image")
         if clock_in_mode and _has_model_field(AttendanceActivity, "clock_in_mode"):
             activity.clock_in_mode = clock_in_mode
@@ -991,14 +999,19 @@ def clock_out_attendance_and_activity(
         attendance.attendance_day = day
         updates.append("attendance_day")
 
+    canonical_clock_out_image = canonical_punch_image_reference(
+        punch=raw_punch_history,
+        uploaded=clock_out_image,
+    )
+
     attendance.attendance_clock_out_date = out_date
     attendance.attendance_clock_out = out_time
     updates.extend(["attendance_clock_out_date", "attendance_clock_out"])
     if raw_punch_history is not None and _has_model_field(Attendance, "attendance_clock_out_punch"):
         attendance.attendance_clock_out_punch = raw_punch_history
         updates.append("attendance_clock_out_punch")
-    if clock_out_image is not None:
-        attendance.attendance_clock_out_image = clock_out_image
+    if canonical_clock_out_image is not None:
+        attendance.attendance_clock_out_image = canonical_clock_out_image
         updates.append("attendance_clock_out_image")
     if clock_out_mode and _has_model_field(Attendance, "attendance_clock_out_mode"):
         attendance.attendance_clock_out_mode = clock_out_mode
@@ -1029,8 +1042,8 @@ def clock_out_attendance_and_activity(
     activity.clock_out = out_time
     activity.out_datetime = out_datetime
     act_updates = ["clock_out_date", "clock_out", "out_datetime"]
-    if clock_out_image is not None:
-        activity.clock_out_image = clock_out_image
+    if canonical_clock_out_image is not None:
+        activity.clock_out_image = canonical_clock_out_image
         act_updates.append("clock_out_image")
     if clock_out_mode and _has_model_field(AttendanceActivity, "clock_out_mode"):
         activity.clock_out_mode = clock_out_mode
@@ -1180,22 +1193,27 @@ def clock_in(request):
 
     clock_in_image = getattr(request, "image", None)
 
-    clock_in_attendance_and_activity(
-        employee=employee,
-        date_today=date_today,
-        attendance_date=attendance_date,
-        day=day,
-        now_hhmm=now_hhmm,
-        shift=shift,
-        minimum_hour=minimum_hour,
-        start_time_sec=start_time_sec,
-        end_time_sec=end_time_sec,
-        in_datetime=datetime_now,
-        clock_in_image=clock_in_image,
-        clock_in_mode=getattr(AttendanceWorkMode, "WFO", None) if AttendanceWorkMode else "wfo",
-        clock_in_channel="biometric",
-        raw_punch_history=getattr(request, "raw_punch_history", None),
-    )
+    try:
+        clock_in_attendance_and_activity(
+            employee=employee,
+            date_today=date_today,
+            attendance_date=attendance_date,
+            day=day,
+            now_hhmm=now_hhmm,
+            shift=shift,
+            minimum_hour=minimum_hour,
+            start_time_sec=start_time_sec,
+            end_time_sec=end_time_sec,
+            in_datetime=datetime_now,
+            clock_in_image=clock_in_image,
+            clock_in_mode=getattr(AttendanceWorkMode, "WFO", None) if AttendanceWorkMode else "wfo",
+            clock_in_channel="biometric",
+            raw_punch_history=getattr(request, "raw_punch_history", None),
+        )
+    except ValidationError as error:
+        message = _extract_error_message(error)
+        messages.error(request, message)
+        return HttpResponse(message, status=400)
 
     # UI response
     script = ""
@@ -1299,19 +1317,24 @@ def clock_out(request):
 
     clock_out_image = getattr(request, "image", None)
 
-    attendance, missing_check_in = clock_out_attendance_and_activity(
-        employee=employee,
-        attendance_date=attendance_date,
-        day=day,
-        shift=shift,
-        minimum_hour=minimum_hour,
-        out_datetime=datetime_now,
-        clock_out_image=clock_out_image,
-        clock_out_mode=getattr(AttendanceWorkMode, "WFO", None) if AttendanceWorkMode else "wfo",
-        allow_update_clock_out=True,
-        clock_out_channel="biometric",
-        raw_punch_history=getattr(request, "raw_punch_history", None),
-    )
+    try:
+        attendance, missing_check_in = clock_out_attendance_and_activity(
+            employee=employee,
+            attendance_date=attendance_date,
+            day=day,
+            shift=shift,
+            minimum_hour=minimum_hour,
+            out_datetime=datetime_now,
+            clock_out_image=clock_out_image,
+            clock_out_mode=getattr(AttendanceWorkMode, "WFO", None) if AttendanceWorkMode else "wfo",
+            allow_update_clock_out=True,
+            clock_out_channel="biometric",
+            raw_punch_history=getattr(request, "raw_punch_history", None),
+        )
+    except ValidationError as error:
+        message = _extract_error_message(error)
+        messages.error(request, message)
+        return HttpResponse(message, status=400)
 
     if not attendance:
         messages.error(request, _("Unable to record check-out. Please contact admin."))
