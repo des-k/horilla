@@ -46,6 +46,7 @@ from attendance.views.clock_in_out import clock_out
 import attendance.views.clock_in_out as cio  # Access underscore helpers excluded by import *
 
 from attendance.services.attachment_validation import validate_uploaded_files
+from attendance.services.image_compression import _extract_error_message
 from attendance.services.work_type_request_rules import (
     effective_work_type,
     punch_allowed,
@@ -527,20 +528,26 @@ class ClockInAPIView(APIView):
         image = request.FILES.get("image")
         location = _parse_location_payload(request)
         employee, work_info = employee_exists(request)
-        punch_log = create_mobile_punch_history(
-            request=request,
-            employee=employee,
-            attendance_date=None,
-            punch_timestamp=dt_now,
-            direction="in",
-            image=image,
-            location=location,
-            reason=None,
-        )
+        punch_log = None
 
         def _reject(message, http_status):
-            update_punch_history(punch_log, accepted=False, reason=humanize_mobile_error(message, direction="in"))
+            if punch_log is not None:
+                update_punch_history(punch_log, accepted=False, reason=humanize_mobile_error(message, direction="in"))
             return Response({"error": message}, status=http_status)
+
+        try:
+            punch_log = create_mobile_punch_history(
+                request=request,
+                employee=employee,
+                attendance_date=None,
+                punch_timestamp=dt_now,
+                direction="in",
+                image=image,
+                location=location,
+                reason=None,
+            )
+        except ValidationError as error:
+            return Response({"error": _extract_error_message(error)}, status=status.HTTP_400_BAD_REQUEST)
 
         if not employee or work_info is None:
             return _reject("Missing work information or employee details.", status.HTTP_400_BAD_REQUEST)
@@ -606,25 +613,28 @@ class ClockInAPIView(APIView):
             if not location:
                 return _reject("Location is required.", status.HTTP_400_BAD_REQUEST)
 
-        clock_in_attendance_and_activity(
-            employee=employee,
-            date_today=date_today,
-            attendance_date=attendance_date,
-            day=day,
-            now_hhmm=now_hhmm,
-            shift=shift,
-            minimum_hour=minimum_hour,
-            start_time_sec=start_time_sec,
-            end_time_sec=end_time_sec,
-            in_datetime=dt_now,
-            clock_in_image=image,
-            clock_in_mode=in_mode,
-            clock_in_location=location,
-            work_mode_request=in_req,
-            is_presensi_only=(in_mode == AttendanceWorkMode.ON_DUTY),
-            clock_in_channel="mobile",
-            raw_punch_history=punch_log,
-        )
+        try:
+            clock_in_attendance_and_activity(
+                employee=employee,
+                date_today=date_today,
+                attendance_date=attendance_date,
+                day=day,
+                now_hhmm=now_hhmm,
+                shift=shift,
+                minimum_hour=minimum_hour,
+                start_time_sec=start_time_sec,
+                end_time_sec=end_time_sec,
+                in_datetime=dt_now,
+                clock_in_image=image,
+                clock_in_mode=in_mode,
+                clock_in_location=location,
+                work_mode_request=in_req,
+                is_presensi_only=(in_mode == AttendanceWorkMode.ON_DUTY),
+                clock_in_channel="mobile",
+                raw_punch_history=punch_log,
+            )
+        except ValidationError as error:
+            return _reject(_extract_error_message(error), status.HTTP_400_BAD_REQUEST)
 
         out_mode, out_source, out_req = _resolve_effective_work_type(employee, attendance_date, "out")
         attendance = Attendance.objects.filter(employee_id=employee, attendance_date=attendance_date).first()
@@ -671,26 +681,32 @@ class ClockOutAPIView(APIView):
         image = request.FILES.get("image")
         location = _parse_location_payload(request)
         employee, work_info = employee_exists(request)
-        punch_log = create_mobile_punch_history(
-            request=request,
-            employee=employee,
-            attendance_date=None,
-            punch_timestamp=dt_now,
-            direction="out",
-            image=image,
-            location=location,
-            reason=None,
-        )
+        punch_log = None
 
         def _reject(message, http_status, attendance=None, attendance_date=None):
-            update_punch_history(
-                punch_log,
-                accepted=False,
-                reason=humanize_mobile_error(message, direction="out"),
-                attendance=attendance,
-                attendance_date=attendance_date,
-            )
+            if punch_log is not None:
+                update_punch_history(
+                    punch_log,
+                    accepted=False,
+                    reason=humanize_mobile_error(message, direction="out"),
+                    attendance=attendance,
+                    attendance_date=attendance_date,
+                )
             return Response({"error": message}, status=http_status)
+
+        try:
+            punch_log = create_mobile_punch_history(
+                request=request,
+                employee=employee,
+                attendance_date=None,
+                punch_timestamp=dt_now,
+                direction="out",
+                image=image,
+                location=location,
+                reason=None,
+            )
+        except ValidationError as error:
+            return Response({"error": _extract_error_message(error)}, status=status.HTTP_400_BAD_REQUEST)
 
         if not employee or work_info is None:
             return _reject("Missing work information or employee details.", status.HTTP_400_BAD_REQUEST)
@@ -763,6 +779,8 @@ class ClockOutAPIView(APIView):
                 clock_out_channel="mobile",
                 raw_punch_history=punch_log,
             )
+        except ValidationError as error:
+            return _reject(_extract_error_message(error), status.HTTP_400_BAD_REQUEST, attendance=existing_att, attendance_date=attendance_date)
         except Exception as error:
             logger.exception("clock_out_attendance_and_activity failed")
             return _reject(str(error), status.HTTP_400_BAD_REQUEST, attendance=existing_att, attendance_date=attendance_date)
