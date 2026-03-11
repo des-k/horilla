@@ -1,9 +1,16 @@
 {% extends 'index.html' %}
 {% load i18n %}
 {% block content %}
-<div class="oh-wrapper">
+<div class="oh-wrapper punching-history-page">
   {% include 'attendance/punching_history/nav.html' %}
   {% include 'attendance/punching_history/punching_history_filters.html' %}
-  <div class="oh-alert oh-alert--info">{% trans "No punching history found." %}</div>
+  <div class="oh-card">
+    <div class="oh-card__body">
+      <div class="ph-empty">
+        <h5 class="mb-1">{% trans "No punching history found" %}</h5>
+        <p>{% trans "Try changing the employee or date range filter to see raw punch events." %}</p>
+      </div>
+    </div>
+  </div>
 </div>
 {% endblock %}
