@@ -27,6 +27,7 @@ from attendance.methods.utils import (
     validate_time_format,
     validate_time_in_minutes,
 )
+from attendance.services.image_compression import compress_model_image_field
 from base.horilla_company_manager import HorillaCompanyManager
 from base.methods import is_company_leave, is_holiday
 from base.models import Company, EmployeeShift, EmployeeShiftDay, WorkType
@@ -234,6 +235,11 @@ class AttendanceActivity(HorillaModel):
         time_difference = clock_out_datetime - clock_in_datetime
         return max(0, time_difference.total_seconds())
 
+    def save(self, *args, **kwargs):
+        compress_model_image_field(self, "clock_in_image")
+        compress_model_image_field(self, "clock_out_image")
+        super().save(*args, **kwargs)
+
     def __str__(self):
         return (
             f"{self.employee_id} - {self.attendance_date} - "
@@ -314,6 +320,10 @@ class AttendancePunchingHistory(HorillaModel):
         if lat is None or lng is None:
             return None
         return f"https://www.google.com/maps?q={lat},{lng}"
+
+    def save(self, *args, **kwargs):
+        compress_model_image_field(self, "photo")
+        super().save(*args, **kwargs)
 
     def __str__(self):
         employee = self.employee_id or self.raw_employee_identifier or "Unknown"
@@ -882,6 +892,8 @@ class Attendance(HorillaModel):
                 self.attendance_overtime_approve = True
 
     def save(self, *args, **kwargs):
+        compress_model_image_field(self, "attendance_clock_in_image")
+        compress_model_image_field(self, "attendance_clock_out_image")
         if self.is_presensi_only:
             # Presence-only attendances (e.g., On Duty) must not affect hour calculations.
             self.attendance_worked_hour = "00:00"
