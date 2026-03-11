@@ -33,7 +33,7 @@ from django import forms
 from django.core.paginator import Paginator
 from django.core.validators import validate_ipv46_address
 from django.db import transaction
-from django.db.models import ProtectedError
+from django.db.models import ProtectedError, Case, When, Value, IntegerField
 from django.forms import ValidationError
 from django.http import (
     HttpResponse,
@@ -1155,36 +1155,97 @@ def _scoped_punching_history_queryset(request):
     scoped_qs = filtersubordinates(request, queryset, "attendance.view_attendancepunchinghistory")
     return (scoped_qs | self_qs).distinct()
 
+def _get_punching_history_employee_scope(request):
+    """
+    Returns:
+    - employee_options: queryset employee yang boleh muncul di filter
+    - show_employee_filter: apakah dropdown employee ditampilkan
+    - can_view_all: apakah user punya akses global semua employee
+    """
+    base_qs = Employee.objects.all()
+    employee = getattr(request.user, "employee_get", None)
 
+    can_view_all = request.user.is_superuser or request.user.has_perm(
+        "attendance.view_attendancepunchinghistory"
+    )
+
+    if can_view_all:
+        return (
+            base_qs.order_by("employee_first_name", "employee_last_name"),
+            True,
+            True,
+        )
+
+    if not employee:
+        return Employee.objects.none(), False, False
+
+    subordinate_ids = list(
+        filtersubordinatesemployeemodel(
+            request,
+            Employee.objects.all(),
+            "attendance.view_attendancepunchinghistory",
+        ).values_list("id", flat=True)
+    )
+
+    subordinate_ids = [emp_id for emp_id in subordinate_ids if emp_id != employee.id]
+    scoped_ids = [employee.id] + subordinate_ids
+
+    employee_options = (
+        Employee.objects.filter(id__in=scoped_ids)
+        .annotate(
+            _self_first=Case(
+                When(id=employee.id, then=Value(0)),
+                default=Value(1),
+                output_field=IntegerField(),
+            )
+        )
+        .order_by("_self_first", "employee_first_name", "employee_last_name")
+    )
+
+    show_employee_filter = len(subordinate_ids) > 0
+    return employee_options, show_employee_filter, False
+        
 def _build_punching_history_filter_data(request):
     filter_data = request.GET.copy()
     today = django_timezone.localdate().isoformat()
+
     if not filter_data.get("punch_date_from"):
         filter_data["punch_date_from"] = today
     if not filter_data.get("punch_date_till"):
         filter_data["punch_date_till"] = today
 
-    can_view_all = request.user.is_superuser or request.user.has_perm(
-        "attendance.view_attendancepunchinghistory"
-    )
     employee = getattr(request.user, "employee_get", None)
-    if employee and not can_view_all and not filter_data.get("employee_id"):
-        filter_data["employee_id"] = str(employee.id)
-    return filter_data
+    employee_options, show_employee_filter, can_view_all = _get_punching_history_employee_scope(
+        request
+    )
 
+    if (
+        employee
+        and not can_view_all
+        and not show_employee_filter
+        and not filter_data.get("employee_id")
+    ):
+        filter_data["employee_id"] = str(employee.id)
+
+    return filter_data
 
 @login_required
 def attendance_punching_history_view(request):
     if not _can_access_punching_history(request):
         return _punching_history_forbidden_response(request)
+
+    employee_options, show_employee_filter, _ = _get_punching_history_employee_scope(request)
+
     filter_data = _build_punching_history_filter_data(request)
     request_copy = filter_data.copy()
     request_copy.pop("page", None)
     previous_data = request_copy.urlencode()
+
     queryset = _scoped_punching_history_queryset(request).order_by("-punch_timestamp", "-id")
     filter_obj = AttendancePunchingHistoryFilter(filter_data, queryset)
+    filter_obj.form.fields["employee_id"].queryset = employee_options
+
     data = filter_obj.qs.order_by("-punch_timestamp", "-id")
-    punch_ids = json.dumps([instance.id for instance in paginator_qry(data, None)])
     page_obj = paginator_qry(data, request.GET.get("page"))
 
     return render(
@@ -1196,14 +1257,12 @@ def attendance_punching_history_view(request):
             "f": filter_obj,
             "gp_fields": AttendancePunchingHistoryReGroup.fields,
             "punch_ids": json.dumps([instance.id for instance in page_obj]),
-            "show_employee_filter": request.user.is_superuser
-            or request.user.has_perm("attendance.view_attendancepunchinghistory"),
+            "show_employee_filter": show_employee_filter,
             "punch_filter_data": filter_data,
             "self_employee": getattr(request.user, "employee_get", None),
-            "employee_options": filter_obj.form.fields["employee_id"].queryset,
+            "employee_options": employee_options,
         },
     )
-
 
 @login_required
 def punching_history_single_view(request, obj_id):
