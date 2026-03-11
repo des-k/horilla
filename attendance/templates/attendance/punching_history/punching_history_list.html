@@ -1,36 +1,78 @@
 {% load i18n %}
 {% if data %}
-<div class="oh-sticky-table">
-  <div class="oh-sticky-table__table oh-table--sortable">
-    <div class="oh-sticky-table__thead">
-      <div class="oh-sticky-table__tr">
-        <div class="oh-sticky-table__th">{% trans "Employee" %}</div>
-        <div class="oh-sticky-table__th">{% trans "Punch Date" %}</div>
-        <div class="oh-sticky-table__th">{% trans "Punch Time" %}</div>
-        <div class="oh-sticky-table__th">{% trans "Source" %}</div>
-        <div class="oh-sticky-table__th">{% trans "Device Info" %}</div>
-        <div class="oh-sticky-table__th">{% trans "Photo" %}</div>
-        <div class="oh-sticky-table__th">{% trans "Location" %}</div>
-        <div class="oh-sticky-table__th">{% trans "Accepted to Attendance" %}</div>
-        <div class="oh-sticky-table__th">{% trans "Reason" %}</div>
+<div class="oh-card">
+  <div class="oh-card__body">
+    <div class="ph-table-meta">
+      <div>
+        <h5 class="mb-1">{% trans "Raw Punch Events" %}</h5>
+        <p class="ph-table-subtitle">
+          {{ data.paginator.count }} {% trans "record(s) found for the selected filter." %}
+        </p>
+      </div>
+      <span class="oh-badge oh-badge--secondary oh-badge--small oh-badge--round">
+        {% trans "Newest first" %}
+      </span>
+    </div>
+
+    <div class="oh-sticky-table ph-table">
+      <div class="oh-sticky-table__table oh-table--sortable">
+        <div class="oh-sticky-table__thead">
+          <div class="oh-sticky-table__tr">
+            <div class="oh-sticky-table__th">{% trans "Employee" %}</div>
+            <div class="oh-sticky-table__th">{% trans "Punch Date" %}</div>
+            <div class="oh-sticky-table__th">{% trans "Punch Time" %}</div>
+            <div class="oh-sticky-table__th">{% trans "Source" %}</div>
+            <div class="oh-sticky-table__th">{% trans "Device Info" %}</div>
+            <div class="oh-sticky-table__th">{% trans "Photo" %}</div>
+            <div class="oh-sticky-table__th">{% trans "Location" %}</div>
+            <div class="oh-sticky-table__th">{% trans "Accepted to Attendance" %}</div>
+            <div class="oh-sticky-table__th">{% trans "Reason" %}</div>
+          </div>
+        </div>
+        <div class="oh-sticky-table__tbody">
+          {% for punch in data %}
+          <div class="oh-sticky-table__tr">
+            <div class="oh-sticky-table__td ph-wrap"><strong>{{ punch.employee_display }}</strong></div>
+            <div class="oh-sticky-table__td ph-nowrap">{{ punch.punch_timestamp|date:'Y-m-d' }}</div>
+            <div class="oh-sticky-table__td ph-nowrap">{{ punch.punch_timestamp|date:'H:i:s' }}</div>
+            <div class="oh-sticky-table__td ph-wrap">
+              <span class="oh-badge oh-badge--secondary oh-badge--small oh-badge--round">
+                {{ punch.get_source_display|default:'-' }}
+              </span>
+            </div>
+            <div class="oh-sticky-table__td ph-wrap">{{ punch.device_info|default:'-' }}</div>
+            <div class="oh-sticky-table__td ph-nowrap">
+              {% if punch.photo %}
+                <a href="{{ punch.photo.url }}" target="_blank" rel="noopener noreferrer">{% trans "View" %}</a>
+              {% else %}
+                -
+              {% endif %}
+            </div>
+            <div class="oh-sticky-table__td ph-wrap">
+              {% if punch.google_maps_url %}
+                <a href="{{ punch.google_maps_url }}" target="_blank" rel="noopener noreferrer">{{ punch.location_display }}</a>
+                <a href="{{ punch.google_maps_url }}" target="_blank" rel="noopener noreferrer" class="ph-sub-link">{% trans "Open map" %}</a>
+              {% else %}
+                {{ punch.location_display }}
+              {% endif %}
+            </div>
+            <div class="oh-sticky-table__td ph-nowrap">
+              {% if punch.accepted_to_attendance %}
+                <span class="oh-badge oh-badge--success oh-badge--small oh-badge--round">{% trans "Yes" %}</span>
+              {% else %}
+                <span class="oh-badge oh-badge--danger oh-badge--small oh-badge--round">{% trans "No" %}</span>
+              {% endif %}
+            </div>
+            <div class="oh-sticky-table__td ph-wrap">{{ punch.reason|default:'-' }}</div>
+          </div>
+          {% endfor %}
+        </div>
       </div>
     </div>
-    <div class="oh-sticky-table__tbody">
-      {% for punch in data %}
-      <div class="oh-sticky-table__tr">
-        <div class="oh-sticky-table__td">{{ punch.employee_display }}</div>
-        <div class="oh-sticky-table__td">{{ punch.punch_timestamp|date:'Y-m-d' }}</div>
-        <div class="oh-sticky-table__td">{{ punch.punch_timestamp|date:'H:i:s' }}</div>
-        <div class="oh-sticky-table__td">{{ punch.get_source_display|default:'-' }}</div>
-        <div class="oh-sticky-table__td">{{ punch.device_info|default:'-' }}</div>
-        <div class="oh-sticky-table__td">{% if punch.photo %}<a href="{{ punch.photo.url }}" target="_blank">{% trans "View" %}</a>{% else %}-{% endif %}</div>
-        <div class="oh-sticky-table__td">{{ punch.location_display }}</div>
-        <div class="oh-sticky-table__td">{% if punch.accepted_to_attendance %}{% trans "Yes" %}{% else %}{% trans "No" %}{% endif %}</div>
-        <div class="oh-sticky-table__td">{{ punch.reason|default:'-' }}</div>
-      </div>
-      {% endfor %}
+
+    <div class="oh-pagination mt-3">
+      {% include 'horilla_paginations.html' with page_obj=data %}
     </div>
   </div>
 </div>
-<div class="oh-pagination">{% include 'horilla_paginations.html' with page_obj=data %}</div>
 {% endif %}
