@@ -1,20 +1,43 @@
 {% load i18n %}
 <form method="get" class="mb-3">
-  <div class="row">
-    <div class="col-md-2"><input type="text" name="search" class="oh-input w-100" placeholder="{% trans 'Search' %}" value="{{ request.GET.search|default:'' }}"></div>
-    <div class="col-md-2"><input type="date" name="punch_date_from" class="oh-input w-100" value="{{ request.GET.punch_date_from|default:'' }}"></div>
-    <div class="col-md-2"><input type="date" name="punch_date_till" class="oh-input w-100" value="{{ request.GET.punch_date_till|default:'' }}"></div>
-    <div class="col-md-2">{{ f.form.source }}</div>
-    <div class="col-md-2">{{ f.form.punch_direction }}</div>
-    <div class="col-md-2">{{ f.form.accepted_to_attendance }}</div>
-  </div>
-  <div class="row mt-2">
-    {% if show_employee_filter %}<div class="col-md-4">{{ f.form.employee_id }}</div>{% endif %}
-    <div class="col-md-4"><input type="text" name="reason" class="oh-input w-100" placeholder="{% trans 'Reason' %}" value="{{ request.GET.reason|default:'' }}"></div>
-    <div class="col-md-4"><input type="text" name="device_info" class="oh-input w-100" placeholder="{% trans 'Device Info' %}" value="{{ request.GET.device_info|default:'' }}"></div>
-  </div>
-  <div class="mt-3 d-flex gap-2">
-    <button type="submit" class="oh-btn oh-btn--secondary oh-btn--small">{% trans "Filter" %}</button>
-    <a href="{% url 'attendance-punching-history-view' %}" class="oh-btn oh-btn--light oh-btn--small">{% trans "Reset" %}</a>
+  <div class="oh-card">
+    <div class="oh-card__body">
+      <div class="ph-filter-grid">
+        <div class="ph-field">
+          <label class="oh-input__label">{% trans "Employee" %}</label>
+          {% if show_employee_filter %}
+            {{ f.form.employee_id }}
+          {% else %}
+            <input type="text" class="oh-input w-100" value="{{ self_employee }}" readonly>
+          {% endif %}
+        </div>
+        <div class="ph-field">
+          <label class="oh-input__label">{% trans "Start Date" %}</label>
+          <input
+            type="date"
+            name="punch_date_from"
+            class="oh-input w-100"
+            value="{{ punch_filter_data.punch_date_from|default:'' }}"
+          >
+        </div>
+        <div class="ph-field">
+          <label class="oh-input__label">{% trans "End Date" %}</label>
+          <input
+            type="date"
+            name="punch_date_till"
+            class="oh-input w-100"
+            value="{{ punch_filter_data.punch_date_till|default:'' }}"
+          >
+        </div>
+        <div class="ph-filter-actions">
+          <button type="submit" class="oh-btn oh-btn--secondary">
+            {% trans "Apply" %}
+          </button>
+          <a href="{% url 'attendance-punching-history-view' %}" class="oh-btn oh-btn--light">
+            {% trans "Reset" %}
+          </a>
+        </div>
+      </div>
+    </div>
   </div>
 </form>
