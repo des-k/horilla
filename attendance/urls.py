@@ -345,6 +345,11 @@ urlpatterns = [
         name="cancel-validate-attendance-request",
     ),
     path(
+        "revoke-validate-attendance-request/<int:attendance_id>/",
+        attendance.views.requests.revoke_validate_attendance_request,
+        name="revoke-validate-attendance-request",
+    ),
+    path(
         "reject-validate-attendance-request/<int:attendance_id>/",
         attendance.views.requests.reject_validate_attendance_request,
         name="reject-validate-attendance-request",
