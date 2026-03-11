@@ -1200,6 +1200,7 @@ def attendance_punching_history_view(request):
             or request.user.has_perm("attendance.view_attendancepunchinghistory"),
             "punch_filter_data": filter_data,
             "self_employee": getattr(request.user, "employee_get", None),
+            "employee_options": filter_obj.form.fields["employee_id"].queryset,
         },
     )
 
