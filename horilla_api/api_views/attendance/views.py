@@ -3307,23 +3307,35 @@ class AttendancePunchingHistoryAPIView(APIView):
             start_date, end_date = end_date, start_date
 
         employee_options, show_employee_filter, default_employee_id = self._employee_scope(request)
-        allowed_employee_ids = {item["id"] for item in employee_options}
+        allow_all_employees = show_employee_filter
+        if allow_all_employees:
+            employee_options = [{"id": "all", "name": "All Employee"}] + employee_options
 
-        selected_employee_id = request.GET.get("employee_id")
-        try:
-            selected_employee_id = int(selected_employee_id) if selected_employee_id not in (None, "") else None
-        except Exception:
-            selected_employee_id = None
+        allowed_employee_ids = {str(item["id"]) for item in employee_options if item.get("id") is not None}
 
-        if selected_employee_id not in allowed_employee_ids:
-            selected_employee_id = default_employee_id if default_employee_id in allowed_employee_ids else None
+        raw_selected_employee_id = request.GET.get("employee_id")
+        if raw_selected_employee_id is None or raw_selected_employee_id == "":
+            selected_employee_id = default_employee_id if default_employee_id is not None else None
+        else:
+            raw_selected_employee_id = str(raw_selected_employee_id).strip().lower()
+            if raw_selected_employee_id in {"all", "0"} and allow_all_employees:
+                selected_employee_id = "all"
+            else:
+                try:
+                    candidate_employee_id = int(raw_selected_employee_id)
+                except Exception:
+                    candidate_employee_id = None
+                selected_employee_id = candidate_employee_id if candidate_employee_id is not None else None
+
+        if selected_employee_id is not None and str(selected_employee_id) not in allowed_employee_ids:
+            selected_employee_id = default_employee_id if default_employee_id is not None else None
 
         queryset = self.get_queryset(request).filter(
             punch_timestamp__date__gte=start_date,
             punch_timestamp__date__lte=end_date,
         )
 
-        if selected_employee_id is not None:
+        if selected_employee_id not in (None, "all"):
             queryset = queryset.filter(employee_id_id=selected_employee_id)
 
         source = (request.GET.get("source") or "").strip().lower()
@@ -3346,6 +3358,7 @@ class AttendancePunchingHistoryAPIView(APIView):
         response.data["selected_employee_id"] = selected_employee_id
         response.data["show_employee_filter"] = show_employee_filter
         response.data["employee_options"] = employee_options
+        response.data["allow_all_employees"] = allow_all_employees
         return response
 
 
