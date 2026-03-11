@@ -1,3 +1,4 @@
+from django.utils import timezone as dj_timezone
 from rest_framework import serializers
 
 from attendance.models import *
@@ -534,3 +535,105 @@ class UserAttendanceDetailedSerializer(serializers.ModelSerializer):
     class Meta:
         model = Attendance
         fields = "__all__"
+
+class AttendancePunchingHistorySerializer(serializers.ModelSerializer):
+    punch_date = serializers.SerializerMethodField()
+    punch_time = serializers.SerializerMethodField()
+    source = serializers.SerializerMethodField()
+    device_info = serializers.SerializerMethodField()
+    photo_url = serializers.SerializerMethodField()
+    latitude = serializers.SerializerMethodField()
+    longitude = serializers.SerializerMethodField()
+    location_display = serializers.SerializerMethodField()
+    google_maps_url = serializers.SerializerMethodField()
+    reason = serializers.SerializerMethodField()
+    raw_timestamp = serializers.SerializerMethodField()
+
+    class Meta:
+        model = AttendancePunchingHistory
+        fields = [
+            "id",
+            "punch_date",
+            "punch_time",
+            "source",
+            "device_info",
+            "photo_url",
+            "latitude",
+            "longitude",
+            "location_display",
+            "google_maps_url",
+            "accepted_to_attendance",
+            "reason",
+            "raw_timestamp",
+        ]
+
+    def _localized_timestamp(self, obj):
+        try:
+            return dj_timezone.localtime(obj.punch_timestamp)
+        except Exception:
+            return obj.punch_timestamp
+
+    def _location_value(self, obj, *keys):
+        location = getattr(obj, "location", None)
+        if not isinstance(location, dict):
+            return None
+        for key in keys:
+            if key in location and location.get(key) is not None:
+                return location.get(key)
+        return None
+
+    def get_punch_date(self, obj):
+        ts = self._localized_timestamp(obj)
+        try:
+            return ts.strftime("%Y-%m-%d")
+        except Exception:
+            return None
+
+    def get_punch_time(self, obj):
+        ts = self._localized_timestamp(obj)
+        try:
+            return ts.strftime("%H:%M:%S")
+        except Exception:
+            return None
+
+    def get_source(self, obj):
+        return getattr(obj, "get_source_display", lambda: None)() or "-"
+
+    def get_device_info(self, obj):
+        return (getattr(obj, "device_info", None) or "").strip() or "-"
+
+    def get_photo_url(self, obj):
+        try:
+            url = obj.photo.url
+        except Exception:
+            return None
+        request = self.context.get("request")
+        if request is None:
+            return url
+        try:
+            return request.build_absolute_uri(url)
+        except Exception:
+            return url
+
+    def get_latitude(self, obj):
+        return self._location_value(obj, "lat", "latitude")
+
+    def get_longitude(self, obj):
+        return self._location_value(obj, "lng", "longitude")
+
+    def get_location_display(self, obj):
+        return getattr(obj, "location_display", None) or "-"
+
+    def get_google_maps_url(self, obj):
+        return getattr(obj, "google_maps_url", None)
+
+    def get_reason(self, obj):
+        return (getattr(obj, "reason", None) or "").strip() or "-"
+
+    def get_raw_timestamp(self, obj):
+        ts = self._localized_timestamp(obj)
+        try:
+            return ts.isoformat()
+        except Exception:
+            return None
+
