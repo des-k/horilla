@@ -1,4 +1,5 @@
 {% load i18n %}
+
 {% if data %}
 <div class="oh-card">
   <div class="oh-card__body">
@@ -75,4 +76,6 @@
     </div>
   </div>
 </div>
+{% else %}
+  {% include 'attendance/punching_history/punching_history_empty.html' %}
 {% endif %}
