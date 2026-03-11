@@ -620,6 +620,7 @@ class ClockInAPIView(APIView):
             work_mode_request=in_req,
             is_presensi_only=(in_mode == AttendanceWorkMode.ON_DUTY),
             clock_in_channel="mobile",
+            raw_punch_history=punch_log,
         )
 
         out_mode, out_source, out_req = _resolve_effective_work_type(employee, attendance_date, "out")
@@ -757,6 +758,7 @@ class ClockOutAPIView(APIView):
                 allow_update_clock_out=allow_update,
                 raise_if_already_clocked_out=(not allow_update),
                 clock_out_channel="mobile",
+                raw_punch_history=punch_log,
             )
         except Exception as error:
             logger.exception("clock_out_attendance_and_activity failed")
