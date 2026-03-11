@@ -31,6 +31,8 @@ from attendance.models import (
     Attendance,
     AttendanceActivity,
     AttendanceLateComeEarlyOut,
+    AttendancePunchSource,
+    AttendancePunchingHistory,
     EmployeeShiftDay,
     WorkModeRequest,
     AttendanceWorkMode,
@@ -70,10 +72,10 @@ from attendance.views.dashboard import (
 )
 from attendance.views.views import *
 from base.backends import ConfiguredEmailBackend
-from base.methods import generate_pdf, is_reportingmanager, filtersubordinates, get_subordinate_employee_ids
+from base.methods import generate_pdf, is_reportingmanager, filtersubordinates, filtersubordinatesemployeemodel, get_subordinate_employee_ids
 from base.models import HorillaMailTemplate
 from employee.filters import EmployeeFilter
-from employee.models import EmployeeWorkInformation
+from employee.models import Employee, EmployeeWorkInformation
 
 from ...api_decorators.base.decorators import (
     manager_permission_required,
@@ -84,6 +86,7 @@ from ...api_serializers.attendance.serializers import (
     AttendanceActivitySerializer,
     AttendanceLateComeEarlyOutSerializer,
     AttendanceOverTimeSerializer,
+    AttendancePunchingHistorySerializer,
     AttendanceRequestSerializer,
     AttendanceSerializer,
     MailTemplateSerializer,
@@ -3220,6 +3223,130 @@ class UserAttendanceView(APIView):
 
         serializer = self.serializer_class(page, many=True)
         return paginator.get_paginated_response(serializer.data)
+
+
+class AttendancePunchingHistoryPagination(PageNumberPagination):
+    page_size = 20
+    page_size_query_param = "page_size"
+    max_page_size = 100
+
+
+class AttendancePunchingHistoryAPIView(APIView):
+    """Mobile API for raw attendance punches only."""
+
+    permission_classes = [IsAuthenticated]
+    pagination_class = AttendancePunchingHistoryPagination
+
+    def _parse_date(self, raw_value, fallback):
+        if not raw_value:
+            return fallback
+        try:
+            return datetime.strptime(str(raw_value), "%Y-%m-%d").date()
+        except Exception:
+            return fallback
+
+    def _parse_bool(self, raw_value):
+        if raw_value is None or raw_value == "":
+            return None
+        value = str(raw_value).strip().lower()
+        if value in {"1", "true", "yes", "y"}:
+            return True
+        if value in {"0", "false", "no", "n"}:
+            return False
+        return None
+
+    def _employee_name(self, employee):
+        if not employee:
+            return "-"
+        name = f"{getattr(employee, 'employee_first_name', '')} {getattr(employee, 'employee_last_name', '')}".strip()
+        return name or f"Employee #{employee.id}"
+
+    def _employee_scope(self, request):
+        employee = getattr(request.user, "employee_get", None)
+        base_qs = Employee.objects.all().order_by("employee_first_name", "employee_last_name", "id")
+        can_view_all = bool(getattr(request.user, "is_superuser", False) or request.user.has_perm("attendance.view_attendancepunchinghistory"))
+
+        if can_view_all:
+            employees = list(base_qs)
+        elif employee:
+            subordinate_ids = list(
+                filtersubordinatesemployeemodel(
+                    request,
+                    Employee.objects.all(),
+                    "attendance.view_attendancepunchinghistory",
+                ).values_list("id", flat=True)
+            )
+            subordinate_ids = [emp_id for emp_id in subordinate_ids if emp_id != employee.id]
+            scoped_ids = [employee.id] + subordinate_ids
+            employees = list(Employee.objects.filter(id__in=scoped_ids))
+            employees.sort(
+                key=lambda emp: (
+                    0 if employee and emp.id == employee.id else 1,
+                    (emp.employee_first_name or "").lower(),
+                    (emp.employee_last_name or "").lower(),
+                    emp.id,
+                )
+            )
+        else:
+            employees = []
+
+        options = [{"id": emp.id, "name": self._employee_name(emp)} for emp in employees]
+        default_employee_id = employee.id if employee else (employees[0].id if len(employees) == 1 else None)
+        show_filter = len(options) > 1
+        return options, show_filter, default_employee_id
+
+    def get_queryset(self, request):
+        queryset = AttendancePunchingHistory.objects.select_related("employee_id", "attendance_id").all()
+        return filtersubordinates(request, queryset, "attendance.view_attendancepunchinghistory")
+
+    def get(self, request):
+        today = dj_timezone.localdate()
+        start_date = self._parse_date(request.GET.get("start_date"), today)
+        end_date = self._parse_date(request.GET.get("end_date"), today)
+        if start_date > end_date:
+            start_date, end_date = end_date, start_date
+
+        employee_options, show_employee_filter, default_employee_id = self._employee_scope(request)
+        allowed_employee_ids = {item["id"] for item in employee_options}
+
+        selected_employee_id = request.GET.get("employee_id")
+        try:
+            selected_employee_id = int(selected_employee_id) if selected_employee_id not in (None, "") else None
+        except Exception:
+            selected_employee_id = None
+
+        if selected_employee_id not in allowed_employee_ids:
+            selected_employee_id = default_employee_id if default_employee_id in allowed_employee_ids else None
+
+        queryset = self.get_queryset(request).filter(
+            punch_timestamp__date__gte=start_date,
+            punch_timestamp__date__lte=end_date,
+        )
+
+        if selected_employee_id is not None:
+            queryset = queryset.filter(employee_id_id=selected_employee_id)
+
+        source = (request.GET.get("source") or "").strip().lower()
+        valid_sources = {choice[0] for choice in AttendancePunchSource.choices}
+        if source in valid_sources:
+            queryset = queryset.filter(source=source)
+
+        accepted_to_attendance = self._parse_bool(request.GET.get("accepted_to_attendance"))
+        if accepted_to_attendance is not None:
+            queryset = queryset.filter(accepted_to_attendance=accepted_to_attendance)
+
+        queryset = queryset.order_by("-punch_timestamp", "-id")
+
+        paginator = self.pagination_class()
+        page = paginator.paginate_queryset(queryset, request)
+        serializer = AttendancePunchingHistorySerializer(page, many=True, context={"request": request})
+        response = paginator.get_paginated_response(serializer.data)
+        response.data["start_date"] = start_date.isoformat()
+        response.data["end_date"] = end_date.isoformat()
+        response.data["selected_employee_id"] = selected_employee_id
+        response.data["show_employee_filter"] = show_employee_filter
+        response.data["employee_options"] = employee_options
+        return response
 
 
 class AttendanceTypeAccessCheck(APIView):
