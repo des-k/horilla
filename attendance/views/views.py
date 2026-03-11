@@ -1156,15 +1156,33 @@ def _scoped_punching_history_queryset(request):
     return (scoped_qs | self_qs).distinct()
 
 
+def _build_punching_history_filter_data(request):
+    filter_data = request.GET.copy()
+    today = django_timezone.localdate().isoformat()
+    if not filter_data.get("punch_date_from"):
+        filter_data["punch_date_from"] = today
+    if not filter_data.get("punch_date_till"):
+        filter_data["punch_date_till"] = today
+
+    can_view_all = request.user.is_superuser or request.user.has_perm(
+        "attendance.view_attendancepunchinghistory"
+    )
+    employee = getattr(request.user, "employee_get", None)
+    if employee and not can_view_all and not filter_data.get("employee_id"):
+        filter_data["employee_id"] = str(employee.id)
+    return filter_data
+
+
 @login_required
 def attendance_punching_history_view(request):
     if not _can_access_punching_history(request):
         return _punching_history_forbidden_response(request)
-    request_copy = request.GET.copy()
+    filter_data = _build_punching_history_filter_data(request)
+    request_copy = filter_data.copy()
     request_copy.pop("page", None)
     previous_data = request_copy.urlencode()
     queryset = _scoped_punching_history_queryset(request).order_by("-punch_timestamp", "-id")
-    filter_obj = AttendancePunchingHistoryFilter(request.GET, queryset)
+    filter_obj = AttendancePunchingHistoryFilter(filter_data, queryset)
     data = filter_obj.qs.order_by("-punch_timestamp", "-id")
     punch_ids = json.dumps([instance.id for instance in paginator_qry(data, None)])
     template = "attendance/punching_history/punching_history_view.html" if data.exists() else "attendance/punching_history/punching_history_empty.html"
@@ -1178,6 +1196,8 @@ def attendance_punching_history_view(request):
             "gp_fields": AttendancePunchingHistoryReGroup.fields,
             "punch_ids": punch_ids,
             "show_employee_filter": request.user.is_superuser or request.user.has_perm("attendance.view_attendancepunchinghistory"),
+            "punch_filter_data": filter_data,
+            "self_employee": getattr(request.user, "employee_get", None),
         },
     )
 
