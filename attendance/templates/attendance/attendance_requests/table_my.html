@@ -47,6 +47,8 @@
                 <div class="oh-sticky-table__td">
                   {% if r.request_type == 'cancel_request' %}
                     <span class="oh-badge oh-badge--secondary oh-badge--small oh-badge--round">{% trans "CANCELED" %}</span>
+                  {% elif r.request_type == 'revoke_request' %}
+                    <span class="oh-badge oh-badge--warning oh-badge--small oh-badge--round">{% trans "REVOKED" %}</span>
                   {% elif r.request_type == 'reject_request' %}
                     <span class="oh-badge oh-badge--danger oh-badge--small oh-badge--round">{% trans "REJECTED" %}</span>
                   {% elif r.is_validate_request %}
@@ -100,7 +102,7 @@
                       <ion-icon name="eye-outline"></ion-icon>
                     </button>
 
-                    {% if r.is_validate_request %}
+                    {% if r.is_validate_request or r.is_validate_request_approved %}
                       <a class="oh-btn oh-btn--danger" title="{% trans 'Cancel Request' %}" href="{% url 'cancel-validate-attendance-request' r.id %}"
                         onclick="return confirm('{% trans "Cancel this request?" %}');">
                         <ion-icon name="close-circle-outline"></ion-icon>
