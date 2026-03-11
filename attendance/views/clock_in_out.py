@@ -56,6 +56,7 @@ from attendance.services.attendance_window_rules import (
 from attendance.services.final_session_resolution import (
     should_accept_raw_session,
 )
+from attendance.services.punching_history import assign_raw_punch_to_attendance
 from base.context_processors import (
     enable_late_come_early_out_tracking,
     timerunner_enabled,
@@ -752,6 +753,7 @@ def clock_in_attendance_and_activity(
     work_mode_request=None,
     is_presensi_only: bool = False,
     clock_in_channel: Optional[str] = None,
+    raw_punch_history=None,
 ):
     """Persist a raw IN safely without overwriting a winning session."""
 
@@ -820,6 +822,9 @@ def clock_in_attendance_and_activity(
         if clock_in_location is not None and _has_model_field(Attendance, "attendance_clock_in_location"):
             attendance.attendance_clock_in_location = clock_in_location
             att_updates.append("attendance_clock_in_location")
+        if raw_punch_history is not None and _has_model_field(Attendance, "attendance_clock_in_punch"):
+            attendance.attendance_clock_in_punch = raw_punch_history
+            att_updates.append("attendance_clock_in_punch")
         if work_mode_request is not None and _has_model_field(Attendance, "work_mode_request_id"):
             attendance.work_mode_request_id = work_mode_request
             att_updates.append("work_mode_request_id")
@@ -853,6 +858,8 @@ def clock_in_attendance_and_activity(
             activity.work_mode_request_id = work_mode_request
             act_updates.append("work_mode_request_id")
         activity.save(update_fields=list(dict.fromkeys(act_updates)))
+        if raw_punch_history is not None:
+            assign_raw_punch_to_attendance(attendance, punch=raw_punch_history, direction="in")
 
     if getattr(attendance, "attendance_clock_out", None) and getattr(attendance, "attendance_clock_out_date", None):
         _recalculate_attendance_summary(attendance)
@@ -890,6 +897,7 @@ def clock_out_attendance_and_activity(
     allow_update_clock_out: bool = True,
     raise_if_already_clocked_out: bool = False,
     clock_out_channel: Optional[str] = None,
+    raw_punch_history=None,
 ):
     """Persist a raw OUT safely without fabricating a check-in."""
 
@@ -986,6 +994,9 @@ def clock_out_attendance_and_activity(
     attendance.attendance_clock_out_date = out_date
     attendance.attendance_clock_out = out_time
     updates.extend(["attendance_clock_out_date", "attendance_clock_out"])
+    if raw_punch_history is not None and _has_model_field(Attendance, "attendance_clock_out_punch"):
+        attendance.attendance_clock_out_punch = raw_punch_history
+        updates.append("attendance_clock_out_punch")
     if clock_out_image is not None:
         attendance.attendance_clock_out_image = clock_out_image
         updates.append("attendance_clock_out_image")
@@ -1056,6 +1067,8 @@ def clock_out_attendance_and_activity(
             if "out_attendance_reject_reason_code" not in updates:
                 updates.append("out_attendance_reject_reason_code")
 
+    if allow_update and raw_punch_history is not None:
+        assign_raw_punch_to_attendance(attendance, punch=raw_punch_history, direction="out")
     _recalculate_attendance_summary(attendance, shift_start_dt=shift_start_dt)
     attendance.save(update_fields=list(dict.fromkeys(updates + [
         "attendance_worked_hour",
@@ -1181,6 +1194,7 @@ def clock_in(request):
         clock_in_image=clock_in_image,
         clock_in_mode=getattr(AttendanceWorkMode, "WFO", None) if AttendanceWorkMode else "wfo",
         clock_in_channel="biometric",
+        raw_punch_history=getattr(request, "raw_punch_history", None),
     )
 
     # UI response
@@ -1296,6 +1310,7 @@ def clock_out(request):
         clock_out_mode=getattr(AttendanceWorkMode, "WFO", None) if AttendanceWorkMode else "wfo",
         allow_update_clock_out=True,
         clock_out_channel="biometric",
+        raw_punch_history=getattr(request, "raw_punch_history", None),
     )
 
     if not attendance:
