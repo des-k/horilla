@@ -102,6 +102,12 @@ def _requested_sessions(attendance: Attendance) -> Tuple[bool, bool]:
     return in_present, out_present
 
 
+def get_requested_sessions(attendance: Attendance) -> Tuple[bool, bool]:
+    """Public wrapper returning whether the request overrides IN and/or OUT."""
+
+    return _requested_sessions(attendance)
+
+
 def mark_approved_request_channels(attendance: Attendance) -> Attendance:
     """Persist explicit request source for only the approved sessions."""
 
