@@ -78,6 +78,7 @@ class AttendanceRequestActionType(models.TextChoices):
     APPROVED = "APPROVED", _("Approved")
     REJECTED = "REJECTED", _("Rejected")
     CANCELED = "CANCELED", _("Canceled")
+    REVOKED = "REVOKED", _("Revoked")
 
 
 class WorkModeRequestRejectReasonCode(models.TextChoices):
@@ -304,6 +305,16 @@ class AttendancePunchingHistory(HorillaModel):
             return "-"
         return f"{lat}, {lng}"
 
+    @property
+    def google_maps_url(self):
+        if not isinstance(self.location, dict):
+            return None
+        lat = self.location.get("lat", self.location.get("latitude"))
+        lng = self.location.get("lng", self.location.get("longitude"))
+        if lat is None or lng is None:
+            return None
+        return f"https://www.google.com/maps?q={lat},{lng}"
+
     def __str__(self):
         employee = self.employee_id or self.raw_employee_identifier or "Unknown"
         return f"{employee} - {self.punch_timestamp}"
@@ -456,6 +467,7 @@ class Attendance(HorillaModel):
         ("create_request", _("Create Request")),
         ("update_request", _("Update Request")),
         ("revalidate_request", _("Re-validate Request")),
+        ("revoke_request", _("Revoke Request")),
         ("cancel_request", _("Cancel Request")),
         ("reject_request", _("Reject Request")),
     ]
@@ -501,6 +513,14 @@ class Attendance(HorillaModel):
         choices=AttendanceChannel.choices,
         verbose_name=_("Check-In Source"),
     )
+    attendance_clock_in_punch = models.ForeignKey(
+        "attendance.AttendancePunchingHistory",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="linked_attendance_clock_ins",
+        verbose_name=_("Linked Check-In Punch"),
+    )
     attendance_clock_out_date = models.DateField(
         null=True, verbose_name=_("Check-Out Date")
     )
@@ -513,6 +533,14 @@ class Attendance(HorillaModel):
         blank=True,
         choices=AttendanceChannel.choices,
         verbose_name=_("Check-Out Source"),
+    )
+    attendance_clock_out_punch = models.ForeignKey(
+        "attendance.AttendancePunchingHistory",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="linked_attendance_clock_outs",
+        verbose_name=_("Linked Check-Out Punch"),
     )
     attendance_worked_hour = models.CharField(
         null=True,
@@ -566,6 +594,12 @@ class Attendance(HorillaModel):
     )
     is_holiday = models.BooleanField(default=False)
     requested_data = models.JSONField(null=True, editable=False)
+    request_restore_snapshot = models.JSONField(
+        null=True,
+        blank=True,
+        editable=False,
+        verbose_name=_("Request Restore Snapshot"),
+    )
     action_by = models.ForeignKey(
         Employee,
         on_delete=models.PROTECT,
