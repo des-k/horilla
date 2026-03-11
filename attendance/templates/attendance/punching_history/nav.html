@@ -1,8 +1,128 @@
 {% load i18n %}
-<section class="oh-wrapper oh-main__topbar ">
-  <div class="oh-main__titlebar oh-main__titlebar--left">
-    <h1 class="oh-main__titlebar-title fw-bold">
-      <a href="{% url 'attendance-punching-history-view' %}" class="text-dark">{% trans "Punching History" %}</a>
+<style>
+  .punching-history-page .ph-page-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+  .punching-history-page .ph-page-title {
+    margin: 0;
+    font-weight: 700;
+  }
+  .punching-history-page .ph-page-subtitle {
+    margin: 6px 0 0;
+    color: #6b7280;
+    max-width: 880px;
+  }
+  .punching-history-page .oh-card + .oh-card {
+    margin-top: 16px;
+  }
+  .punching-history-page .ph-filter-grid {
+    display: grid;
+    grid-template-columns: minmax(260px, 1.5fr) minmax(180px, 1fr) minmax(180px, 1fr) auto;
+    gap: 12px;
+    align-items: end;
+  }
+  .punching-history-page .ph-filter-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    align-items: center;
+  }
+  .punching-history-page .ph-filter-actions .oh-btn {
+    min-width: 96px;
+  }
+  .punching-history-page .ph-field .oh-label,
+  .punching-history-page .ph-field .oh-input__label {
+    display: block;
+    margin-bottom: 6px;
+  }
+  .punching-history-page .ph-field .oh-input,
+  .punching-history-page .ph-field .oh-select,
+  .punching-history-page .ph-field input[type="date"] {
+    min-height: 42px;
+  }
+  .punching-history-page .ph-field .select2-container .select2-selection--single {
+    min-height: 42px !important;
+    display: flex;
+    align-items: center;
+  }
+  .punching-history-page .ph-field .select2-container--default .select2-selection--single .select2-selection__rendered {
+    line-height: 40px !important;
+  }
+  .punching-history-page .ph-field .select2-container--default .select2-selection--single .select2-selection__arrow {
+    height: 40px !important;
+  }
+  .punching-history-page .ph-table-meta {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 12px;
+    flex-wrap: wrap;
+  }
+  .punching-history-page .ph-table-subtitle {
+    margin: 4px 0 0;
+    color: #6b7280;
+  }
+  .punching-history-page .ph-table .oh-sticky-table__th,
+  .punching-history-page .ph-table .oh-sticky-table__td {
+    vertical-align: top;
+  }
+  .punching-history-page .ph-table .oh-sticky-table__th:nth-child(2),
+  .punching-history-page .ph-table .oh-sticky-table__td:nth-child(2),
+  .punching-history-page .ph-table .oh-sticky-table__th:nth-child(3),
+  .punching-history-page .ph-table .oh-sticky-table__td:nth-child(3),
+  .punching-history-page .ph-table .oh-sticky-table__th:nth-child(6),
+  .punching-history-page .ph-table .oh-sticky-table__td:nth-child(6),
+  .punching-history-page .ph-table .oh-sticky-table__th:nth-child(8),
+  .punching-history-page .ph-table .oh-sticky-table__td:nth-child(8) {
+    text-align: center;
+  }
+  .punching-history-page .ph-nowrap {
+    white-space: nowrap;
+  }
+  .punching-history-page .ph-wrap {
+    white-space: normal;
+    word-break: break-word;
+    line-height: 1.4;
+  }
+  .punching-history-page .ph-sub-link {
+    display: inline-block;
+    margin-top: 4px;
+    font-size: 0.85rem;
+  }
+  .punching-history-page .ph-empty {
+    text-align: center;
+    padding: 28px 12px;
+  }
+  .punching-history-page .ph-empty p {
+    color: #6b7280;
+    margin: 8px 0 0;
+  }
+  @media (max-width: 991px) {
+    .punching-history-page .ph-filter-grid {
+      grid-template-columns: 1fr 1fr;
+    }
+  }
+  @media (max-width: 640px) {
+    .punching-history-page .ph-filter-grid {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>
+<div class="ph-page-head">
+  <div>
+    <h1 class="ph-page-title">
+      <a href="{% url 'attendance-punching-history-view' %}" class="text-dark text-decoration-none">
+        {% trans "Punching History" %}
+      </a>
     </h1>
+    <p class="ph-page-subtitle">
+      {% trans "Audit raw biometric and mobile punch events separately from processed attendance activity, requests, and final attendance results." %}
+    </p>
   </div>
-</section>
+</div>
