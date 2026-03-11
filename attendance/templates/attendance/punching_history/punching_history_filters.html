@@ -6,11 +6,24 @@
         <div class="ph-field">
           <label class="oh-input__label">{% trans "Employee" %}</label>
           {% if show_employee_filter %}
-            {{ f.form.employee_id }}
+            <select name="employee_id" class="oh-select oh-select-2 w-100">
+              <option value="" {% if not punch_filter_data.employee_id %}selected{% endif %}>
+                {% trans "All Employees" %}
+              </option>
+              {% for employee in employee_options %}
+                <option
+                  value="{{ employee.id }}"
+                  {% if punch_filter_data.employee_id|stringformat:"s" == employee.id|stringformat:"s" %}selected{% endif %}
+                >
+                  {{ employee }}
+                </option>
+              {% endfor %}
+            </select>
           {% else %}
             <input type="text" class="oh-input w-100" value="{{ self_employee }}" readonly>
           {% endif %}
         </div>
+
         <div class="ph-field">
           <label class="oh-input__label">{% trans "Start Date" %}</label>
           <input
@@ -20,6 +33,7 @@
             value="{{ punch_filter_data.punch_date_from|default:'' }}"
           >
         </div>
+
         <div class="ph-field">
           <label class="oh-input__label">{% trans "End Date" %}</label>
           <input
@@ -29,6 +43,7 @@
             value="{{ punch_filter_data.punch_date_till|default:'' }}"
           >
         </div>
+
         <div class="ph-filter-actions">
           <button type="submit" class="oh-btn oh-btn--secondary">
             {% trans "Apply" %}
