@@ -1185,17 +1185,19 @@ def attendance_punching_history_view(request):
     filter_obj = AttendancePunchingHistoryFilter(filter_data, queryset)
     data = filter_obj.qs.order_by("-punch_timestamp", "-id")
     punch_ids = json.dumps([instance.id for instance in paginator_qry(data, None)])
-    template = "attendance/punching_history/punching_history_view.html" if data.exists() else "attendance/punching_history/punching_history_empty.html"
+    page_obj = paginator_qry(data, request.GET.get("page"))
+
     return render(
         request,
-        template,
+        "attendance/punching_history/punching_history_view.html",
         {
-            "data": paginator_qry(data, request.GET.get("page")),
+            "data": page_obj,
             "pd": previous_data,
             "f": filter_obj,
             "gp_fields": AttendancePunchingHistoryReGroup.fields,
-            "punch_ids": punch_ids,
-            "show_employee_filter": request.user.is_superuser or request.user.has_perm("attendance.view_attendancepunchinghistory"),
+            "punch_ids": json.dumps([instance.id for instance in page_obj]),
+            "show_employee_filter": request.user.is_superuser
+            or request.user.has_perm("attendance.view_attendancepunchinghistory"),
             "punch_filter_data": filter_data,
             "self_employee": getattr(request.user, "employee_get", None),
         },
