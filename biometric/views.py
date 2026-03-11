@@ -319,6 +319,7 @@ def process_biometric_punch(*, device, employee, attendance_dt, punch_code=None)
             direction=direction_name,
             punch_code=punch_code,
         )
+        request_data.raw_punch_history = raw_log_local
         _run_biometric_action(
             raw_log=raw_log_local,
             request_data=request_data,
