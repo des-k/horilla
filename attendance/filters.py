@@ -100,6 +100,13 @@ class AttendanceOverTimeFilter(FilterSet):
         lookup_expr="icontains",
     )
 
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.form.fields["employee_id"].widget.attrs.update({"class": "oh-select oh-select-2 w-100"})
+        self.form.fields["punch_date_from"].widget.attrs.update({"class": "oh-input w-100"})
+        self.form.fields["punch_date_till"].widget.attrs.update({"class": "oh-input w-100"})
+
     class Meta:
         """
         Meta class to add additional options
@@ -691,14 +698,25 @@ EmployeeFilter.__init__ = online_init
 
 
 class AttendancePunchingHistoryFilter(FilterSet):
+    employee_id = django_filters.ModelChoiceFilter(
+        queryset=Employee.objects.all(),
+        field_name="employee_id",
+        label=_("Employee"),
+        empty_label=_("All Employees"),
+        widget=forms.Select(attrs={"class": "oh-select oh-select-2 w-100"}),
+    )
     search = django_filters.CharFilter(method="filter_search")
     device_info = django_filters.CharFilter(field_name="device_info", lookup_expr="icontains")
     reason = django_filters.CharFilter(field_name="reason", lookup_expr="icontains")
     punch_date_from = django_filters.DateFilter(
-        field_name="punch_timestamp", lookup_expr="date__gte", widget=forms.DateInput(attrs={"type": "date"})
+        field_name="punch_timestamp",
+        lookup_expr="date__gte",
+        widget=forms.DateInput(attrs={"type": "date", "class": "oh-input w-100"}),
     )
     punch_date_till = django_filters.DateFilter(
-        field_name="punch_timestamp", lookup_expr="date__lte", widget=forms.DateInput(attrs={"type": "date"})
+        field_name="punch_timestamp",
+        lookup_expr="date__lte",
+        widget=forms.DateInput(attrs={"type": "date", "class": "oh-input w-100"}),
     )
     attendance_date = django_filters.DateFilter(
         field_name="attendance_date", widget=forms.DateInput(attrs={"type": "date"})
