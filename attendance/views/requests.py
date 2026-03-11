@@ -46,9 +46,16 @@ from attendance.models import (
 from attendance.views.clock_in_out import early_out, late_come
 import attendance.views.clock_in_out as cio
 from attendance.services.activity_sync import (
+    get_requested_sessions,
     mark_approved_request_channels,
     sync_single_session_activity,
     validate_requested_data_with_windows,
+)
+from attendance.services.punching_history import (
+    capture_request_restore_snapshot,
+    clear_raw_links_for_request_override,
+    reconcile_attendance_punches,
+    restore_raw_state_after_request,
 )
 from base.methods import (
     choosesubordinates,
@@ -201,6 +208,39 @@ def _refresh_late_come_early_out(attendance: Attendance):
         early_out(attendance, start_time=start_time_sec, end_time=end_time_sec, shift=shift, schedule=schedule)
 
 
+def _apply_request_override_snapshot(attendance: Attendance, *, include_in: bool, include_out: bool):
+    capture_request_restore_snapshot(attendance, include_in=include_in, include_out=include_out)
+
+
+def _detach_request_overridden_raw_links(attendance: Attendance, *, include_in: bool, include_out: bool):
+    clear_raw_links_for_request_override(attendance, include_in=include_in, include_out=include_out)
+    fields = []
+    if include_in:
+        fields.extend([
+            "attendance_clock_in_punch",
+            "attendance_clock_in_image",
+            "attendance_clock_in_location",
+        ])
+    if include_out:
+        fields.extend([
+            "attendance_clock_out_punch",
+            "attendance_clock_out_image",
+            "attendance_clock_out_location",
+        ])
+    if fields:
+        attendance.save(update_fields=fields)
+
+
+def _restore_request_back_to_raw(attendance: Attendance, *, include_in: bool, include_out: bool, prev_attendance_date=None):
+    restore_raw_state_after_request(attendance, include_in=include_in, include_out=include_out)
+    attendance.attendance_validated = cio.attendance_validate(attendance)
+    attendance.save()
+    _ensure_single_session_activity(attendance, prev_attendance_date=prev_attendance_date)
+    _refresh_late_come_early_out(attendance)
+    reconcile_attendance_punches(employee=attendance.employee_id, attendance_date=attendance.attendance_date)
+    return attendance
+
+
 @login_required
 def request_attendance(request):
     """
@@ -236,7 +276,7 @@ def request_attendance_view(request):
 
     search = (request.GET.get("search") or "").strip()
     status_my = (request.GET.get("status_my") or "all").strip().lower()
-    allowed_status_my = {"all", "waiting", "approved", "rejected", "canceled", "cancel"}
+    allowed_status_my = {"all", "waiting", "approved", "rejected", "revoked", "canceled", "cancel"}
     if status_my not in allowed_status_my:
         status_my = "all"
 
@@ -271,8 +311,9 @@ def request_attendance_view(request):
             AttendanceRequestActionType.APPROVED,
             AttendanceRequestActionType.REJECTED,
             AttendanceRequestActionType.CANCELED,
+            AttendanceRequestActionType.REVOKED,
         ])
-        | Q(request_type__in=["create_request", "cancel_request", "reject_request"])
+        | Q(request_type__in=["create_request", "cancel_request", "reject_request", "revoke_request"])
     )
 
     my_qs = Attendance.objects.filter(employee_id__employee_user_id=request.user).filter(
@@ -283,9 +324,15 @@ def request_attendance_view(request):
     if status_my == "waiting":
         my_qs = my_qs.filter(is_validate_request=True)
     elif status_my == "approved":
-        my_qs = my_qs.filter(Q(is_validate_request_approved=True) | Q(attendance_validated=True)).exclude(is_validate_request=True)
+        my_qs = (
+            my_qs.filter(Q(is_validate_request_approved=True) | Q(attendance_validated=True))
+            .exclude(is_validate_request=True)
+            .exclude(request_type__in=["cancel_request", "reject_request", "revoke_request"])
+        )
     elif status_my == "rejected":
         my_qs = my_qs.filter(request_type="reject_request")
+    elif status_my == "revoked":
+        my_qs = my_qs.filter(request_type="revoke_request")
     elif status_my in ("canceled", "cancel"):
         my_qs = my_qs.filter(request_type="cancel_request")
 
@@ -363,6 +410,7 @@ def request_attendance_view(request):
         ("waiting", _("Waiting")),
         ("approved", _("Approved")),
         ("rejected", _("Rejected")),
+        ("revoked", _("Revoked")),
         ("canceled", _("Canceled")),
     ]
 
@@ -986,6 +1034,9 @@ def approve_validate_attendance_request(request, attendance_id):
         messages.error(request, validation_error or _("Requested attendance is outside the allowed attendance window."))
         return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
 
+    wants_in, wants_out = get_requested_sessions(attendance)
+    _apply_request_override_snapshot(attendance, include_in=wants_in, include_out=wants_out)
+
     # Approve request flags (these fields are NOT included in serialize/requested_data)
     attendance.attendance_validated = True
     attendance.is_validate_request_approved = True
@@ -1030,7 +1081,9 @@ def approve_validate_attendance_request(request, attendance_id):
         attendance.save()
 
     _mark_approved_request_channels(attendance)
+    _detach_request_overridden_raw_links(attendance, include_in=wants_in, include_out=wants_out)
     attendance.refresh_from_db()
+    reconcile_attendance_punches(employee=attendance.employee_id, attendance_date=attendance.attendance_date)
 
     # -----------------------------------------------------------------
     # SINGLE-SESSION SYNC
@@ -1138,6 +1191,57 @@ def approve_validate_attendance_request(request, attendance_id):
 
 
 @login_required
+@manager_can_enter("attendance.change_attendance")
+@transaction.atomic
+def revoke_validate_attendance_request(request, attendance_id):
+    """Revoke an already approved attendance request and restore the pre-request raw state."""
+
+    try:
+        qs = Attendance.objects.filter(id=attendance_id, is_validate_request_approved=True)
+        qs = filtersubordinates(
+            request=request,
+            perm="attendance.change_attendance",
+            queryset=qs,
+        )
+        attendance = qs.select_for_update().get()
+
+        try:
+            if attendance.employee_id.employee_user_id == request.user:
+                messages.error(request, _("You cannot revoke your own approved request."))
+                return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+        except Exception:
+            pass
+
+        prev_attendance_date = attendance.attendance_date
+        wants_in, wants_out = get_requested_sessions(attendance)
+        _restore_request_back_to_raw(attendance, include_in=wants_in, include_out=wants_out, prev_attendance_date=prev_attendance_date)
+        attendance.refresh_from_db()
+        attendance.is_validate_request_approved = False
+        attendance.is_validate_request = False
+        attendance.request_type = "revoke_request"
+        attendance.action_type = AttendanceRequestActionType.REVOKED
+        attendance.action_at = timezone.now()
+        try:
+            attendance.action_by = request.user.employee_get
+        except Exception:
+            attendance.action_by = None
+        attendance.attendance_validated = cio.attendance_validate(attendance)
+        attendance.save()
+
+        _ensure_single_session_activity(attendance, prev_attendance_date=prev_attendance_date)
+        _refresh_late_come_early_out(attendance)
+        reconcile_attendance_punches(employee=attendance.employee_id, attendance_date=attendance.attendance_date)
+
+        messages.success(request, _("Attendance request approval revoked."))
+    except Attendance.DoesNotExist:
+        messages.error(request, _("Attendance request not found"))
+    except Exception:
+        messages.error(request, _("Something went wrong."))
+
+    return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+
+
+@login_required
 @transaction.atomic
 def cancel_attendance_request(request, attendance_id):
     """Cancel an attendance request (owner action).
@@ -1159,19 +1263,26 @@ def cancel_attendance_request(request, attendance_id):
             messages.error(request, _("You do not have permission to perform this action."))
             return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
 
-        # Only pending requests can be canceled
-        if not getattr(attendance, "is_validate_request", False):
-            messages.error(request, _("Only pending requests can be canceled."))
+        is_pending_request = bool(getattr(attendance, "is_validate_request", False))
+        is_approved_request = bool(getattr(attendance, "is_validate_request_approved", False))
+        if not (is_pending_request or is_approved_request):
+            messages.error(request, _("Only waiting or approved requests can be canceled."))
             return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
 
         req_type = attendance.request_type
         req_date = attendance.attendance_date
         req_employee = attendance.employee_id
+        wants_in, wants_out = get_requested_sessions(attendance)
+
+        if is_approved_request:
+            _restore_request_back_to_raw(attendance, include_in=wants_in, include_out=wants_out, prev_attendance_date=req_date)
+            attendance.refresh_from_db()
 
         attendance.is_validate_request_approved = False
         attendance.is_validate_request = False
-        # Discard pending payload but keep request_description for history
-        attendance.requested_data = None
+        if is_pending_request:
+            # Discard pending payload but keep request_description for history
+            attendance.requested_data = None
         attendance.request_type = "cancel_request"
         try:
             attendance.action_by = request.user.employee_get
@@ -1189,6 +1300,10 @@ def cancel_attendance_request(request, attendance_id):
             ).delete()
             AttendanceLateComeEarlyOut.objects.filter(attendance_id=attendance).delete()
 
+        if is_approved_request:
+            _ensure_single_session_activity(attendance, prev_attendance_date=req_date)
+            _refresh_late_come_early_out(attendance)
+            reconcile_attendance_punches(employee=req_employee, attendance_date=req_date)
         messages.success(request, _("Attendance request canceled."))
 
     except Attendance.DoesNotExist:
@@ -1374,6 +1489,9 @@ def bulk_approve_attendance_request(request):
         if not is_valid_request:
             continue
 
+        wants_in, wants_out = get_requested_sessions(attendance)
+        _apply_request_override_snapshot(attendance, include_in=wants_in, include_out=wants_out)
+
         # Mark approved
         attendance.attendance_validated = True
         attendance.is_validate_request_approved = True
@@ -1412,7 +1530,9 @@ def bulk_approve_attendance_request(request):
             attendance.save()
 
         _mark_approved_request_channels(attendance)
+        _detach_request_overridden_raw_links(attendance, include_in=wants_in, include_out=wants_out)
         attendance.refresh_from_db()
+        reconcile_attendance_punches(employee=attendance.employee_id, attendance_date=attendance.attendance_date)
 
         # Keep single-session activity consistent
         _ensure_single_session_activity(attendance, prev_attendance_date=prev_attendance_date)
@@ -1553,6 +1673,13 @@ def edit_validate_attendance(request, attendance_id):
             instance.employee_id = attendance.employee_id
             instance.id = attendance.id
             if attendance.request_type != "create_request":
+                if attendance.is_validate_request_approved:
+                    wants_in, wants_out = get_requested_sessions(attendance)
+                    _restore_request_back_to_raw(attendance, include_in=wants_in, include_out=wants_out, prev_attendance_date=attendance.attendance_date)
+                    attendance.refresh_from_db()
+                    attendance.is_validate_request_approved = False
+                    attendance.attendance_validated = cio.attendance_validate(attendance)
+                    attendance.request_type = "revalidate_request"
                 attendance.requested_data = json.dumps(instance.serialize())
                 attendance.request_description = instance.request_description
                 # set the user level validation here
