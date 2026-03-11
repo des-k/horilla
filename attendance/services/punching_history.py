@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
-from typing import Any, Optional
+from copy import deepcopy
+from datetime import date, datetime, time, timedelta
+from typing import Optional
 
 from django.core.files.base import ContentFile
 from django.db.models import Q
@@ -14,6 +15,9 @@ from attendance.models import (
     AttendancePunchSource,
     AttendancePunchingHistory,
 )
+
+
+RAW_CHANNELS = {AttendanceChannel.MOBILE, AttendanceChannel.BIOMETRIC}
 
 
 def _clone_uploaded_file(uploaded):
@@ -47,17 +51,11 @@ def _save_cloned_photo(instance: AttendancePunchingHistory, uploaded):
 
 
 def normalize_mobile_device_info(request) -> str:
-    device_model = (
-        request.data.get("device_model")
-        or request.POST.get("device_model")
-    )
+    device_model = request.data.get("device_model") or request.POST.get("device_model")
     if device_model:
         return str(device_model).strip()[:255]
 
-    explicit_info = (
-        request.data.get("device_info")
-        or request.POST.get("device_info")
-    )
+    explicit_info = request.data.get("device_info") or request.POST.get("device_info")
     if explicit_info:
         return f"Model unavailable - {str(explicit_info).strip()}"[:255]
 
@@ -149,7 +147,7 @@ def _expected_final_channel(source: str) -> Optional[str]:
 
 def _match_allowed_for_log(log: AttendancePunchingHistory, channel: Optional[str]) -> bool:
     expected = _expected_final_channel(log.source)
-    return bool(expected and channel == expected)
+    return bool(expected and channel in {expected, None, ""})
 
 
 def _final_source_reason(channel: Optional[str], *, direction: str) -> Optional[str]:
@@ -165,7 +163,7 @@ def _final_source_reason(channel: Optional[str], *, direction: str) -> Optional[
             if direction == AttendancePunchDirection.IN
             else "Final Check-Out came from correction request"
         )
-    if channel and channel not in {AttendanceChannel.MOBILE, AttendanceChannel.BIOMETRIC}:
+    if channel and channel not in RAW_CHANNELS:
         return (
             "Final Check-In came from another source"
             if direction == AttendancePunchDirection.IN
@@ -173,6 +171,315 @@ def _final_source_reason(channel: Optional[str], *, direction: str) -> Optional[
         )
     return None
 
+
+def _session_prefix(direction: str) -> str:
+    return "attendance_clock_in" if direction == AttendancePunchDirection.IN else "attendance_clock_out"
+
+
+def _session_channel_attr(direction: str) -> str:
+    return f"{_session_prefix(direction)}_channel"
+
+
+def _session_punch_attr(direction: str) -> str:
+    return f"{_session_prefix(direction)}_punch"
+
+
+def _session_date_attr(direction: str) -> str:
+    return f"{_session_prefix(direction)}_date"
+
+
+def _session_time_attr(direction: str) -> str:
+    return _session_prefix(direction)
+
+
+def _session_image_attr(direction: str) -> str:
+    return f"{_session_prefix(direction)}_image"
+
+
+def _session_location_attr(direction: str) -> str:
+    return f"{_session_prefix(direction)}_location"
+
+
+def _session_mode_attr(direction: str) -> str:
+    return f"{_session_prefix(direction)}_mode"
+
+
+def _session_status_attr(direction: str) -> str:
+    return "in_attendance_status" if direction == AttendancePunchDirection.IN else "out_attendance_status"
+
+
+def _session_reject_attr(direction: str) -> str:
+    return (
+        "in_attendance_reject_reason_code"
+        if direction == AttendancePunchDirection.IN
+        else "out_attendance_reject_reason_code"
+    )
+
+
+def _session_related_request_attr(direction: str) -> str:
+    return (
+        "in_related_work_type_request_id"
+        if direction == AttendancePunchDirection.IN
+        else "out_related_work_type_request_id"
+    )
+
+
+def _aware_local(dt: datetime) -> datetime:
+    return timezone.localtime(dt) if timezone.is_aware(dt) else dt
+
+
+def _session_dt_from_attendance(attendance: Attendance, direction: str) -> Optional[datetime]:
+    d = getattr(attendance, _session_date_attr(direction), None)
+    t = getattr(attendance, _session_time_attr(direction), None)
+    if not d or not t:
+        return None
+    return datetime.combine(d, t)
+
+
+def _same_timestamp(att_date, att_time, punch_dt: datetime) -> bool:
+    if not att_date or not att_time:
+        return False
+    return att_date == punch_dt.date() and att_time == punch_dt.time().replace(microsecond=0)
+
+
+def _same_minute(att_date, att_time, punch_dt: datetime) -> bool:
+    if not att_date or not att_time:
+        return False
+    return (
+        att_date == punch_dt.date()
+        and att_time.hour == punch_dt.hour
+        and att_time.minute == punch_dt.minute
+    )
+
+
+def _serialize_date(value):
+    return value.isoformat() if value else None
+
+
+def _serialize_time(value):
+    if not value:
+        return None
+    return value.replace(microsecond=0).isoformat()
+
+
+def _parse_date(value):
+    if not value:
+        return None
+    if isinstance(value, date):
+        return value
+    try:
+        return date.fromisoformat(str(value))
+    except Exception:
+        return None
+
+
+def _parse_time(value):
+    if not value:
+        return None
+    if isinstance(value, time):
+        return value.replace(microsecond=0)
+    try:
+        return time.fromisoformat(str(value)).replace(microsecond=0)
+    except Exception:
+        return None
+
+
+def _serialize_image(value):
+    try:
+        return value.name or None
+    except Exception:
+        return None
+
+
+def _serialize_session_state(attendance: Attendance, direction: str) -> dict:
+    return {
+        "date": _serialize_date(getattr(attendance, _session_date_attr(direction), None)),
+        "time": _serialize_time(getattr(attendance, _session_time_attr(direction), None)),
+        "channel": getattr(attendance, _session_channel_attr(direction), None),
+        "mode": getattr(attendance, _session_mode_attr(direction), None),
+        "location": deepcopy(getattr(attendance, _session_location_attr(direction), None)),
+        "image": _serialize_image(getattr(attendance, _session_image_attr(direction), None)),
+        "punch_id": getattr(attendance, f"{_session_punch_attr(direction)}_id", None),
+        "status": getattr(attendance, _session_status_attr(direction), None),
+        "reject_reason_code": getattr(attendance, _session_reject_attr(direction), None),
+        "related_work_type_request_id": getattr(attendance, _session_related_request_attr(direction), None),
+        "work_mode_request_id": getattr(attendance, "work_mode_request_id_id", None),
+    }
+
+
+def capture_request_restore_snapshot(attendance: Attendance, *, include_in: bool = False, include_out: bool = False):
+    snapshot = deepcopy(getattr(attendance, "request_restore_snapshot", None) or {})
+    if include_in:
+        snapshot["in"] = _serialize_session_state(attendance, AttendancePunchDirection.IN)
+    if include_out:
+        snapshot["out"] = _serialize_session_state(attendance, AttendancePunchDirection.OUT)
+    attendance.request_restore_snapshot = snapshot
+    attendance.save(update_fields=["request_restore_snapshot"])
+    return snapshot
+
+
+def clear_request_restore_snapshot(attendance: Attendance, *, include_in: bool = False, include_out: bool = False):
+    snapshot = deepcopy(getattr(attendance, "request_restore_snapshot", None) or {})
+    if include_in:
+        snapshot.pop("in", None)
+    if include_out:
+        snapshot.pop("out", None)
+    attendance.request_restore_snapshot = snapshot or None
+    attendance.save(update_fields=["request_restore_snapshot"])
+    return attendance.request_restore_snapshot
+
+
+def _restore_session_from_snapshot(attendance: Attendance, direction: str, state: Optional[dict]):
+    date_attr = _session_date_attr(direction)
+    time_attr = _session_time_attr(direction)
+    channel_attr = _session_channel_attr(direction)
+    punch_attr = f"{_session_punch_attr(direction)}_id"
+    image_attr = _session_image_attr(direction)
+    location_attr = _session_location_attr(direction)
+    mode_attr = _session_mode_attr(direction)
+    status_attr = _session_status_attr(direction)
+    reject_attr = _session_reject_attr(direction)
+    related_attr = _session_related_request_attr(direction)
+
+    if not state:
+        setattr(attendance, date_attr, None)
+        setattr(attendance, time_attr, None)
+        setattr(attendance, channel_attr, None)
+        setattr(attendance, punch_attr, None)
+        setattr(attendance, image_attr, None)
+        setattr(attendance, location_attr, None)
+        setattr(attendance, mode_attr, None)
+        setattr(attendance, status_attr, None)
+        setattr(attendance, reject_attr, None)
+        setattr(attendance, related_attr, None)
+        return
+
+    setattr(attendance, date_attr, _parse_date(state.get("date")))
+    setattr(attendance, time_attr, _parse_time(state.get("time")))
+    setattr(attendance, channel_attr, state.get("channel") or None)
+    setattr(attendance, punch_attr, state.get("punch_id"))
+    setattr(attendance, image_attr, state.get("image") or None)
+    setattr(attendance, location_attr, deepcopy(state.get("location")))
+    setattr(attendance, mode_attr, state.get("mode") or None)
+    setattr(attendance, status_attr, state.get("status") or None)
+    setattr(attendance, reject_attr, state.get("reject_reason_code") or None)
+    setattr(attendance, related_attr, state.get("related_work_type_request_id") or None)
+    if state.get("work_mode_request_id") is not None:
+        attendance.work_mode_request_id_id = state.get("work_mode_request_id")
+
+
+def _candidate_logs(employee, attendance_date: date, direction: str):
+    return list(
+        _logs_for_attendance(employee, attendance_date).filter(
+            punch_direction=direction,
+            source__in=[AttendancePunchSource.MOBILE, AttendancePunchSource.BIOMETRIC],
+        )
+    )
+
+
+def _pick_best_raw_candidate(attendance: Attendance, direction: str):
+    employee = getattr(attendance, "employee_id", None)
+    attendance_date = getattr(attendance, "attendance_date", None)
+    if not employee or not attendance_date:
+        return None
+    logs = _candidate_logs(employee, attendance_date, direction)
+    if not logs:
+        return None
+
+    target_dt = _session_dt_from_attendance(attendance, direction)
+    if target_dt is not None:
+        for log in logs:
+            localized_ts = _aware_local(log.punch_timestamp)
+            if _same_timestamp(target_dt.date(), target_dt.time(), localized_ts):
+                return log
+        same_minute = [
+            log for log in logs
+            if _same_minute(target_dt.date(), target_dt.time(), _aware_local(log.punch_timestamp))
+        ]
+        if same_minute:
+            if direction == AttendancePunchDirection.IN:
+                return sorted(same_minute, key=lambda l: (_aware_local(l.punch_timestamp), l.id))[0]
+            return sorted(same_minute, key=lambda l: (_aware_local(l.punch_timestamp), l.id))[-1]
+
+    if direction == AttendancePunchDirection.IN:
+        return sorted(logs, key=lambda l: (_aware_local(l.punch_timestamp), l.id))[0]
+    return sorted(logs, key=lambda l: (_aware_local(l.punch_timestamp), l.id))[-1]
+
+
+def assign_raw_punch_to_attendance(
+    attendance: Attendance,
+    *,
+    punch: AttendancePunchingHistory,
+    direction: str,
+    persist: bool = False,
+):
+    if not attendance or not punch:
+        return attendance
+    localized_ts = _aware_local(punch.punch_timestamp)
+    setattr(attendance, _session_date_attr(direction), localized_ts.date())
+    setattr(attendance, _session_time_attr(direction), localized_ts.time().replace(microsecond=0))
+    setattr(attendance, _session_channel_attr(direction), _expected_final_channel(punch.source))
+    setattr(attendance, f"{_session_punch_attr(direction)}_id", punch.id)
+    if hasattr(attendance, _session_image_attr(direction)):
+        setattr(attendance, _session_image_attr(direction), punch.photo if getattr(punch, "photo", None) else None)
+    if hasattr(attendance, _session_location_attr(direction)):
+        setattr(attendance, _session_location_attr(direction), deepcopy(getattr(punch, "location", None)))
+    if direction == AttendancePunchDirection.IN and hasattr(attendance, "in_attendance_status"):
+        attendance.in_attendance_status = "VALID"
+        if hasattr(attendance, "in_attendance_reject_reason_code"):
+            attendance.in_attendance_reject_reason_code = None
+    if direction == AttendancePunchDirection.OUT and hasattr(attendance, "out_attendance_status"):
+        attendance.out_attendance_status = "VALID"
+        if hasattr(attendance, "out_attendance_reject_reason_code"):
+            attendance.out_attendance_reject_reason_code = None
+    if persist:
+        attendance.save()
+    return attendance
+
+
+def relink_attendance_to_raw_punches(attendance: Attendance, *, include_in: bool = False, include_out: bool = False):
+    if not attendance:
+        return attendance
+    if include_in and getattr(attendance, _session_channel_attr(AttendancePunchDirection.IN), None) in RAW_CHANNELS.union({None, ""}):
+        if getattr(attendance, f"{_session_punch_attr(AttendancePunchDirection.IN)}_id", None) is None:
+            punch = _pick_best_raw_candidate(attendance, AttendancePunchDirection.IN)
+            if punch:
+                assign_raw_punch_to_attendance(attendance, punch=punch, direction=AttendancePunchDirection.IN)
+    if include_out and getattr(attendance, _session_channel_attr(AttendancePunchDirection.OUT), None) in RAW_CHANNELS.union({None, ""}):
+        if getattr(attendance, f"{_session_punch_attr(AttendancePunchDirection.OUT)}_id", None) is None:
+            punch = _pick_best_raw_candidate(attendance, AttendancePunchDirection.OUT)
+            if punch:
+                assign_raw_punch_to_attendance(attendance, punch=punch, direction=AttendancePunchDirection.OUT)
+    return attendance
+
+
+def clear_raw_links_for_request_override(attendance: Attendance, *, include_in: bool = False, include_out: bool = False):
+    if include_in:
+        attendance.attendance_clock_in_punch_id = None
+        if hasattr(attendance, "attendance_clock_in_image"):
+            attendance.attendance_clock_in_image = None
+        if hasattr(attendance, "attendance_clock_in_location"):
+            attendance.attendance_clock_in_location = None
+    if include_out:
+        attendance.attendance_clock_out_punch_id = None
+        if hasattr(attendance, "attendance_clock_out_image"):
+            attendance.attendance_clock_out_image = None
+        if hasattr(attendance, "attendance_clock_out_location"):
+            attendance.attendance_clock_out_location = None
+    return attendance
+
+
+def restore_raw_state_after_request(attendance: Attendance, *, include_in: bool = False, include_out: bool = False):
+    snapshot = deepcopy(getattr(attendance, "request_restore_snapshot", None) or {})
+    if include_in:
+        _restore_session_from_snapshot(attendance, AttendancePunchDirection.IN, snapshot.get("in"))
+    if include_out:
+        _restore_session_from_snapshot(attendance, AttendancePunchDirection.OUT, snapshot.get("out"))
+
+    relink_attendance_to_raw_punches(attendance, include_in=include_in, include_out=include_out)
+    attendance.save()
+    clear_request_restore_snapshot(attendance, include_in=include_in, include_out=include_out)
+    return attendance
 
 
 def create_mobile_punch_history(
@@ -278,12 +585,6 @@ def update_punch_history(
         punch.save(update_fields=fields)
 
 
-def _same_timestamp(att_date, att_time, punch_dt: datetime) -> bool:
-    if not att_date or not att_time:
-        return False
-    return att_date == punch_dt.date() and att_time == punch_dt.time().replace(microsecond=0)
-
-
 def _logs_for_attendance(employee, attendance_date: date):
     return AttendancePunchingHistory.objects.filter(
         employee_id=employee,
@@ -317,32 +618,29 @@ def reconcile_attendance_punches(*, employee, attendance_date: date):
             direction=AttendancePunchDirection.OUT,
         )
 
-        for log in logs:
-            localized_ts = timezone.localtime(log.punch_timestamp) if timezone.is_aware(log.punch_timestamp) else log.punch_timestamp
-            if (
-                log.punch_direction == AttendancePunchDirection.IN
-                and _match_allowed_for_log(log, attendance.attendance_clock_in_channel)
-                and _same_timestamp(
-                    attendance.attendance_clock_in_date,
-                    attendance.attendance_clock_in,
-                    localized_ts,
-                )
-            ):
-                in_match = log.id
-                break
-        for log in reversed(logs):
-            localized_ts = timezone.localtime(log.punch_timestamp) if timezone.is_aware(log.punch_timestamp) else log.punch_timestamp
-            if (
-                log.punch_direction == AttendancePunchDirection.OUT
-                and _match_allowed_for_log(log, attendance.attendance_clock_out_channel)
-                and _same_timestamp(
-                    attendance.attendance_clock_out_date,
-                    attendance.attendance_clock_out,
-                    localized_ts,
-                )
-            ):
-                out_match = log.id
-                break
+        in_match = getattr(attendance, "attendance_clock_in_punch_id", None)
+        out_match = getattr(attendance, "attendance_clock_out_punch_id", None)
+
+        if not in_match and attendance.attendance_clock_in and attendance.attendance_clock_in_channel in RAW_CHANNELS.union({None, ""}):
+            for log in logs:
+                localized_ts = _aware_local(log.punch_timestamp)
+                if (
+                    log.punch_direction == AttendancePunchDirection.IN
+                    and _match_allowed_for_log(log, attendance.attendance_clock_in_channel)
+                    and _same_timestamp(attendance.attendance_clock_in_date, attendance.attendance_clock_in, localized_ts)
+                ):
+                    in_match = log.id
+                    break
+        if not out_match and attendance.attendance_clock_out and attendance.attendance_clock_out_channel in RAW_CHANNELS.union({None, ""}):
+            for log in reversed(logs):
+                localized_ts = _aware_local(log.punch_timestamp)
+                if (
+                    log.punch_direction == AttendancePunchDirection.OUT
+                    and _match_allowed_for_log(log, attendance.attendance_clock_out_channel)
+                    and _same_timestamp(attendance.attendance_clock_out_date, attendance.attendance_clock_out, localized_ts)
+                ):
+                    out_match = log.id
+                    break
 
     for log in logs:
         accepted = False
@@ -390,7 +688,7 @@ def reconcile_attendance_punches(*, employee, attendance_date: date):
 def reconcile_single_punch_against_attendance(punch: AttendancePunchingHistory):
     if not punch or not punch.employee_id:
         return
-    dt = timezone.localtime(punch.punch_timestamp) if timezone.is_aware(punch.punch_timestamp) else punch.punch_timestamp
+    dt = _aware_local(punch.punch_timestamp)
     attendance = Attendance.objects.filter(employee_id=punch.employee_id).filter(
         Q(attendance_date=dt.date()) | Q(attendance_date=dt.date() - timedelta(days=1))
     ).order_by('-attendance_date').first()
