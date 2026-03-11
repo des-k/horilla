@@ -29,12 +29,12 @@ def _clone_uploaded_file(uploaded):
             pos = uploaded.tell()
         except Exception:
             pos = None
-    data = uploaded.read()
     try:
         uploaded.seek(0)
     except Exception:
         pass
-    if pos not in (None, 0):
+    data = uploaded.read()
+    if pos is not None:
         try:
             uploaded.seek(pos)
         except Exception:
@@ -47,7 +47,21 @@ def _clone_uploaded_file(uploaded):
 def _save_cloned_photo(instance: AttendancePunchingHistory, uploaded):
     cloned = _clone_uploaded_file(uploaded)
     if cloned:
-        instance.photo.save(cloned.name, cloned, save=False)
+        instance.photo = cloned
+
+
+def canonical_punch_image_reference(*, punch: Optional[AttendancePunchingHistory] = None, uploaded=None):
+    """Return a canonical image artifact for reuse across attendance consumers.
+
+    Prefer the already-saved raw punch photo so Attendance and AttendanceActivity
+    can point at the same stored file instead of re-compressing and re-saving the
+    same upload independently in the same request flow.
+    """
+    if punch is not None:
+        photo = getattr(punch, "photo", None)
+        if photo:
+            return photo
+    return uploaded
 
 
 def normalize_mobile_device_info(request) -> str:
