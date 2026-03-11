@@ -138,6 +138,22 @@
           </a>
         {% endif %}
       {% endif %}
+    {% elif attendance.is_validate_request_approved %}
+      {% if attendance.employee_id.employee_user_id == request.user %}
+        <a href="{% url 'cancel-validate-attendance-request' attendance.id %}"
+           class="oh-btn oh-btn--secondary w-100"
+           onclick="return confirm('{% trans "Cancel this approved request?" %}');">
+          <ion-icon name="close-circle-outline"></ion-icon>
+          {% trans "Cancel Approved Request" %}
+        </a>
+      {% elif request.user|is_reportingmanager or perms.attendance.change_attendance %}
+        <a href="{% url 'revoke-validate-attendance-request' attendance.id %}"
+           class="oh-btn oh-btn--warning w-100"
+           onclick="return confirm('{% trans "Revoke this approval and restore raw attendance?" %}');">
+          <ion-icon name="refresh-outline"></ion-icon>
+          {% trans "Revoke Approval" %}
+        </a>
+      {% endif %}
     {% endif %}
   </div>
 </div>
