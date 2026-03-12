@@ -3505,7 +3505,7 @@ class AttendanceMonthlyRecapAPIView(APIView):
         return qs.filter(id=employee.id)
 
     def get(self, request):
-        from attendance.services.monthly_recap import get_monthly_attendance_rows
+        from attendance.services.monthly_recap import get_monthly_attendance_recap
 
         month = self._resolve_month(request)
         lang = self._resolve_language(request)
@@ -3521,7 +3521,9 @@ class AttendanceMonthlyRecapAPIView(APIView):
             except Exception:
                 selected_employee = None
 
-        if selected_employee is None:
+            if selected_employee is None:
+                return Response({"error": "Invalid employee_id"}, status=status.HTTP_400_BAD_REQUEST)
+        else:
             # Default: self (if accessible), else first accessible employee
             try:
                 me = request.user.employee_get
@@ -3532,9 +3534,23 @@ class AttendanceMonthlyRecapAPIView(APIView):
                 selected_employee = employees_qs.first()
 
         if selected_employee is None:
-            return Response({"rows": []}, status=200)
+            return Response(
+                {
+                    "employee_id": None,
+                    "month": month,
+                    "lang": lang,
+                    "summary": {
+                        "late_minutes": 0,
+                        "early_out_minutes": 0,
+                        "total_minutes": 0,
+                    },
+                    "rows": [],
+                },
+                status=200,
+            )
 
-        rows = get_monthly_attendance_rows(selected_employee, month, language=lang)
+        recap = get_monthly_attendance_recap(selected_employee, month, language=lang)
+        rows = recap["rows"]
         payload_rows = [
             {
                 "no": r.no,
@@ -3555,6 +3571,7 @@ class AttendanceMonthlyRecapAPIView(APIView):
                 "employee_id": selected_employee.id,
                 "month": month,
                 "lang": lang,
+                "summary": recap["summary"],
                 "rows": payload_rows,
             },
             status=200,
@@ -3584,9 +3601,10 @@ class AttendanceMonthlyRecapExportPDFAPIView(AttendanceMonthlyRecapAPIView):
         if employee is None:
             return Response({"error": "Invalid employee_id"}, status=status.HTTP_400_BAD_REQUEST)
 
-        from attendance.services.monthly_recap import get_monthly_attendance_rows
+        from attendance.services.monthly_recap import get_monthly_attendance_recap
 
-        rows = get_monthly_attendance_rows(employee, month, language=lang)
+        recap = get_monthly_attendance_recap(employee, month, language=lang)
+        rows = recap["rows"]
         year = int(month[:4])
         month_no = int(month[5:7])
 
@@ -3618,6 +3636,7 @@ class AttendanceMonthlyRecapExportPDFAPIView(AttendanceMonthlyRecapAPIView):
             "month_display": month_display,
             "year": year,
             "rows": rows,
+            "summary": recap["summary"],
         }
 
         filename = f"monthly_attendance_{employee.id}_{month}_{lang}.pdf"
