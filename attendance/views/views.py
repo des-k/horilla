@@ -47,7 +47,7 @@ from django.template.loader import render_to_string
 from django.urls import reverse
 from django.utils import timezone as django_timezone
 from django.utils.timezone import now
-from django.utils.translation import gettext as __
+from django.utils.translation import get_language, gettext as __
 from django.utils.translation import gettext_lazy as _
 from django.views.decorators.http import require_http_methods
 from xhtml2pdf import pisa
@@ -990,11 +990,14 @@ def attendance_activity_view(request):
     activity_ids = json.dumps(
         [instance.id for instance in paginator_qry(attendance_activities, None)]
     )
+    paged_activities = paginator_qry(attendance_activities, request.GET.get("page"))
+    _decorate_attendance_activity_payload(paged_activities)
+
     return render(
         request,
         "attendance/attendance_activity/attendance_activity_view.html",
         {
-            "data": paginator_qry(attendance_activities, request.GET.get("page")),
+            "data": paged_activities,
             "pd": previous_data,
             "f": filter_obj,
             "gp_fields": AttendanceActivityReGroup.fields,
@@ -1037,6 +1040,205 @@ def _scoped_attendance_activity_queryset(request):
         "attendance.view_attendanceactivity",
     )
     return (scoped_qs | self_qs).distinct()
+
+
+def _normalized_activity_language() -> str:
+    lang = (get_language() or "en").lower()
+    return "id" if lang.startswith("id") else "en"
+
+
+def _extract_attendance_activity_objects(data):
+    if data is None:
+        return []
+    if hasattr(data, "object_list"):
+        object_list = list(data.object_list)
+        if all(isinstance(obj, AttendanceActivity) for obj in object_list):
+            return object_list
+        data = object_list
+
+    activities = []
+    try:
+        iterable = list(data)
+    except TypeError:
+        iterable = []
+
+    for entry in iterable:
+        if isinstance(entry, dict):
+            page = entry.get("list")
+            if hasattr(page, "object_list"):
+                activities.extend(
+                    [obj for obj in list(page.object_list) if isinstance(obj, AttendanceActivity)]
+                )
+                continue
+        if isinstance(entry, AttendanceActivity):
+            activities.append(entry)
+    return activities
+
+
+def _local_date_from_datetime(value):
+    if not value:
+        return None
+    try:
+        if django_timezone.is_aware(value):
+            value = django_timezone.localtime(value)
+        return value.date()
+    except Exception:
+        return None
+
+
+def _format_activity_raw_time(value):
+    try:
+        return value.strftime("%H:%M") if value else "-"
+    except Exception:
+        return "-"
+
+
+def _choice_display(instance, field_name):
+    if not instance:
+        return None
+    getter = getattr(instance, f"get_{field_name}_display", None)
+    try:
+        if callable(getter):
+            value = getter()
+            if value:
+                return str(value)
+    except Exception:
+        pass
+    raw_value = getattr(instance, field_name, None)
+    if raw_value in (None, ""):
+        return None
+    return str(raw_value)
+
+
+def _location_display(location):
+    if not location:
+        return "-", None
+    if isinstance(location, dict):
+        lat = location.get("lat", location.get("latitude"))
+        lng = location.get("lng", location.get("longitude"))
+        if lat is not None and lng is not None:
+            return f"{lat}, {lng}", f"https://www.google.com/maps?q={lat},{lng}"
+    return str(location), None
+
+
+def _decorate_attendance_activity_records(activities, *, language=None):
+    activities = [obj for obj in (activities or []) if isinstance(obj, AttendanceActivity)]
+    if not activities:
+        return
+
+    language = language or _normalized_activity_language()
+    attendance_index = {}
+    employee_ids = sorted({obj.employee_id_id for obj in activities if obj.employee_id_id})
+    attendance_dates = sorted({obj.attendance_date for obj in activities if obj.attendance_date})
+    if employee_ids and attendance_dates:
+        attendance_index = {
+            (att.employee_id_id, att.attendance_date): att
+            for att in Attendance.objects.filter(
+                employee_id_id__in=employee_ids,
+                attendance_date__in=attendance_dates,
+            ).select_related("shift_id", "work_type_id")
+        }
+
+    recap_cache = {}
+    for activity in activities:
+        recap_row = None
+        if activity.employee_id_id and activity.attendance_date:
+            month_key = activity.attendance_date.strftime("%Y-%m")
+            cache_key = (activity.employee_id_id, month_key)
+            if cache_key not in recap_cache:
+                rows = get_monthly_attendance_rows(
+                    activity.employee_id,
+                    month_key,
+                    language=language,
+                )
+                recap_cache[cache_key] = {
+                    row.attendance_date: row
+                    for row in rows
+                }
+            recap_row = recap_cache.get(cache_key, {}).get(activity.attendance_date)
+
+        attendance = attendance_index.get((activity.employee_id_id, activity.attendance_date))
+
+        activity.display_note = getattr(recap_row, "note", "-") or "-"
+        activity.display_check_in = (
+            getattr(recap_row, "check_in", None)
+            or _format_activity_raw_time(getattr(activity, "clock_in", None))
+        )
+        activity.display_check_out = (
+            getattr(recap_row, "check_out", None)
+            or _format_activity_raw_time(getattr(activity, "clock_out", None))
+        )
+        activity.display_clock_in_date = _local_date_from_datetime(
+            getattr(recap_row, "final_in_datetime", None)
+        )
+        activity.display_clock_out_date = _local_date_from_datetime(
+            getattr(recap_row, "final_out_datetime", None)
+        )
+        activity.display_work_type = getattr(recap_row, "work_type", None) or "-"
+        activity.display_shift_information = getattr(recap_row, "shift_information", None) or "-"
+        activity.display_late = getattr(recap_row, "late", None) or "00:00"
+        activity.display_early_out = getattr(recap_row, "early_out", None) or "00:00"
+
+        has_final_in = bool(getattr(recap_row, "final_in_datetime", None))
+        has_final_out = bool(getattr(recap_row, "final_out_datetime", None))
+
+        in_location = None
+        out_location = None
+        in_image = None
+        out_image = None
+        in_source_label = "-"
+        out_source_label = "-"
+        in_mode_label = "-"
+        out_mode_label = "-"
+
+        if has_final_in:
+            in_source_label = (
+                _choice_display(attendance, "attendance_clock_in_channel")
+                or _choice_display(activity, "clock_in_channel")
+                or "-"
+            )
+            in_mode_label = (
+                _choice_display(attendance, "attendance_clock_in_mode")
+                or _choice_display(activity, "clock_in_mode")
+                or getattr(recap_row, "display_in_mode", None)
+                or "-"
+            )
+            in_location = getattr(attendance, "attendance_clock_in_location", None) or getattr(activity, "clock_in_location", None)
+            in_image = getattr(attendance, "attendance_clock_in_image", None) or getattr(activity, "clock_in_image", None)
+
+        if has_final_out:
+            out_source_label = (
+                _choice_display(attendance, "attendance_clock_out_channel")
+                or _choice_display(activity, "clock_out_channel")
+                or "-"
+            )
+            out_mode_label = (
+                _choice_display(attendance, "attendance_clock_out_mode")
+                or _choice_display(activity, "clock_out_mode")
+                or getattr(recap_row, "display_out_mode", None)
+                or "-"
+            )
+            out_location = getattr(attendance, "attendance_clock_out_location", None) or getattr(activity, "clock_out_location", None)
+            out_image = getattr(attendance, "attendance_clock_out_image", None) or getattr(activity, "clock_out_image", None)
+
+        activity.display_clock_in_source = in_source_label
+        activity.display_clock_out_source = out_source_label
+        activity.display_clock_in_mode = in_mode_label
+        activity.display_clock_out_mode = out_mode_label
+        activity.display_clock_in_image = in_image
+        activity.display_clock_out_image = out_image
+        activity.display_clock_in_location = in_location
+        activity.display_clock_out_location = out_location
+        activity.display_clock_in_location_text, activity.display_clock_in_map_url = _location_display(in_location)
+        activity.display_clock_out_location_text, activity.display_clock_out_map_url = _location_display(out_location)
+
+
+def _decorate_attendance_activity_payload(data, *, language=None):
+    _decorate_attendance_activity_records(
+        _extract_attendance_activity_objects(data),
+        language=language,
+    )
+    return data
 
 
 def _can_access_attendance_activity(request) -> bool:
@@ -1141,6 +1343,9 @@ def activity_single_view(request, obj_id):
 
     instance_ids_json, instance_ids = _safe_request_instance_ids(request)
     previous_instance, next_instance = closest_numbers(instance_ids, obj_id)
+    if activity:
+        _decorate_attendance_activity_records([activity])
+
     context = {
         "pd": previous_data,
         "activity": activity,
