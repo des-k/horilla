@@ -30,6 +30,7 @@ from attendance.views.views import (
     _attendance_activity_forbidden_response,
     _build_attendance_activity_filter_data,
     _can_access_attendance_activity,
+    _decorate_attendance_activity_payload,
     _scoped_attendance_activity_queryset,
     paginator_qry,
     strtime_seconds,
@@ -258,6 +259,8 @@ def attendance_activity_search(request):
         activity_ids = json.dumps(
             [instance.id for instance in paginator_qry(attendance_activities, None)]
         )
+    _decorate_attendance_activity_payload(attendance_activities)
+
     data_dict = parse_qs(previous_data)
     get_key_instances(AttendanceActivity, data_dict)
     keys_to_remove = [
