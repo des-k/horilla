@@ -108,7 +108,7 @@ from attendance.models import (
 from attendance.views.handle_attendance_errors import handle_attendance_errors
 from attendance.views.process_attendance_data import process_attendance_data
 from attendance.services.punching_history import reconcile_attendance_punches
-from base.forms import AttendanceAllowedIPForm, TrackLateComeEarlyOutForm
+from base.forms import AttendanceAllowedIPForm
 from base.methods import (
     choosesubordinates,
     closest_numbers,
@@ -2928,32 +2928,31 @@ def enable_timerunner(request):
 @permission_required("base.view_tracklatecomeearlyout")
 def track_late_come_early_out(request):
     """
-    Renders the form to track late arrivals and early departures in attendance.
+    Track Late Come & Early Out is now managed automatically and stays disabled.
     """
-    tracking = TrackLateComeEarlyOut.objects.first()
-    form = TrackLateComeEarlyOutForm(
-        initial={"is_enable": tracking.is_enable} if tracking else {}
+    messages.info(
+        request,
+        _("Track Late Come & Early Out is managed automatically and remains disabled."),
     )
-    return render(
-        request, "attendance/late_come_early_out/tracking.html", {"form": form}
-    )
+    return redirect("attendance-settings-view")
 
 
 @login_required
 @permission_required("base.change_tracklatecomeearlyout")
 def enable_disable_tracking_late_come_early_out(request):
     """
-    Enables or disables the tracking of late arrivals and early departures in attendance.
+    Ignore web toggle attempts and keep tracking disabled at the source of truth.
     """
-    if request.method == "POST":
-        enable = bool(request.POST.get("is_enable"))
-        tracking, created = TrackLateComeEarlyOut.objects.get_or_create()
-        tracking.is_enable = enable
+    tracking, _ = TrackLateComeEarlyOut.objects.get_or_create(
+        defaults={"is_enable": False}
+    )
+    if tracking.is_enable:
+        tracking.is_enable = False
         tracking.save()
-        message = _("enabled") if enable else _("disabled")
-        messages.success(
-            request, _("Tracking late come early out {} successfully").format(message)
-        )
+    messages.info(
+        request,
+        _("Track Late Come & Early Out is managed automatically and remains disabled."),
+    )
     return HttpResponse("<script>window.location.reload()</script>")
 
 
