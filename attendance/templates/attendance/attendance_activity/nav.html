@@ -1,36 +1,77 @@
 {% load i18n %} {% load basefilters %}
-<section class="oh-wrapper oh-main__topbar " x-data="{searchShow: false}">
-    <div class="oh-main__titlebar oh-main__titlebar--left">
-        <h1 class="oh-main__titlebar-title fw-bold">
-            <a href="{% url 'attendance-activity-view' %}" class='text-dark'>
-                {% trans "Attendance Activity" %}
-            </a>
-        </h1>
-        <a class="oh-main__titlebar-search-toggle" role="button" aria-label="Toggle Search"
-            @click="searchShow = !searchShow">
-            <ion-icon name="search-outline" class="oh-main__titlebar-serach-icon"></ion-icon>
-        </a>
-    </div>
+<style>
+    .attendance-activity-page .ph-filter-grid {
+        display: grid;
+        grid-template-columns: minmax(260px, 1.5fr) minmax(180px, 1fr) minmax(180px, 1fr) auto;
+        gap: 12px;
+        align-items: end;
+    }
+    .attendance-activity-page .ph-filter-actions {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        justify-content: flex-start;
+        align-items: center;
+    }
+    .attendance-activity-page .ph-filter-actions .oh-btn {
+        min-width: 96px;
+    }
+    .attendance-activity-page .ph-field .oh-label,
+    .attendance-activity-page .ph-field .oh-input__label {
+        display: block;
+        margin-bottom: 6px;
+    }
+    .attendance-activity-page .ph-field .oh-input,
+    .attendance-activity-page .ph-field .oh-select,
+    .attendance-activity-page .ph-field input[type="date"] {
+        min-height: 42px;
+    }
+    .attendance-activity-page .ph-field .select2-container .select2-selection--single {
+        min-height: 42px !important;
+        display: flex;
+        align-items: center;
+    }
+    .attendance-activity-page .ph-field .select2-container--default .select2-selection--single .select2-selection__rendered {
+        line-height: 40px !important;
+    }
+    .attendance-activity-page .ph-field .select2-container--default .select2-selection--single .select2-selection__arrow {
+        height: 40px !important;
+    }
+    @media (max-width: 991px) {
+        .attendance-activity-page .ph-filter-grid {
+            grid-template-columns: 1fr 1fr;
+        }
+    }
+    @media (max-width: 640px) {
+        .attendance-activity-page .ph-filter-grid {
+            grid-template-columns: 1fr;
+        }
+    }
+</style>
+<section class="oh-wrapper attendance-activity-page" x-data="{searchShow: false}">
     <form hx-get="{% url 'attendance-activity-search' %}" id="filterForm" hx-swap="innerHTML"
-        hx-target="#activity-table" class="d-flex" onsubmit="event.preventDefault()">
-        <div class="oh-main__titlebar oh-main__titlebar--right">
+        hx-target="#activity-table" onsubmit="event.preventDefault()">
+        <div class="oh-main__titlebar oh-main__titlebar--left">
+            <h1 class="oh-main__titlebar-title fw-bold">
+                <a href="{% url 'attendance-activity-view' %}" class='text-dark'>
+                    {% trans "Attendance Activity" %}
+                </a>
+            </h1>
+            <a class="oh-main__titlebar-search-toggle" role="button" aria-label="Toggle Search"
+                @click="searchShow = !searchShow">
+                <ion-icon name="search-outline" class="oh-main__titlebar-serach-icon"></ion-icon>
+            </a>
+        </div>
+        <div class="oh-main__titlebar oh-main__titlebar--right mt-2">
             <div class="oh-input-group oh-input__search-group"
                 :class="searchShow ? 'oh-input__search-group--show' : ''">
                 <ion-icon name="search-outline" class="oh-input-group__icon oh-input-group__icon--left"></ion-icon>
                 <input type="text" class="oh-input oh-input__icon" aria-label="Search Input" id="attendance-search"
-                    name='search' placeholder="{% trans 'Search' %}" onkeyup="$('.filterButton')[0].click()" />
+                    name='search' value="{{ activity_filter_data.search|default:'' }}" placeholder="{% trans 'Search' %}"
+                    onkeyup="$('.filterButton')[0].click()" />
             </div>
 
             <div class="oh-main__titlebar-button-container">
-                <div class="oh-dropdown" x-data="{open: false}">
-                    <button class="oh-btn ml-2" @click="open = !open" onclick="event.preventDefault()">
-                        <ion-icon name="filter" class="mr-1"></ion-icon>{% trans "Filter" %}<div id="filterCount"></div>
-                    </button>
-                    <div class="oh-dropdown__menu oh-dropdown__menu--right oh-dropdown__filter p-4" x-show="open"
-                        @click.outside="open = false" style="display: none;">
-                        {% include 'attendance/attendance_activity/activity_filters.html' %}
-                    </div>
-                </div>
                 <div class="oh-dropdown" x-data="{open: false}">
                     <button class="oh-btn ml-2" @click="open = !open" onclick="event.preventDefault()">
                         <ion-icon name="library-outline" class="mr-1"></ion-icon>{% trans "Group By" %}
@@ -51,7 +92,7 @@
                                         <select class="oh-select mt-1 w-100" id="id_field" name="field"
                                             class="select2-selection select2-selection--single">
                                             {% for field in gp_fields %}
-                                                <option value="{{ field.0 }}">{% trans field.1 %}</option>
+                                                <option value="{{ field.0 }}" {% if group_field == field.0 %}selected{% endif %}>{% trans field.1 %}</option>
                                             {% endfor %}
                                         </select>
                                     </div>
@@ -90,12 +131,10 @@
                 {% endif %}
             </div>
         </div>
+
+        {% include 'attendance/attendance_activity/activity_filters.html' %}
     </form>
     <script>
-        $('#attendance-search').keydown(function (e) {
-            var val = $(this).val();
-            $('.pg').attr('hx-vals', `{"search":${val}}`);
-        });
         $(document).ready(function () {
             $('#id_field').on('change', function () {
                 $('.filterButton')[0].click();
