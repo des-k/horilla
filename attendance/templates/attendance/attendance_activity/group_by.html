@@ -63,6 +63,7 @@
                                                 hx-get="{% url 'attendance-activity-search' %}?{{pd}}&orderby=clock_out_date">
                                                 {% trans "Out Date" %}
                                             </div>
+                                            <div class='oh-sticky-table__th'>{% trans "Note" %}</div>
                                         </div>
                                     </div>
                                     <div class="oh-sticky-table__tbody">
@@ -87,27 +88,28 @@
                                                 </div>
                                                 <div class="oh-sticky-table__td dateformat_changer">{{activity.attendance_date}}
                                                 </div>
-                                                <div class="oh-sticky-table__td dateformat_changer">{{ activity.clock_in_date|default_if_none:"-"|default:"-" }}</div>
-                                                <div class="oh-sticky-table__td timeformat_changer">{{activity.clock_in}}</div>
+                                                <div class="oh-sticky-table__td dateformat_changer">{{ activity.display_clock_in_date|default_if_none:"-"|default:"-" }}</div>
+                                                <div class="oh-sticky-table__td">{{ activity.display_check_in|default_if_none:"-"|default:"-" }}</div>
                                                 <div class="oh-sticky-table__td" onclick="event.stopPropagation();">
-                                                  {% if activity.clock_in_image %}
-                                                    <a href="{{ activity.clock_in_image.url }}" target="_blank" onclick="event.stopPropagation();">
-                                                      <img src="{{ activity.clock_in_image.url }}" style="height:32px;width:32px;object-fit:cover;border-radius:6px;" />
+                                                  {% if activity.display_clock_in_image %}
+                                                    <a href="{{ activity.display_clock_in_image.url }}" target="_blank" onclick="event.stopPropagation();">
+                                                      <img src="{{ activity.display_clock_in_image.url }}" style="height:32px;width:32px;object-fit:cover;border-radius:6px;" />
                                                     </a>
                                                   {% else %}-{% endif %}
                                                 </div>
                                                 
-                                                <div class="oh-sticky-table__td timeformat_changer">{{activity.clock_out}}</div>
+                                                <div class="oh-sticky-table__td">{{ activity.display_check_out|default_if_none:"-"|default:"-" }}</div>
                                                 <div class="oh-sticky-table__td" onclick="event.stopPropagation();">
-                                                  {% if activity.clock_out_image %}
-                                                    <a href="{{ activity.clock_out_image.url }}" target="_blank" onclick="event.stopPropagation();">
-                                                      <img src="{{ activity.clock_out_image.url }}" style="height:32px;width:32px;object-fit:cover;border-radius:6px;" />
+                                                  {% if activity.display_clock_out_image %}
+                                                    <a href="{{ activity.display_clock_out_image.url }}" target="_blank" onclick="event.stopPropagation();">
+                                                      <img src="{{ activity.display_clock_out_image.url }}" style="height:32px;width:32px;object-fit:cover;border-radius:6px;" />
                                                     </a>
                                                   {% else %}-{% endif %}
                                                 </div>
                                                 
-                                                <div class="oh-sticky-table__td dateformat_changer">{% if activity.clock_out_date %}<span class="dateformat_changer">{{ activity.clock_out_date }}</span>{% else %}-{% endif %}
+                                                <div class="oh-sticky-table__td dateformat_changer">{{ activity.display_clock_out_date|default_if_none:"-"|default:"-" }}
                                                 </div>
+                                                <div class="oh-sticky-table__td" title="{{ activity.display_note|default_if_none:'-'|default:'-' }}">{{ activity.display_note|default_if_none:"-"|default:"-" }}</div>
                                             </div>
                                         {% endfor %}
                                     </div>
