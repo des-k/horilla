@@ -4,25 +4,39 @@
     <meta charset="utf-8" />
     <title>{{ title }}</title>
     <style>
-      /* Keep styling lightweight and wkhtmltopdf-friendly */
       body { font-size: 12px; }
       h2 { margin: 0 0 10px 0; text-align: center; }
       .pdf-header { text-align: center; }
       .meta { margin: 0 0 6px 0; text-align: center; }
-      .meta strong { display:inline; }
-      table { width: 100%; border-collapse: collapse; }
-      th, td { border: 1px solid #999; padding: 6px 6px; vertical-align: top; }
-      th { background: #f2f2f2; }
+      .meta strong { display: inline; }
+      .summary-table,
+      .attendance-table { width: 100%; border-collapse: collapse; }
+      .attendance-table th,
+      .attendance-table td { border: 1px solid #999; padding: 6px 6px; vertical-align: top; }
+      .attendance-table th { background: #f2f2f2; }
+      .summary-table td {
+        border: 1px solid #999;
+        padding: 8px;
+        vertical-align: top;
+      }
+      .summary-label {
+        font-size: 10px;
+        font-weight: bold;
+        text-transform: uppercase;
+        margin-bottom: 6px;
+      }
+      .summary-value {
+        font-size: 16px;
+        font-weight: bold;
+      }
       .off-row td { background: #ffd6e5; }
       .nowrap { white-space: nowrap; }
-      /* Narrow "No" column */
       .col-no { width: 32px; text-align: center; }
-      /* Center common value columns */
       .col-center { text-align: center; }
+      .section-gap { margin: 10px 0; }
     </style>
   </head>
   <body>
-    {# Header PDF (ONLY) #}
     <div class="pdf-header">
       <h2>{{ title }}</h2>
 
@@ -39,7 +53,26 @@
 
     <hr />
 
-    <table>
+    <div class="section-gap">
+      <table class="summary-table">
+        <tr>
+          <td>
+            <div class="summary-label">{% if lang == 'id' %}Terlambat{% else %}Late{% endif %}</div>
+            <div class="summary-value">{{ summary.late_minutes|default:0 }} {% if lang == 'id' %}Menit{% else %}Minutes{% endif %}</div>
+          </td>
+          <td>
+            <div class="summary-label">{% if lang == 'id' %}Pulang Cepat{% else %}Early Out{% endif %}</div>
+            <div class="summary-value">{{ summary.early_out_minutes|default:0 }} {% if lang == 'id' %}Menit{% else %}Minutes{% endif %}</div>
+          </td>
+          <td>
+            <div class="summary-label">{% if lang == 'id' %}Total Terlambat + Pulang Cepat{% else %}Total Late + Early Out{% endif %}</div>
+            <div class="summary-value">{{ summary.total_minutes|default:0 }} {% if lang == 'id' %}Menit{% else %}Minutes{% endif %}</div>
+          </td>
+        </tr>
+      </table>
+    </div>
+
+    <table class="attendance-table">
       <thead>
         <tr>
           {% if lang == 'id' %}
