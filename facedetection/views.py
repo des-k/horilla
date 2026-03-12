@@ -1,20 +1,33 @@
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required, permission_required
-from django.http import QueryDict
-from django.shortcuts import redirect, render
+from django.http import HttpResponseNotAllowed, QueryDict
+from django.shortcuts import render
 from django.utils.decorators import method_decorator
 from django.utils.translation import gettext_lazy as _
 from django.views.decorators.csrf import csrf_exempt
-from rest_framework import status
+from rest_framework import serializers, status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from base.models import Company
 from facedetection.forms import FaceDetectionSetupForm
+from facedetection.models import EmployeeFaceDetection, FaceDetection
 from horilla.decorators import hx_request_required
 
-from .serializers import *
+from .serializers import EmployeeFaceDetectionSerializer, FaceDetectionSerializer
+
+
+def ensure_face_detection_enabled(company):
+    """Return the company face-detection config with the effective state forced ON."""
+    facedetection, _ = FaceDetection.objects.get_or_create(
+        company_id=company,
+        defaults={"start": True},
+    )
+    if not facedetection.start:
+        facedetection.start = True
+        facedetection.save()
+    return facedetection
 
 
 class FaceDetectionConfigAPIView(APIView):
@@ -30,13 +43,12 @@ class FaceDetectionConfigAPIView(APIView):
     def get_facedetection(self, request):
         company = self.get_company(request)
         try:
-            facedetection = FaceDetection.objects.get_or_create(company_id=company)
-            return facedetection
+            return ensure_face_detection_enabled(company)
         except Exception as e:
             raise serializers.ValidationError(e)
 
     def get(self, request):
-        serializer = FaceDetectionSerializer(self.get_facedetection(request)[0])
+        serializer = FaceDetectionSerializer(self.get_facedetection(request))
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     @method_decorator(
@@ -44,30 +56,28 @@ class FaceDetectionConfigAPIView(APIView):
         name="dispatch",
     )
     def post(self, request):
-        if self.get_facedetection(request).start:
-            employee_id = request.user.employee_get.id
-            data = request.data
-            if isinstance(data, QueryDict):
-                data = data.dict()
-            data["employee_id"] = employee_id
-            serializer = EmployeeFaceDetectionSerializer(data=data)
-            if serializer.is_valid():
-                serializer.save()
-                return Response(serializer.data, status=status.HTTP_201_CREATED)
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-        raise serializers.ValidationError("Facedetection not yet started..")
+        employee_id = request.user.employee_get.id
+        data = request.data
+        if isinstance(data, QueryDict):
+            data = data.dict()
+        data["employee_id"] = employee_id
+        serializer = EmployeeFaceDetectionSerializer(data=data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     @method_decorator(
         permission_required("facedetection.change_facedetection", raise_exception=True),
         name="dispatch",
     )
     def put(self, request):
-        data = request.data
         serializer = FaceDetectionSerializer(
-            self.get_facedetection(request)[0], data=data
+            self.get_facedetection(request), data=request.data, partial=True
         )
         if serializer.is_valid():
             serializer.save()
+            serializer = FaceDetectionSerializer(self.get_facedetection(request))
             return Response(serializer.data, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -76,9 +86,14 @@ class FaceDetectionConfigAPIView(APIView):
         name="dispatch",
     )
     def delete(self, request):
-        self.get_facedetection(request).delete()
+        self.get_facedetection(request)
         return Response(
-            {"message": "Facedetection deleted successfully"}, status=status.HTTP_200_OK
+            {
+                "detail": _(
+                    "Face detection is always active and cannot be deleted."
+                )
+            },
+            status=status.HTTP_405_METHOD_NOT_ALLOWED,
         )
 
 
@@ -99,8 +114,7 @@ class EmployeeFaceDetectionGetPostAPIView(APIView):
     def get_facedetection(self, request):
         company = self.get_company(request)
         try:
-            facedetection = FaceDetection.objects.get(company_id=company)
-            return facedetection
+            return ensure_face_detection_enabled(company)
         except Exception as e:
             raise serializers.ValidationError(e)
 
@@ -125,18 +139,21 @@ class EmployeeFaceDetectionGetPostAPIView(APIView):
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     def post(self, request):
-        if not self.get_facedetection(request).start:
-            raise serializers.ValidationError("Facedetection not yet started..")
-    
+        self.get_facedetection(request)
+
         employee = request.user.employee_get
         obj, created = EmployeeFaceDetection.objects.get_or_create(employee_id=employee)
-    
+
         if "image" in request.FILES:
             obj.image = request.FILES["image"]
             obj.save()
-    
+
         serializer = EmployeeFaceDetectionSerializer(obj)
-        return Response(serializer.data, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+        return Response(
+            serializer.data,
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
+
 
 def get_company(request):
     try:
@@ -149,11 +166,11 @@ def get_company(request):
         raise serializers.ValidationError(e)
 
 
+
 def get_facedetection(request):
     company = get_company(request)
     try:
-        location = FaceDetection.objects.get(company_id=company)
-        return location
+        return ensure_face_detection_enabled(company)
     except Exception as e:
         raise serializers.ValidationError(e)
 
@@ -162,25 +179,23 @@ def get_facedetection(request):
 @permission_required("geofencing.add_localbackup")
 @hx_request_required
 def face_detection_config(request):
-    try:
-        form = FaceDetectionSetupForm(instance=get_facedetection(request))
-    except:
-        form = FaceDetectionSetupForm()
+    company = get_company(request)
+    facedetection = ensure_face_detection_enabled(company)
 
     if request.method == "POST":
-        try:
-            form = FaceDetectionSetupForm(
-                request.POST, instance=get_facedetection(request)
-            )
-        except:
-            form = FaceDetectionSetupForm(request.POST)
+        form = FaceDetectionSetupForm(request.POST, instance=facedetection)
         if form.is_valid():
-            facedetection = form.save(
-                commit=False,
-            )
-            facedetection.company_id = get_company(request)
+            facedetection = form.save(commit=False)
+            facedetection.company_id = company
             facedetection.save()
-            messages.success(request, _("facedetection config created successfully."))
+            messages.success(request, _("Face detection is always active."))
         else:
-            messages.info(request, "Not valid")
-    return render(request, "face_config.html", {"form": form})
+            messages.info(request, _("Face detection remains active."))
+    else:
+        form = FaceDetectionSetupForm(instance=facedetection)
+
+    return render(
+        request,
+        "face_config.html",
+        {"form": form, "facedetection": facedetection},
+    )
