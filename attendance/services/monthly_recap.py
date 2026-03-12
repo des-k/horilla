@@ -470,6 +470,10 @@ class MonthlyRecapRow:
     is_off: bool = False
     late_minutes: int = 0
     early_out_minutes: int = 0
+    final_in_datetime: Optional[datetime] = None
+    final_out_datetime: Optional[datetime] = None
+    display_in_mode: str = ""
+    display_out_mode: str = ""
 
 
 @dataclass(frozen=True)
@@ -1447,6 +1451,10 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
                 is_off=False,
                 late_minutes=late_minutes,
                 early_out_minutes=early_minutes,
+                final_in_datetime=final_in_dt,
+                final_out_datetime=final_out_dt,
+                display_in_mode=display_in_mode,
+                display_out_mode=display_out_mode,
             )
         )
         i += 1
