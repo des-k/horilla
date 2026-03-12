@@ -285,11 +285,11 @@ class MonthlyRecapIntegrationTests(unittest.TestCase):
         row = self._find_row(rows, self.target_date)
 
         self.assertTrue(row.is_off)
-        self.assertEqual(row.check_in, "—")
-        self.assertEqual(row.check_out, "—")
+        self.assertEqual(row.check_in, "-")
+        self.assertEqual(row.check_out, "-")
         self.assertEqual(row.late, "00:00")
         self.assertEqual(row.early_out, "00:00")
-        self.assertEqual(row.work_type, "—")
+        self.assertEqual(row.work_type, "-")
         self.assertEqual(row.note, "Holiday")
         self.assertNotIn("pending", row.note.lower())
 
@@ -403,8 +403,8 @@ class MonthlyRecapIntegrationTests(unittest.TestCase):
         rows = monthly_recap.get_monthly_attendance_rows(self.employee, "2026-03")
         row = self._find_row(rows, self.target_date)
 
-        self.assertEqual(row.check_in, "—")
-        self.assertEqual(row.check_out, "—")
+        self.assertEqual(row.check_in, "-")
+        self.assertEqual(row.check_out, "-")
         self.assertIn("Attendance IN pending: 08:12", row.note)
         self.assertIn("Attendance OUT pending: 17:05", row.note)
 
@@ -431,8 +431,8 @@ class MonthlyRecapIntegrationTests(unittest.TestCase):
         rows = monthly_recap.get_monthly_attendance_rows(self.employee, "2026-03")
         row = self._find_row(rows, self.target_date)
 
-        self.assertEqual(row.check_in, "—")
-        self.assertEqual(row.check_out, "—")
+        self.assertEqual(row.check_in, "-")
+        self.assertEqual(row.check_out, "-")
         self.assertIn("Attendance IN pending: 08:12", row.note)
         self.assertNotIn("Attendance correction pending", row.note)
 
@@ -463,7 +463,7 @@ class MonthlyRecapIntegrationTests(unittest.TestCase):
         rows = monthly_recap.get_monthly_attendance_rows(self.employee, "2026-03")
         row = self._find_row(rows, self.target_date)
 
-        self.assertEqual(row.check_in, "—")
+        self.assertEqual(row.check_in, "-")
         self.assertIn("Attendance IN pending: 08:12", row.note)
         self.assertNotIn("Attendance correction pending", row.note)
 
@@ -497,8 +497,8 @@ class MonthlyRecapIntegrationTests(unittest.TestCase):
         rows = monthly_recap.get_monthly_attendance_rows(self.employee, "2026-03")
         row = self._find_row(rows, self.target_date)
 
-        self.assertEqual(row.check_in, "—")
-        self.assertEqual(row.check_out, "—")
+        self.assertEqual(row.check_in, "-")
+        self.assertEqual(row.check_out, "-")
         self.assertIn("On Duty IN awaiting document upload: 08:00", row.note)
 
     def test_approved_request_out_of_window_is_not_applied_and_only_goes_to_note(self):
@@ -529,7 +529,7 @@ class MonthlyRecapIntegrationTests(unittest.TestCase):
         rows = monthly_recap.get_monthly_attendance_rows(self.employee, "2026-03")
         row = self._find_row(rows, self.target_date)
 
-        self.assertEqual(row.check_in, "—")
+        self.assertEqual(row.check_in, "-")
         self.assertEqual(row.check_out, "17:00")
         self.assertIn("Approved but out of time limit (IN): 13:05", row.note)
 
@@ -550,8 +550,8 @@ class MonthlyRecapIntegrationTests(unittest.TestCase):
         row = self._find_row(rows, self.target_date)
 
         self.assertNotIn("WFA", row.note)
-        self.assertEqual(row.check_in, "—")
-        self.assertEqual(row.check_out, "—")
+        self.assertEqual(row.check_in, "-")
+        self.assertEqual(row.check_out, "-")
 
     def test_indonesian_on_duty_pending_without_attachment_uses_upload_wording_and_shift_times(self):
         on_duty_req = SimpleNamespace(
@@ -620,6 +620,57 @@ class MonthlyRecapIntegrationTests(unittest.TestCase):
         row = self._find_row(rows, self.target_date)
 
         self.assertIn("Absensi Datang disetujui tetapi di luar batas waktu: 13:05", row.note)
+
+
+
+    def test_off_day_placeholders_remain_hyphen(self):
+        monthly_recap.is_holiday = lambda target_date: target_date == self.target_date
+
+        rows = monthly_recap.get_monthly_attendance_rows(self.employee, "2026-03", language="en")
+        row = self._find_row(rows, self.target_date)
+
+        self.assertEqual(row.check_in, "-")
+        self.assertEqual(row.check_out, "-")
+        self.assertEqual(row.work_type, "-")
+
+    def test_missing_punch_placeholders_remain_hyphen(self):
+        rows = monthly_recap.get_monthly_attendance_rows(self.employee, "2026-03", language="en")
+        row = self._find_row(rows, self.target_date)
+
+        self.assertEqual(row.check_in, "-")
+        self.assertEqual(row.check_out, "-")
+
+    def test_monthly_summary_uses_raw_minute_totals(self):
+        attendance = SimpleNamespace(
+            id=55,
+            employee_id=self.employee,
+            attendance_date=self.target_date,
+            attendance_clock_in_date=self.target_date,
+            attendance_clock_in=time(8, 16),
+            attendance_clock_out_date=self.target_date,
+            attendance_clock_out=time(13, 15),
+            requested_data="",
+            is_validate_request=False,
+            is_validate_request_approved=False,
+            shift_id="SHIFT-A",
+            work_type_id=None,
+            attendance_validated=True,
+        )
+
+        monthly_recap.Attendance.objects = FakeManager([attendance])
+
+        summary = monthly_recap.get_monthly_attendance_summary(self.employee, "2026-03")
+
+        self.assertEqual(summary["late_minutes"], 16)
+        self.assertEqual(summary["early_out_minutes"], 225)
+        self.assertEqual(summary["total_minutes"], 241)
+
+    def test_summary_duration_parser_handles_supported_and_invalid_values(self):
+        self.assertEqual(monthly_recap._parse_duration_to_minutes("02:45"), 165)
+        self.assertEqual(monthly_recap._parse_duration_to_minutes("02:45:59"), 165)
+        self.assertEqual(monthly_recap._parse_duration_to_minutes(""), 0)
+        self.assertEqual(monthly_recap._parse_duration_to_minutes("-"), 0)
+        self.assertEqual(monthly_recap._parse_duration_to_minutes("invalid"), 0)
 
 
 if __name__ == "__main__":
