@@ -336,19 +336,18 @@ def owner_can_enter(function, perm: str, model: object, manager_access=False):
 
 
 def install_required(function):
-    from base.models import BiometricAttendance, TrackLateComeEarlyOut
+    from base.context_processors import enable_late_come_early_out_tracking
+    from base.models import BiometricAttendance
 
     def _function(request, *args, **kwargs):
         if request.path_info.endswith("late-come-early-out-view/"):
-            object, created = TrackLateComeEarlyOut.objects.get_or_create()
-            if not object or object.is_enable:
+            if enable_late_come_early_out_tracking(None).get("tracking"):
                 return function(request, *args, **kwargs)
-            else:
-                messages.info(
-                    request,
-                    _("Please enable the Track Late Come & Early Out from settings"),
-                )
-                return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+            messages.info(
+                request,
+                _("Track Late Come & Early Out is managed automatically and remains disabled."),
+            )
+            return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
         object = BiometricAttendance.objects.all().first()
         if not object or object.is_installed:
             return function(request, *args, **kwargs)
