@@ -264,19 +264,27 @@ class AttendanceActivityFilter(FilterSet):
     """
 
     search = django_filters.CharFilter(method=filter_by_name)
+    employee_id = django_filters.ModelChoiceFilter(
+        queryset=Employee.objects.all(),
+        field_name="employee_id",
+        label=_("Employee"),
+        empty_label=_("All Employees"),
+        widget=forms.Select(attrs={"class": "oh-select oh-select-2 w-100"}),
+    )
 
     attendance_date = django_filters.DateFilter(
-        field_name="attendance_date", widget=forms.DateInput(attrs={"type": "date"})
+        field_name="attendance_date",
+        widget=forms.DateInput(attrs={"type": "date", "class": "oh-input w-100"}),
     )
     attendance_date_from = django_filters.DateFilter(
         field_name="attendance_date",
         lookup_expr="gte",
-        widget=forms.DateInput(attrs={"type": "date"}),
+        widget=forms.DateInput(attrs={"type": "date", "class": "oh-input w-100"}),
     )
     attendance_date_till = django_filters.DateFilter(
         field_name="attendance_date",
         lookup_expr="lte",
-        widget=forms.DateInput(attrs={"type": "date"}),
+        widget=forms.DateInput(attrs={"type": "date", "class": "oh-input w-100"}),
     )
     in_from = django_filters.DateFilter(
         field_name="clock_in",
