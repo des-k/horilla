@@ -26,7 +26,14 @@ from attendance.models import (
     AttendanceOverTime,
     AttendanceValidationCondition,
 )
-from attendance.views.views import paginator_qry, strtime_seconds
+from attendance.views.views import (
+    _attendance_activity_forbidden_response,
+    _build_attendance_activity_filter_data,
+    _can_access_attendance_activity,
+    _scoped_attendance_activity_queryset,
+    paginator_qry,
+    strtime_seconds,
+)
 from base.methods import filtersubordinates, get_key_instances, sortby
 from horilla.decorators import (
     hx_request_required,
@@ -221,19 +228,16 @@ def attendance_activity_search(request):
     """
     This method is used to search attendance activity
     """
-    previous_data = request.GET.urlencode()
-    field = request.GET.get("field")
+    if not _can_access_attendance_activity(request):
+        return _attendance_activity_forbidden_response(request)
+
+    filter_data = _build_attendance_activity_filter_data(request)
+    previous_data = filter_data.urlencode()
+    field = filter_data.get("field")
     attendance_activities = AttendanceActivityFilter(
-        request.GET,
+        filter_data,
+        _scoped_attendance_activity_queryset(request),
     ).qs
-    self_attendance_activities = attendance_activities.filter(
-        employee_id__employee_user_id=request.user
-    )
-    attendance_activities = filtersubordinates(
-        request, attendance_activities, "attendance.view_attendanceactivity"
-    )
-    attendance_activities = attendance_activities | self_attendance_activities
-    attendance_activities = attendance_activities.distinct()
     template = "attendance/attendance_activity/activity_list.html"
     attendance_activities = sortby(request, attendance_activities, "orderby")
     if field != "" and field is not None:
@@ -256,7 +260,9 @@ def attendance_activity_search(request):
         )
     data_dict = parse_qs(previous_data)
     get_key_instances(AttendanceActivity, data_dict)
-    keys_to_remove = [key for key, value in data_dict.items() if value == ["unknown"]]
+    keys_to_remove = [
+        key for key, value in data_dict.items() if value in (["unknown"], [""])
+    ]
     for key in keys_to_remove:
         data_dict.pop(key)
     return render(
