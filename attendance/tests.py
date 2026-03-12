@@ -1,4 +1,5 @@
 from io import BytesIO
+import os
 import unittest
 
 from django.core.exceptions import ValidationError
@@ -48,6 +49,23 @@ class AttendanceImageCompressionTests(unittest.TestCase):
         image = Image.open(BytesIO(compressed.read()))
         self.assertEqual(image.format, "PNG")
 
+    def test_small_opaque_png_does_not_silently_become_larger_jpeg(self):
+        uploaded_bytes = self._make_image_bytes(size=(64, 64), fmt="PNG", mode="RGB")
+        uploaded = SimpleUploadedFile("selfie.png", uploaded_bytes, content_type="image/png")
+        compressed = compress_attendance_image(uploaded)
+        self.assertTrue(compressed.name.endswith(".png"))
+        self.assertLessEqual(len(compressed.read()), len(uploaded_bytes))
+
+    def test_large_photo_like_opaque_png_can_switch_to_jpeg_when_materially_smaller(self):
+        random_bytes = os.urandom(512 * 512 * 3)
+        image = Image.frombytes("RGB", (512, 512), random_bytes)
+        output = BytesIO()
+        image.save(output, format="PNG")
+        uploaded = SimpleUploadedFile("photo.png", output.getvalue(), content_type="image/png")
+        compressed = compress_attendance_image(uploaded)
+        self.assertTrue(compressed.name.endswith((".jpg", ".png")))
+        if compressed.name.endswith(".jpg"):
+            self.assertLess(len(compressed.read()), len(output.getvalue()))
 
     def test_cmyk_jpeg_is_normalized_to_rgb_jpeg(self):
         image = Image.new("CMYK", (900, 600), (0, 128, 128, 0))
