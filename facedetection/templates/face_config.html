@@ -1,21 +1,31 @@
 {% load i18n %}
-<div class="oh-profile-section__card">
-    <div class="row">
-        <div class="col-12 col-md-6">
-            <div class="oh-label__info">
-                <label class="oh-label">{% trans "Face Detection" %}</label>
+<div class="oh-card">
+    <div class="oh-card__header">
+        <h3 class="oh-card__title mb-0">{% trans "Face Detection" %}</h3>
+    </div>
+    <div class="oh-card__body">
+        <div class="d-flex justify-content-between align-items-center flex-wrap gap-3">
+            <div>
+                <label class="oh-input__label d-block mb-1" for="faceDetectionAlwaysOn">
+                    {% trans "Enable Face Detection" %}
+                </label>
+                <p class="text-muted mb-0">
+                    {% trans "Always enabled for attendance. This setting is managed by the system and cannot be changed here." %}
+                </p>
             </div>
-            <div class="form-control" style="background:#f7f7f7; pointer-events:none;" aria-readonly="true">
-                {% trans "Enabled" %}
+            <div class="d-flex align-items-center gap-2">
+                <span class="badge bg-success text-white">{% trans "Enabled" %}</span>
+                <div class="oh-switch" title="{% trans 'Face Detection is always active and cannot be changed.' %}">
+                    <input
+                        id="faceDetectionAlwaysOn"
+                        type="checkbox"
+                        class="oh-switch__checkbox"
+                        checked
+                        disabled
+                        aria-label="{% trans 'Face Detection is enabled and read only' %}"
+                    >
+                </div>
             </div>
-        </div>
-        <div class="col-12 mt-3">
-            <div class="oh-alert oh-alert--success">
-                {% trans "Face Detection is always active for attendance and cannot be changed from settings." %}
-            </div>
-            <p class="text-muted mt-2 mb-1">
-                {% trans "This status is enforced by the system, so even older saved settings that were OFF will still work as ON." %}
-            </p>
         </div>
     </div>
 </div>
