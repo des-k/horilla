@@ -139,7 +139,10 @@ from notifications.signals import notify
 
 # Monthly recap (Attendance → Attendances)
 from attendance.services.month_params import normalize_month_yyyy_mm, require_month_yyyy_mm
-from attendance.services.monthly_recap import get_monthly_attendance_rows
+from attendance.services.monthly_recap import (
+    get_monthly_attendance_recap,
+    get_monthly_attendance_rows,
+)
 
 
 def attendance_validate(attendance):
@@ -203,8 +206,15 @@ def attendance_employee_month_view(request):
             selected_employee = employees_qs.first()
 
     rows = []
+    summary = {
+        "late_minutes": 0,
+        "early_out_minutes": 0,
+        "total_minutes": 0,
+    }
     if selected_employee:
-        rows = get_monthly_attendance_rows(selected_employee, month)
+        recap = get_monthly_attendance_recap(selected_employee, month)
+        rows = recap["rows"]
+        summary = recap["summary"]
 
     context = {
         "employees": employees_qs,
@@ -212,6 +222,7 @@ def attendance_employee_month_view(request):
         "selected_month": month,
         "max_month": current_month,
         "rows": rows,
+        "summary": summary,
     }
     return render(
         request,
@@ -268,7 +279,8 @@ def attendance_employee_month_export_pdf(request):
 
     # IMPORTANT: pass language into the shared helper so NOTE/Shift strings
     # match the UI rules for the requested language.
-    rows = get_monthly_attendance_rows(employee, month, language=lang)
+    recap = get_monthly_attendance_recap(employee, month, language=lang)
+    rows = recap["rows"]
 
     # Header month display
     if lang == "id":
@@ -299,6 +311,7 @@ def attendance_employee_month_export_pdf(request):
         "month_display": month_display,
         "year": year,
         "rows": rows,
+        "summary": recap["summary"],
     }
 
     filename = f"monthly_attendance_{employee.id}_{month}_{lang}.pdf"
