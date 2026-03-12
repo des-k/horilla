@@ -944,6 +944,9 @@ def clock_out_attendance_and_activity(
     else:
         earliest_checkout_dt = rules.get("check_out_window_start_dt")
 
+    if earliest_checkout_dt and out_datetime < earliest_checkout_dt:
+        raise ValidationError(_("Check-out window has not started yet."))
+
     attendance_defaults = {
         "shift_id": shift,
         "work_type_id": employee.employee_work_info.work_type_id,
