@@ -1,68 +1,139 @@
 {% extends 'index.html' %}
 {% block content %}
-{% load i18n %}
 {% load static %}
-
 
 <style>
   .monthly-off-row {
     background: #ffd6e5;
   }
 
-  /* Recap filter layout */
-  .recap-filter{
-    display:grid;
+  .recap-filter {
+    display: grid;
     grid-template-columns: 280px 340px 1fr;
-    gap:12px;
-    align-items:end;
+    gap: 12px;
+    align-items: end;
   }
-  @media (max-width: 860px){
-    .recap-filter{
+
+  @media (max-width: 860px) {
+    .recap-filter {
       grid-template-columns: 1fr;
-      align-items:stretch;
+      align-items: stretch;
     }
   }
-  .recap-filter .oh-input__label{
-    display:block;
-    margin-bottom:6px;
+
+  .recap-filter .oh-input__label {
+    display: block;
+    margin-bottom: 6px;
   }
-  /* Make Employee (Select2) height match Month input */
+
   .recap-filter__control,
-  .recap-filter input[type="month"]{
-    height:45px;
-  }
-  .recap-filter .select2-container .select2-selection--single{
-    height:45px !important;
-  }
-  .recap-filter .select2-container--default .select2-selection--single .select2-selection__rendered{
-    line-height:45px !important;
-  }
-  .recap-filter .select2-container--default .select2-selection--single .select2-selection__arrow{
-    height:45px !important;
+  .recap-filter input[type="month"] {
+    height: 45px;
   }
 
-  .recap-filter__actions-row{
-    display:flex;
-    gap:10px;
-    align-items:end;
-    flex-wrap:wrap;
-  }
-  .recap-filter__actions-row .oh-select{
-    height:45px;
-    min-width:190px;
+  .recap-filter .select2-container .select2-selection--single {
+    height: 45px !important;
   }
 
-  .recap-filter__month-row{
-    display:flex;
-    gap:10px;
-    align-items:end;
+  .recap-filter .select2-container--default .select2-selection--single .select2-selection__rendered {
+    line-height: 45px !important;
   }
-  .recap-filter__month-row input[type="month"]{
+
+  .recap-filter .select2-container--default .select2-selection--single .select2-selection__arrow {
+    height: 45px !important;
+  }
+
+  .recap-filter__actions-row {
+    display: flex;
+    gap: 10px;
+    align-items: end;
+    flex-wrap: wrap;
+  }
+
+  .recap-filter__actions-row .oh-select {
+    height: 45px;
+    min-width: 190px;
+  }
+
+  .recap-filter__month-row {
+    display: flex;
+    gap: 10px;
+    align-items: end;
+  }
+
+  .recap-filter__month-row input[type="month"] {
     flex: 1 1 auto;
     min-width: 200px;
   }
 
-  /* Make "No" column narrower (table + header) */
+  .monthly-summary-strip {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0;
+    margin-top: 16px;
+    border: 1px solid #e7eaf0;
+    border-radius: 12px;
+    overflow: hidden;
+    background: #fff;
+  }
+
+  .monthly-summary-strip__item {
+    padding: 14px 16px;
+    border-right: 1px solid #e7eaf0;
+    min-height: 92px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+  }
+
+  .monthly-summary-strip__item:last-child {
+    border-right: none;
+  }
+
+  .monthly-summary-strip__label {
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    color: #5c6370;
+    text-transform: uppercase;
+    margin-bottom: 8px;
+  }
+
+  .monthly-summary-strip__value-row {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .monthly-summary-strip__value {
+    font-size: 28px;
+    line-height: 1;
+    font-weight: 700;
+    color: #1f2937;
+  }
+
+  .monthly-summary-strip__unit {
+    font-size: 13px;
+    font-weight: 600;
+    color: #6b7280;
+  }
+
+  @media (max-width: 860px) {
+    .monthly-summary-strip {
+      grid-template-columns: 1fr;
+    }
+
+    .monthly-summary-strip__item {
+      border-right: none;
+      border-bottom: 1px solid #e7eaf0;
+    }
+
+    .monthly-summary-strip__item:last-child {
+      border-bottom: none;
+    }
+  }
+
   .monthly-recap-table .oh-sticky-table__tr > .oh-sticky-table__th:first-child,
   .monthly-recap-table .oh-sticky-table__tr > .oh-sticky-table__td:first-child {
     width: 55px !important;
@@ -71,7 +142,6 @@
     white-space: nowrap;
   }
 
-  /* Center-align these columns: Check In, Check Out, Work Type, Late, Early Out */
   .monthly-recap-table .oh-sticky-table__tr > .oh-sticky-table__th:nth-child(4),
   .monthly-recap-table .oh-sticky-table__tr > .oh-sticky-table__td:nth-child(4),
   .monthly-recap-table .oh-sticky-table__tr > .oh-sticky-table__th:nth-child(5),
@@ -84,21 +154,18 @@
   .monthly-recap-table .oh-sticky-table__tr > .oh-sticky-table__td:nth-child(8) {
     text-align: center !important;
   }
-
 </style>
 
 <div class="oh-wrapper">
   <div class="oh-card">
     <div class="oh-card__header">
-      <h3 class="oh-card__title">{% trans "Attendances" %} — {% trans "Monthly Recap" %}</h3>
+      <h3 class="oh-card__title">Attendances — Monthly Recap</h3>
     </div>
 
     <div class="oh-card__body">
       <form method="get" class="oh-form recap-filter">
         <div class="oh-form-group recap-filter__employee">
-          <label class="oh-input__label">{% trans "Employee" %}</label>
-
-          {# Select2 (already shipped in index.html via build/js/htmxSelect2.js) #}
+          <label class="oh-input__label">Employee</label>
           <select name="employee_id" id="employeeSelect" class="oh-select oh-select2 w-100" style="height:45px;">
             {% for emp in employees %}
               <option value="{{ emp.id }}" {% if selected_employee and emp.id == selected_employee.id %}selected{% endif %}>
@@ -109,10 +176,10 @@
         </div>
 
         <div class="oh-form-group recap-filter__month">
-          <label class="oh-input__label">{% trans "Month" %}</label>
+          <label class="oh-input__label">Month</label>
           <div class="recap-filter__month-row">
             <input type="month" name="month" value="{{ selected_month }}" max="{{ max_month }}" class="oh-input w-100 recap-filter__control" />
-            <button class="oh-btn oh-btn--primary" type="submit">{% trans "Apply" %}</button>
+            <button class="oh-btn oh-btn--primary" type="submit">Apply</button>
           </div>
         </div>
 
@@ -121,15 +188,38 @@
           <div class="recap-filter__actions-row">
             <select id="exportPdfLang" class="oh-select">
               <option value="en" selected>English</option>
-              <option value="id">Bahasa Indonesia</option>
+              <option value="id">Indonesian</option>
             </select>
             <button type="button" id="exportPdfBtn" class="oh-btn oh-btn--secondary">Export PDF</button>
           </div>
         </div>
       </form>
 
+      <div class="monthly-summary-strip" aria-label="Monthly attendance summary">
+        <div class="monthly-summary-strip__item">
+          <div class="monthly-summary-strip__label">LATE</div>
+          <div class="monthly-summary-strip__value-row">
+            <div class="monthly-summary-strip__value">{{ summary.late_minutes|default:0 }}</div>
+            <div class="monthly-summary-strip__unit">Minutes</div>
+          </div>
+        </div>
+        <div class="monthly-summary-strip__item">
+          <div class="monthly-summary-strip__label">EARLY OUT</div>
+          <div class="monthly-summary-strip__value-row">
+            <div class="monthly-summary-strip__value">{{ summary.early_out_minutes|default:0 }}</div>
+            <div class="monthly-summary-strip__unit">Minutes</div>
+          </div>
+        </div>
+        <div class="monthly-summary-strip__item">
+          <div class="monthly-summary-strip__label">TOTAL LATE + EARLY OUT</div>
+          <div class="monthly-summary-strip__value-row">
+            <div class="monthly-summary-strip__value">{{ summary.total_minutes|default:0 }}</div>
+            <div class="monthly-summary-strip__unit">Minutes</div>
+          </div>
+        </div>
+      </div>
+
       <script>
-        // Ensure Select2 is enabled on this page even though we don't include the legacy nav/topbar.
         $(document).ready(function () {
           var $emp = $("#employeeSelect");
           if (!$emp.length) return;
@@ -140,17 +230,14 @@
               $emp.select2('destroy');
             }
           } catch (e) {
-            // ignore
           }
 
-          // Remove any stale containers (in case of browser back/forward cache).
           $emp.parent().find('span.select2').remove();
 
           $emp.select2({
             width: '100%'
           });
 
-          // Export PDF
           $(document).on('click', '#exportPdfBtn', function () {
             var empId = $('#employeeSelect').val();
             var month = $('input[name="month"]').val();
@@ -171,15 +258,15 @@
         <div class="oh-sticky-table__table oh-table--sortable">
           <div class="oh-sticky-table__thead">
             <div class="oh-sticky-table__tr">
-              <div class="oh-sticky-table__th">{% trans "No" %}</div>
-              <div class="oh-sticky-table__th">{% trans "Date" %}</div>
-              <div class="oh-sticky-table__th">{% trans "Shift Information" %}</div>
-              <div class="oh-sticky-table__th">{% trans "Check In" %}</div>
-              <div class="oh-sticky-table__th">{% trans "Check Out" %}</div>
-              <div class="oh-sticky-table__th">{% trans "Work Type" %}</div>
-              <div class="oh-sticky-table__th">{% trans "Late" %}</div>
-              <div class="oh-sticky-table__th">{% trans "Early Out" %}</div>
-              <div class="oh-sticky-table__th">{% trans "Note" %}</div>
+              <div class="oh-sticky-table__th">No</div>
+              <div class="oh-sticky-table__th">Date</div>
+              <div class="oh-sticky-table__th">Shift Information</div>
+              <div class="oh-sticky-table__th">Check In</div>
+              <div class="oh-sticky-table__th">Check Out</div>
+              <div class="oh-sticky-table__th">Work Type</div>
+              <div class="oh-sticky-table__th">Late</div>
+              <div class="oh-sticky-table__th">Early Out</div>
+              <div class="oh-sticky-table__th">Note</div>
             </div>
           </div>
 
@@ -199,7 +286,7 @@
             {% empty %}
               <div class="oh-sticky-table__tr">
                 <div class="oh-sticky-table__td" style="grid-column: span 9;">
-                  {% trans "No data" %}
+                  No data
                 </div>
               </div>
             {% endfor %}
