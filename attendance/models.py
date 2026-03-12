@@ -1,7 +1,7 @@
 """
 models.py
 
-This module is used to register models for recruitment app
+This module is used to register models for attendance app
 
 """
 
@@ -27,6 +27,7 @@ from attendance.methods.utils import (
     validate_time_format,
     validate_time_in_minutes,
 )
+from attendance.services.image_compression import compress_model_image_field
 from base.horilla_company_manager import HorillaCompanyManager
 from base.methods import is_company_leave, is_holiday
 from base.models import Company, EmployeeShift, EmployeeShiftDay, WorkType
@@ -40,6 +41,95 @@ _validate_time_in_minutes = validate_time_in_minutes
 
 
 # Create your models here.
+
+
+class AttendanceWorkMode(models.TextChoices):
+    """Work mode used for attendance punches."""
+    WFO = "wfo", _("WFO")
+    WFA = "wfa", _("WFA")
+    ON_DUTY = "on_duty", _("On Duty")
+
+
+class WorkModeRequestScope(models.TextChoices):
+    """Scope of a work-mode request."""
+    IN = "in", _("IN")
+    OUT = "out", _("OUT")
+    FULL = "full", _("FULL (IN & OUT)")
+
+
+class WorkModeRequestStatus(models.TextChoices):
+    """Approval status for a work-mode request."""
+    PENDING = "pending", _("Pending")
+    WAITING_FOR_APPROVAL = "waiting_for_approval", _("Waiting For Approval")
+    APPROVED = "approved", _("Approved")
+    REJECTED = "rejected", _("Rejected")
+    CANCELED = "canceled", _("Canceled")
+
+
+
+class WorkModeRequestActionType(models.TextChoices):
+    """Audit action applied to a work-mode request."""
+    APPROVED = "APPROVED", _("Approved")
+    REJECTED = "REJECTED", _("Rejected")
+    CANCELED = "CANCELED", _("Canceled")
+
+
+class AttendanceRequestActionType(models.TextChoices):
+    """Audit action applied to an attendance correction request."""
+    APPROVED = "APPROVED", _("Approved")
+    REJECTED = "REJECTED", _("Rejected")
+    CANCELED = "CANCELED", _("Canceled")
+    REVOKED = "REVOKED", _("Revoked")
+
+
+class WorkModeRequestRejectReasonCode(models.TextChoices):
+    """Reason code for REJECTED WorkModeRequest."""
+    MANUAL_REJECT = "MANUAL_REJECT", _("Manual Reject")
+    AUTO_REJECT_CUTOFF_IN_PASSED = "AUTO_REJECT_CUTOFF_IN_PASSED", _("Auto Reject: Cutoff IN Passed")
+    AUTO_REJECT_CUTOFF_OUT_PASSED = "AUTO_REJECT_CUTOFF_OUT_PASSED", _("Auto Reject: Cutoff OUT Passed")
+    AUTO_REJECT_CUTOFF_FULL_PASSED = "AUTO_REJECT_CUTOFF_FULL_PASSED", _("Auto Reject: Cutoff FULL Passed")
+
+    # Attendance punch reject reasons (Option B)
+    EARLY_CHECKOUT_BEFORE_SHIFT_END = (
+        "EARLY_CHECKOUT_BEFORE_SHIFT_END",
+        _("Early check-out before shift end"),
+    )
+    EARLY_CHECKOUT_BEFORE_CUTOFF_IN = (
+        "EARLY_CHECKOUT_BEFORE_CUTOFF_IN",
+        _("Early check-out before cutoff-in"),
+    )
+
+
+class AttendancePunchStatus(models.TextChoices):
+    """Audit status for a punch (IN/OUT) after request decision."""
+    VALID = "VALID", _("Valid")
+    REJECTED = "REJECTED", _("Rejected")
+
+
+class AttendanceChannel(models.TextChoices):
+    """Explicit source/channel persisted on final attendance and activity."""
+    MOBILE = "mobile", _("Mobile")
+    BIOMETRIC = "biometric", _("Biometric")
+    APPROVED_REQUEST = "approved_request", _("Approved Request")
+    CORRECTION_REQUEST = "correction_request", _("Correction Request")
+    AUTO = "auto", _("Auto")
+    MANUAL = "manual", _("Manual")
+    API = "api", _("API")
+
+
+class AttendancePunchSource(models.TextChoices):
+    """Source of a raw punch entry."""
+    MOBILE = "mobile", _("Mobile")
+    BIOMETRIC = "biometric", _("Biometric")
+    API = "api", _("API")
+    UNKNOWN = "unknown", _("Unknown")
+
+
+class AttendancePunchDirection(models.TextChoices):
+    """Direction of a raw punch event."""
+    IN = "in", _("IN")
+    OUT = "out", _("OUT")
+    UNKNOWN = "unknown", _("Unknown")
 
 
 class AttendanceActivity(HorillaModel):
@@ -64,14 +154,62 @@ class AttendanceActivity(HorillaModel):
         on_delete=models.DO_NOTHING,
         verbose_name=_("Shift Day"),
     )
-    in_datetime = models.DateTimeField(null=True)
-    clock_in_date = models.DateField(null=True, verbose_name=_("In Date"))
-    clock_in = models.TimeField(verbose_name=_("Check In"))
-    clock_out_date = models.DateField(null=True, verbose_name=_("Out Date"))
-    out_datetime = models.DateTimeField(null=True)
-    clock_out = models.TimeField(null=True, verbose_name=_("Check Out"))
+    in_datetime = models.DateTimeField(null=True, blank=True)
+    clock_in_date = models.DateField(null=True, blank=True, verbose_name=_("In Date"))
+    clock_in = models.TimeField(null=True, blank=True, verbose_name=_("Check In"))
+    clock_in_channel = models.CharField(
+        max_length=32,
+        null=True,
+        blank=True,
+        choices=AttendanceChannel.choices,
+        verbose_name=_("Check-In Source"),
+    )
+    clock_out_date = models.DateField(null=True, blank=True, verbose_name=_("Out Date"))
+    out_datetime = models.DateTimeField(null=True, blank=True)
+    clock_out = models.TimeField(null=True, blank=True, verbose_name=_("Check Out"))
+    clock_out_channel = models.CharField(
+        max_length=32,
+        null=True,
+        blank=True,
+        choices=AttendanceChannel.choices,
+        verbose_name=_("Check-Out Source"),
+    )
     objects = HorillaCompanyManager(
         related_company_field="employee_id__employee_work_info__company_id"
+    )
+    clock_in_image = models.ImageField(upload_to=upload_path, null=True, blank=True)
+    clock_out_image = models.ImageField(upload_to=upload_path, null=True, blank=True)
+
+    clock_in_mode = models.CharField(
+        max_length=20,
+        null=True,
+        blank=True,
+        choices=AttendanceWorkMode.choices,
+        default=AttendanceWorkMode.WFO,
+        verbose_name=_("Clock-In Mode"),
+    )
+    clock_out_mode = models.CharField(
+        max_length=20,
+        null=True,
+        blank=True,
+        choices=AttendanceWorkMode.choices,
+        default=AttendanceWorkMode.WFO,
+        verbose_name=_("Clock-Out Mode"),
+    )
+
+    # Location payload stored for audit purposes (no geofencing).
+    # Expected keys (example): {"lat": 0.0, "lng": 0.0, "accuracy": 10, "provider": "gps", "captured_at": "..."}
+    clock_in_location = models.JSONField(null=True, blank=True, verbose_name=_("Clock-In Location"))
+    clock_out_location = models.JSONField(null=True, blank=True, verbose_name=_("Clock-Out Location"))
+
+    # Which request enabled this punch (if any).
+    work_mode_request_id = models.ForeignKey(
+        "attendance.WorkModeRequest",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="attendance_activities",
+        verbose_name=_("Work Mode Request"),
     )
 
     class Meta:
@@ -80,25 +218,116 @@ class AttendanceActivity(HorillaModel):
         """
 
         ordering = ["-attendance_date", "employee_id__employee_first_name", "clock_in"]
-
+        constraints = [
+            models.UniqueConstraint(
+                fields=["employee_id", "attendance_date"],
+                name="uniq_activity_employee_date",
+            )
+        ]
     def duration(self):
-        """
-        Duration calc b/w in-out method
-        """
+        """Return duration in seconds when both IN and OUT are available."""
 
-        if not self.clock_out or not self.clock_out_date:
-            self.clock_out_date = datetime.today().date()
-            self.clock_out = datetime.now().time()
+        if not (self.clock_in_date and self.clock_in and self.clock_out_date and self.clock_out):
+            return 0
 
         clock_in_datetime = datetime.combine(self.clock_in_date, self.clock_in)
         clock_out_datetime = datetime.combine(self.clock_out_date, self.clock_out)
-
         time_difference = clock_out_datetime - clock_in_datetime
+        return max(0, time_difference.total_seconds())
 
-        return time_difference.total_seconds()
+    def save(self, *args, **kwargs):
+        compress_model_image_field(self, "clock_in_image")
+        compress_model_image_field(self, "clock_out_image")
+        super().save(*args, **kwargs)
 
     def __str__(self):
-        return f"{self.employee_id} - {self.attendance_date} - {self.clock_in} - {self.clock_out}"
+        return (
+            f"{self.employee_id} - {self.attendance_date} - "
+            f"{self.clock_in or '-'} - {self.clock_out or '-'}"
+        )
+
+
+class AttendancePunchingHistory(HorillaModel):
+    """Dedicated raw punch history for audit/debugging."""
+
+    employee_id = models.ForeignKey(
+        Employee,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="employee_punching_histories",
+        verbose_name=_("Employee"),
+    )
+    attendance_id = models.ForeignKey(
+        "attendance.Attendance",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="punching_history_entries",
+        verbose_name=_("Attendance"),
+    )
+    attendance_date = models.DateField(null=True, blank=True, verbose_name=_("Attendance Date"))
+    punch_timestamp = models.DateTimeField(verbose_name=_("Punch Timestamp"))
+    source = models.CharField(
+        max_length=24,
+        choices=AttendancePunchSource.choices,
+        default=AttendancePunchSource.UNKNOWN,
+        verbose_name=_("Source"),
+    )
+    punch_direction = models.CharField(
+        max_length=12,
+        choices=AttendancePunchDirection.choices,
+        default=AttendancePunchDirection.UNKNOWN,
+        verbose_name=_("Punch Direction"),
+    )
+    device_info = models.CharField(max_length=255, null=True, blank=True, verbose_name=_("Device Info"))
+    photo = models.ImageField(upload_to=upload_path, null=True, blank=True, verbose_name=_("Photo"))
+    location = models.JSONField(null=True, blank=True, verbose_name=_("Location"))
+    accepted_to_attendance = models.BooleanField(default=False, verbose_name=_("Accepted to Attendance"))
+    reason = models.CharField(max_length=255, null=True, blank=True, verbose_name=_("Reason"))
+    raw_payload = models.JSONField(null=True, blank=True, verbose_name=_("Raw Payload"))
+    raw_employee_identifier = models.CharField(max_length=128, null=True, blank=True, verbose_name=_("Raw Employee Identifier"))
+
+    objects = HorillaCompanyManager(
+        related_company_field="employee_id__employee_work_info__company_id"
+    )
+
+    class Meta:
+        ordering = ["-punch_timestamp", "-id"]
+        verbose_name = _("Attendance Punching History")
+        verbose_name_plural = _("Attendance Punching Histories")
+
+    @property
+    def employee_display(self):
+        return self.employee_id or self.raw_employee_identifier or "-"
+
+    @property
+    def location_display(self):
+        if not isinstance(self.location, dict):
+            return "-"
+        lat = self.location.get("lat", self.location.get("latitude"))
+        lng = self.location.get("lng", self.location.get("longitude"))
+        if lat is None or lng is None:
+            return "-"
+        return f"{lat}, {lng}"
+
+    @property
+    def google_maps_url(self):
+        if not isinstance(self.location, dict):
+            return None
+        lat = self.location.get("lat", self.location.get("latitude"))
+        lng = self.location.get("lng", self.location.get("longitude"))
+        if lat is None or lng is None:
+            return None
+        return f"https://www.google.com/maps?q={lat},{lng}"
+
+    def save(self, *args, **kwargs):
+        compress_model_image_field(self, "photo")
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        employee = self.employee_id or self.raw_employee_identifier or "Unknown"
+        return f"{employee} - {self.punch_timestamp}"
 
 
 class BatchAttendance(HorillaModel):
@@ -112,6 +341,131 @@ class BatchAttendance(HorillaModel):
         return f"{self.title}-{self.id}"
 
 
+
+class WorkModeRequest(HorillaModel):
+    """
+    Work mode request used to control whether an employee may punch from mobile.
+
+    Notes:
+    - WFA requires APPROVED status before punch is allowed.
+    - ON_DUTY may allow punching while PENDING (business rule enforced in API layer).
+    - WFO is not expected to be requested (WFO comes from biometric device), but the choice
+      is kept for completeness and data consistency.
+    """
+
+    employee_id = models.ForeignKey(
+        Employee,
+        on_delete=models.PROTECT,
+        related_name="work_mode_requests",
+        verbose_name=_("Employee"),
+    )
+
+    mode = models.CharField(
+        max_length=20,
+        choices=AttendanceWorkMode.choices,
+        verbose_name=_("Mode"),
+    )
+
+    scope = models.CharField(
+        max_length=10,
+        choices=WorkModeRequestScope.choices,
+        default=WorkModeRequestScope.FULL,
+        verbose_name=_("Scope"),
+    )
+
+    start_date = models.DateField(verbose_name=_("Start Date"))
+    end_date = models.DateField(verbose_name=_("End Date"))
+
+    status = models.CharField(
+        max_length=32,
+        choices=WorkModeRequestStatus.choices,
+        default=WorkModeRequestStatus.PENDING,
+        verbose_name=_("Status"),
+    )
+
+    reason_code = models.CharField(
+        max_length=64,
+        null=True,
+        blank=True,
+        choices=WorkModeRequestRejectReasonCode.choices,
+        verbose_name=_("Reject Reason Code"),
+    )
+
+    reason = models.TextField(null=True, blank=True, verbose_name=_("Reason"))
+    action_reason = models.TextField(null=True, blank=True, verbose_name=_("Action Reason"))
+
+    files = models.ManyToManyField(
+        "attendance.AttendanceRequestFile",
+        blank=True,
+        related_name="work_mode_requests",
+        verbose_name=_("Files"),
+    )
+
+    approved_by = models.ForeignKey(
+        Employee,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="approved_work_mode_requests",
+        verbose_name=_("Approved By"),
+    )
+    approved_at = models.DateTimeField(null=True, blank=True, verbose_name=_("Approved At"))
+    action_by = models.ForeignKey(
+        Employee,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="acted_work_mode_requests",
+        verbose_name=_("Action By"),
+    )
+    action_at = models.DateTimeField(null=True, blank=True, verbose_name=_("Action At"))
+    action_type = models.CharField(
+        max_length=16,
+        null=True,
+        blank=True,
+        choices=WorkModeRequestActionType.choices,
+        verbose_name=_("Action Type"),
+    )
+
+    objects = HorillaCompanyManager(
+        related_company_field="employee_id__employee_work_info__company_id"
+    )
+
+    class Meta:
+        ordering = ["-start_date", "-id"]
+        verbose_name = _("Work Mode Request")
+        verbose_name_plural = _("Work Mode Requests")
+
+    def __str__(self) -> str:
+        return f"{self.employee_id} - {self.mode} ({self.scope}) - {self.start_date} to {self.end_date}"
+
+    @property
+    def requires_pre_approval(self) -> bool:
+        return self.mode == AttendanceWorkMode.WFA
+
+    def is_active_for_date(self, target_date: date) -> bool:
+        """Returns True if the request covers the date and is not canceled."""
+        if self.status == WorkModeRequestStatus.CANCELED:
+            return False
+        return self.start_date <= target_date <= self.end_date
+
+    def covers_in(self) -> bool:
+        return self.scope in (WorkModeRequestScope.IN, WorkModeRequestScope.FULL)
+
+    def covers_out(self) -> bool:
+        return self.scope in (WorkModeRequestScope.OUT, WorkModeRequestScope.FULL)
+
+    def clean(self):
+        super().clean()
+        if self.end_date and self.start_date and self.end_date < self.start_date:
+            raise ValidationError({"end_date": _("End date cannot be earlier than start date.")})
+
+        # WFO should not be requested; keep it invalid at model level to prevent UI misuse.
+        if self.mode == AttendanceWorkMode.WFO:
+            raise ValidationError({"mode": _("WFO should not be requested. Use WFA or On Duty.")})
+
+
+
 class Attendance(HorillaModel):
     """
     Attendance model
@@ -119,11 +473,13 @@ class Attendance(HorillaModel):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-
     status = [
         ("create_request", _("Create Request")),
         ("update_request", _("Update Request")),
         ("revalidate_request", _("Re-validate Request")),
+        ("revoke_request", _("Revoke Request")),
+        ("cancel_request", _("Cancel Request")),
+        ("reject_request", _("Reject Request")),
     ]
 
     employee_id = models.ForeignKey(
@@ -160,11 +516,41 @@ class Attendance(HorillaModel):
     attendance_clock_in = models.TimeField(
         null=True, verbose_name=_("Check-In"), help_text=_("First Check-In Time")
     )
+    attendance_clock_in_channel = models.CharField(
+        max_length=32,
+        null=True,
+        blank=True,
+        choices=AttendanceChannel.choices,
+        verbose_name=_("Check-In Source"),
+    )
+    attendance_clock_in_punch = models.ForeignKey(
+        "attendance.AttendancePunchingHistory",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="linked_attendance_clock_ins",
+        verbose_name=_("Linked Check-In Punch"),
+    )
     attendance_clock_out_date = models.DateField(
         null=True, verbose_name=_("Check-Out Date")
     )
     attendance_clock_out = models.TimeField(
         null=True, verbose_name=_("Check-Out"), help_text=_("Last Check-Out Time")
+    )
+    attendance_clock_out_channel = models.CharField(
+        max_length=32,
+        null=True,
+        blank=True,
+        choices=AttendanceChannel.choices,
+        verbose_name=_("Check-Out Source"),
+    )
+    attendance_clock_out_punch = models.ForeignKey(
+        "attendance.AttendancePunchingHistory",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="linked_attendance_clock_outs",
+        verbose_name=_("Linked Check-Out Punch"),
     )
     attendance_worked_hour = models.CharField(
         null=True,
@@ -218,12 +604,28 @@ class Attendance(HorillaModel):
     )
     is_holiday = models.BooleanField(default=False)
     requested_data = models.JSONField(null=True, editable=False)
-    approved_by = models.ForeignKey(
+    request_restore_snapshot = models.JSONField(
+        null=True,
+        blank=True,
+        editable=False,
+        verbose_name=_("Request Restore Snapshot"),
+    )
+    action_by = models.ForeignKey(
         Employee,
         on_delete=models.PROTECT,
         null=True,
         blank=True,
-        verbose_name=_("Approved By"),
+        related_name="attendance_request_actions",
+        verbose_name=_("Action By"),
+        editable=False,
+    )
+    action_at = models.DateTimeField(null=True, blank=True, verbose_name=_("Action At"))
+    action_type = models.CharField(
+        max_length=16,
+        null=True,
+        blank=True,
+        choices=AttendanceRequestActionType.choices,
+        verbose_name=_("Action Type"),
         editable=False,
     )
     objects = HorillaCompanyManager(
@@ -235,6 +637,86 @@ class Attendance(HorillaModel):
             HorillaAuditInfo,
         ],
     )
+    attendance_clock_in_image = models.ImageField(upload_to=upload_path, null=True, blank=True)
+    attendance_clock_out_image = models.ImageField(upload_to=upload_path, null=True, blank=True)
+
+    # Hybrid work mode + audit data
+    attendance_clock_in_mode = models.CharField(
+        max_length=20,
+        null=True,
+        blank=True,
+        choices=AttendanceWorkMode.choices,
+        default=AttendanceWorkMode.WFO,
+        verbose_name=_("Check-In Mode"),
+    )
+    attendance_clock_out_mode = models.CharField(
+        max_length=20,
+        null=True,
+        blank=True,
+        choices=AttendanceWorkMode.choices,
+        default=AttendanceWorkMode.WFO,
+        verbose_name=_("Check-Out Mode"),
+    )
+
+    # Audit status per punch (Option B)
+    in_attendance_status = models.CharField(
+        max_length=16,
+        null=True,
+        blank=True,
+        choices=AttendancePunchStatus.choices,
+        verbose_name=_("IN Attendance Status"),
+    )
+    out_attendance_status = models.CharField(
+        max_length=16,
+        null=True,
+        blank=True,
+        choices=AttendancePunchStatus.choices,
+        verbose_name=_("OUT Attendance Status"),
+    )
+
+    in_attendance_reject_reason_code = models.CharField(
+        max_length=64,
+        null=True,
+        blank=True,
+        choices=WorkModeRequestRejectReasonCode.choices,
+        verbose_name=_("IN Reject Reason Code"),
+    )
+    out_attendance_reject_reason_code = models.CharField(
+        max_length=64,
+        null=True,
+        blank=True,
+        choices=WorkModeRequestRejectReasonCode.choices,
+        verbose_name=_("OUT Reject Reason Code"),
+    )
+
+    # Related request IDs used for punch decisions (per IN/OUT)
+    in_related_work_type_request_id = models.IntegerField(null=True, blank=True)
+    out_related_work_type_request_id = models.IntegerField(null=True, blank=True)
+
+    attendance_clock_in_location = models.JSONField(
+        null=True, blank=True, verbose_name=_("Check-In Location")
+    )
+    attendance_clock_out_location = models.JSONField(
+        null=True, blank=True, verbose_name=_("Check-Out Location")
+    )
+
+    # On Duty punches are presence-only; they should not affect worked hours / overtime.
+    is_presensi_only = models.BooleanField(
+        default=False,
+        verbose_name=_("Presence Only"),
+        help_text=_("If enabled, worked hours and overtime are not calculated for this attendance."),
+    )
+
+    # Which work-mode request applied to this attendance (if any).
+    work_mode_request_id = models.ForeignKey(
+        "attendance.WorkModeRequest",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="attendances",
+        verbose_name=_("Work Mode Request"),
+    )
+
 
     class Meta:
         """
@@ -290,7 +772,9 @@ class Attendance(HorillaModel):
         """
         keys = []
         if self.requested_data is not None:
-            data = json.loads(self.requested_data)
+            data = self.requested_data
+            if isinstance(data, str):
+                data = json.loads(data)
             diffs = get_diff_dict(self.serialize(), data)
             keys = diffs.keys()
         return keys
@@ -314,19 +798,42 @@ class Attendance(HorillaModel):
             attendance_date=self.attendance_date, employee_id=self.employee_id
         ).order_by("clock_in")
         at_work_seconds = 0
-        now = datetime.now()
+        now_dt = timezone.now()
+        current_tz = timezone.get_current_timezone()
+        use_tz = timezone.is_aware(now_dt)
+
+        def normalize_dt(value, date_value=None, time_value=None):
+            if value is None and date_value and time_value:
+                value = datetime.combine(date_value, time_value)
+            if value is None:
+                return None
+            if use_tz:
+                if timezone.is_naive(value):
+                    return timezone.make_aware(value, current_tz)
+                return timezone.localtime(value, current_tz)
+            if timezone.is_aware(value):
+                return timezone.localtime(value, current_tz).replace(tzinfo=None)
+            return value
+
         for activity in activities:
-            out_time = activity.clock_out
-            if out_time is None:
-                combined_out = datetime.combine(
-                    now, dt.time(hour=now.hour, minute=now.minute, second=now.second)
-                )
-            else:
-                combined_out = datetime.combine(activity.clock_out_date, out_time)
-            in_time = activity.clock_in
-            combined_in = datetime.combine(activity.clock_in_date, in_time)
-            diffs = combined_out - combined_in
-            at_work_seconds = at_work_seconds + diffs.total_seconds()
+            in_dt = normalize_dt(
+                getattr(activity, "in_datetime", None),
+                getattr(activity, "clock_in_date", None),
+                getattr(activity, "clock_in", None),
+            )
+            if in_dt is None:
+                continue
+
+            out_dt = normalize_dt(
+                getattr(activity, "out_datetime", None),
+                getattr(activity, "clock_out_date", None),
+                getattr(activity, "clock_out", None),
+            )
+            if out_dt is None:
+                out_dt = now_dt
+
+            diffs = out_dt - in_dt
+            at_work_seconds = at_work_seconds + max(0, diffs.total_seconds())
         return at_work_seconds
 
     def hours_pending(self):
@@ -385,6 +892,13 @@ class Attendance(HorillaModel):
                 self.attendance_overtime_approve = True
 
     def save(self, *args, **kwargs):
+        compress_model_image_field(self, "attendance_clock_in_image")
+        compress_model_image_field(self, "attendance_clock_out_image")
+        if self.is_presensi_only:
+            # Presence-only attendances (e.g., On Duty) must not affect hour calculations.
+            self.attendance_worked_hour = "00:00"
+            self.minimum_hour = "00:00"
+
         self.update_attendance_overtime()
         self.attendance_day = EmployeeShiftDay.objects.get(
             day=self.attendance_date.strftime("%A").lower()
@@ -442,6 +956,12 @@ class Attendance(HorillaModel):
             "attendance_clock_in": str(self.attendance_clock_in),
             "attendance_clock_out": str(self.attendance_clock_out),
             "attendance_clock_out_date": str(self.attendance_clock_out_date),
+            "attendance_clock_in_mode": self.attendance_clock_in_mode,
+            "attendance_clock_out_mode": self.attendance_clock_out_mode,
+            "attendance_clock_in_location": self.attendance_clock_in_location,
+            "attendance_clock_out_location": self.attendance_clock_out_location,
+            "is_presensi_only": self.is_presensi_only,
+            "work_mode_request_id": self.work_mode_request_id.id if self.work_mode_request_id else "",
             "shift_id": self.shift_id.id if self.shift_id else "",
             "work_type_id": self.work_type_id.id if self.work_type_id else "",
             "attendance_worked_hour": self.attendance_worked_hour,
@@ -558,7 +1078,7 @@ class Attendance(HorillaModel):
         else:
             out_time = self.attendance_clock_out
 
-        if self.attendance_clock_in_date < self.attendance_date:
+        if self.attendance_clock_in_date and self.attendance_date and self.attendance_clock_in_date < self.attendance_date:
             raise ValidationError(
                 {
                     "attendance_clock_in_date": "Attendance check-in date cannot be earlier than attendance date"
@@ -567,6 +1087,7 @@ class Attendance(HorillaModel):
 
         if (
             self.attendance_clock_out_date
+            and self.attendance_clock_in_date
             and self.attendance_clock_out_date < self.attendance_clock_in_date
         ):
             raise ValidationError(
@@ -575,7 +1096,7 @@ class Attendance(HorillaModel):
                 }
             )
 
-        if self.attendance_clock_out_date and self.attendance_clock_out_date >= today:
+        if self.attendance_clock_out_date and self.attendance_clock_out_date >= today and out_time is not None:
             if out_time > now:
                 raise ValidationError(
                     {"attendance_clock_out": "Check-out time cannot be in the future"}
@@ -927,7 +1448,7 @@ class AttendanceGeneralSetting(HorillaModel):
 
     time_runner = models.BooleanField(default=True)
     enable_check_in = models.BooleanField(
-        default=True,
+        default=False,
         verbose_name=_("Enable Check in/Check out"),
         help_text=_(
             "Enabling this feature allows employees to record their attendance using the Check-In/Check-Out button."
@@ -935,6 +1456,13 @@ class AttendanceGeneralSetting(HorillaModel):
     )
     company_id = models.ForeignKey(Company, on_delete=models.CASCADE, null=True)
     objects = HorillaCompanyManager()
+
+    def save(self, *args, **kwargs):
+        """
+        Lock web Check In/Check Out in disabled state.
+        """
+        self.enable_check_in = False
+        super().save(*args, **kwargs)
 
 
 class WorkRecords(models.Model):
