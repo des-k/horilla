@@ -5,7 +5,7 @@
     <div class="oh-checkpoint-badge mb-2" id="selectedActivity" data-ids="[]" data-clicked="" style="display: none">
         {% trans "Selected Attendance" %}
     </div>
-    <div class="oh-wrapper">
+    <div class="oh-wrapper" style="margin-top: 16px;">
         {% if perms.attendance.change_attendancelatecomeearlyout or request.user|is_reportingmanager %}
             <div class="oh-checkpoint-badge text-info mb-2" id="exportActivity" style="cursor: pointer; display: none">
                 {% trans "Export Attendance" %}
