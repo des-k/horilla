@@ -952,34 +952,46 @@ def attendance_activity_view(request):
     """
     This method will render a template to view all attendance activities
     """
-    previous_data = request.GET.urlencode()
-    filter_obj = AttendanceActivityFilter(request.GET)
-    attendance_activities = filter_obj.qs
-    self_attendance_activities = attendance_activities.filter(
-        employee_id__employee_user_id=request.user
+    if not _can_access_attendance_activity(request):
+        return _attendance_activity_forbidden_response(request)
+
+    employee_options, show_employee_filter, _ = _get_attendance_activity_employee_scope(
+        request
     )
-    attendance_activities = filtersubordinates(
-        request, filter_obj.qs, "attendance.view_attendanceactivity"
-    )
-    attendance_activities = attendance_activities | self_attendance_activities
-    attendance_activities = attendance_activities.distinct()
-    attendance_activities = attendance_activities.order_by("-pk")
+    filter_data = _build_attendance_activity_filter_data(request)
+    request_copy = filter_data.copy()
+    request_copy.pop("page", None)
+    previous_data = request_copy.urlencode()
+
+    queryset = _scoped_attendance_activity_queryset(request).order_by("-pk")
+    filter_obj = AttendanceActivityFilter(filter_data, queryset)
+    filter_obj.form.fields["employee_id"].queryset = employee_options
+    attendance_activities = filter_obj.qs.order_by("-pk")
+
+    data_dict = parse_qs(previous_data)
+    get_key_instances(AttendanceActivity, data_dict)
+    keys_to_remove = [key for key, value in data_dict.items() if value in (["unknown"], [""])]
+    for key in keys_to_remove:
+        data_dict.pop(key)
+
     activity_ids = json.dumps(
         [instance.id for instance in paginator_qry(attendance_activities, None)]
     )
-    if attendance_activities.exists():
-        template = "attendance/attendance_activity/attendance_activity_view.html"
-    else:
-        template = "attendance/attendance_activity/activity_empty.html"
     return render(
         request,
-        template,
+        "attendance/attendance_activity/attendance_activity_view.html",
         {
             "data": paginator_qry(attendance_activities, request.GET.get("page")),
             "pd": previous_data,
             "f": filter_obj,
             "gp_fields": AttendanceActivityReGroup.fields,
             "activity_ids": activity_ids,
+            "filter_dict": data_dict,
+            "show_employee_filter": show_employee_filter,
+            "activity_filter_data": filter_data,
+            "self_employee": getattr(request.user, "employee_get", None),
+            "employee_options": employee_options,
+            "group_field": filter_data.get("field", ""),
         },
     )
 
@@ -1012,6 +1024,98 @@ def _scoped_attendance_activity_queryset(request):
         "attendance.view_attendanceactivity",
     )
     return (scoped_qs | self_qs).distinct()
+
+
+def _can_access_attendance_activity(request) -> bool:
+    if getattr(request.user, "is_superuser", False):
+        return True
+    if request.user.has_perm("attendance.view_attendanceactivity"):
+        return True
+    return bool(getattr(request.user, "employee_get", None))
+
+
+def _attendance_activity_forbidden_response(request):
+    if request.headers.get("HX-Request") == "true":
+        return render(request, "decorator_404.html", status=403)
+    return HttpResponseForbidden(_("You dont have permission."))
+
+
+def _get_attendance_activity_employee_scope(request):
+    """
+    Returns:
+    - employee_options: queryset employee yang boleh muncul di filter
+    - show_employee_filter: apakah dropdown employee ditampilkan
+    - can_view_all: apakah user punya akses global semua employee
+    """
+    base_qs = Employee.objects.all()
+    employee = getattr(request.user, "employee_get", None)
+
+    can_view_all = request.user.is_superuser or request.user.has_perm(
+        "attendance.view_attendanceactivity"
+    )
+
+    if can_view_all:
+        return (
+            base_qs.order_by("employee_first_name", "employee_last_name"),
+            True,
+            True,
+        )
+
+    if not employee:
+        return Employee.objects.none(), False, False
+
+    subordinate_ids = list(
+        filtersubordinatesemployeemodel(
+            request,
+            Employee.objects.all(),
+            "attendance.view_attendanceactivity",
+        ).values_list("id", flat=True)
+    )
+
+    subordinate_ids = [emp_id for emp_id in subordinate_ids if emp_id != employee.id]
+    scoped_ids = [employee.id] + subordinate_ids
+
+    employee_options = (
+        Employee.objects.filter(id__in=scoped_ids)
+        .annotate(
+            _self_first=Case(
+                When(id=employee.id, then=Value(0)),
+                default=Value(1),
+                output_field=IntegerField(),
+            )
+        )
+        .order_by("_self_first", "employee_first_name", "employee_last_name")
+    )
+
+    show_employee_filter = len(subordinate_ids) > 0
+    return employee_options, show_employee_filter, False
+
+
+def _build_attendance_activity_filter_data(request):
+    filter_data = request.GET.copy()
+    today = django_timezone.localdate().isoformat()
+
+    has_exact_attendance_date = bool(filter_data.get("attendance_date"))
+    if not has_exact_attendance_date:
+        if not filter_data.get("attendance_date_from"):
+            filter_data["attendance_date_from"] = today
+        if not filter_data.get("attendance_date_till"):
+            filter_data["attendance_date_till"] = today
+
+    employee = getattr(request.user, "employee_get", None)
+    _, show_employee_filter, can_view_all = _get_attendance_activity_employee_scope(
+        request
+    )
+
+    if (
+        employee
+        and not can_view_all
+        and not show_employee_filter
+        and not filter_data.get("employee_id")
+    ):
+        filter_data["employee_id"] = str(employee.id)
+
+    return filter_data
 
 
 @login_required
