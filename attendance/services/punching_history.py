@@ -13,11 +13,94 @@ from attendance.models import (
     AttendanceChannel,
     AttendancePunchDirection,
     AttendancePunchSource,
+    AttendancePunchStatus,
     AttendancePunchingHistory,
 )
 
 
 RAW_CHANNELS = {AttendanceChannel.MOBILE, AttendanceChannel.BIOMETRIC}
+
+
+REASON_REWRITE_MAP = {
+    "Punch rejected": "Rejected: punch was not accepted",
+    "Already Has Valid Check-In": "Rejected: valid Check-In already exists",
+    "Already Has Valid Check-Out": "Rejected: valid Check-Out already exists",
+    "Outside Cutoff": "Rejected: outside cutoff",
+    "Outside Check-In Window": "Rejected: outside Check-In window",
+    "Outside Check-Out Window": "Rejected: outside Check-Out window",
+    "Attendance Disabled": "Rejected: attendance disabled",
+    "Rejected by Work Type Rule": "Rejected: work type request approval required",
+    "Rejected: WFO must use biometric": "Rejected: WFO must use biometric",
+    "Missing Photo": "Rejected: photo required",
+    "Missing Location": "Rejected: location required",
+    "Employee Not Matched": "Rejected: employee not matched",
+    "Accepted as earliest valid Check-In": "Used as final Check-In",
+    "Accepted as latest valid Check-Out": "Used as final Check-Out",
+    "Duplicate IN / Later valid IN not selected": "Ignored because an earlier valid Check-In was selected",
+    "Later IN not selected": "Ignored because this Check-In was not selected",
+    "Earlier OUT superseded by later valid OUT": "Ignored because a later valid Check-Out was selected",
+    "Final Check-In came from approved request": "Not used because final Check-In came from approved request",
+    "Final Check-Out came from approved request": "Not used because final Check-Out came from approved request",
+    "Final Check-In came from correction request": "Not used because final Check-In came from attendance correction",
+    "Final Check-Out came from correction request": "Not used because final Check-Out came from attendance correction",
+    "Final Check-In came from another source": "Not used because final Check-In came from another source",
+    "Final Check-Out came from another source": "Not used because final Check-Out came from another source",
+    "Punch ignored": "Ignored: not used in final attendance",
+}
+
+
+REJECT_REASON_CODE_MAP = {
+    "AUTO_REJECT_CUTOFF_IN_PASSED": "Rejected: outside Check-In cutoff",
+    "AUTO_REJECT_CUTOFF_OUT_PASSED": "Rejected: outside Check-Out cutoff",
+    "AUTO_REJECT_CUTOFF_FULL_PASSED": "Rejected: outside cutoff",
+    "EARLY_CHECKOUT_BEFORE_SHIFT_END": "Rejected: outside Check-Out window",
+    "EARLY_CHECKOUT_BEFORE_CUTOFF_IN": "Rejected: outside Check-Out window",
+    "MANUAL_REJECT": "Rejected by approver",
+}
+
+
+def _clean_reason_text(reason: Optional[str], *, fallback: str = "") -> str:
+    value = (reason or fallback or "").strip()
+    if not value:
+        return "-"
+    return REASON_REWRITE_MAP.get(value, value[:255])
+
+
+def _direction_label(direction: str) -> str:
+    return "Check-In" if direction == AttendancePunchDirection.IN else "Check-Out"
+
+
+def _accepted_reason(direction: str) -> str:
+    return f"Used as final {_direction_label(direction)}"
+
+
+def _superseded_reason(direction: str) -> str:
+    if direction == AttendancePunchDirection.IN:
+        return "Ignored because an earlier valid Check-In was selected"
+    return "Ignored because a later valid Check-Out was selected"
+
+
+def _final_source_reason(channel: Optional[str], *, direction: str) -> Optional[str]:
+    label = _direction_label(direction)
+    if channel == AttendanceChannel.APPROVED_REQUEST:
+        return f"Not used because final {label} came from approved request"
+    if channel == AttendanceChannel.CORRECTION_REQUEST:
+        return f"Not used because final {label} came from attendance correction"
+    if channel and channel not in RAW_CHANNELS:
+        return f"Not used because final {label} came from another source"
+    return None
+
+
+def _attendance_reject_reason(attendance: Optional[Attendance], *, direction: str) -> Optional[str]:
+    if not attendance:
+        return None
+    status = getattr(attendance, _session_status_attr(direction), None)
+    if status != AttendancePunchStatus.REJECTED:
+        return None
+    code = getattr(attendance, _session_reject_attr(direction), None)
+    if code:
+        return REJECT_REASON_CODE_MAP.get(code, "Rejected by attendance rule")
+    return "Rejected by attendance rule"
 
 
 def _clone_uploaded_file(uploaded):
@@ -80,48 +163,48 @@ def humanize_mobile_error(message: Optional[str], *, direction: str) -> str:
     msg = (message or "").strip()
     lower = msg.lower()
     if not msg:
-        return "Punch rejected"
+        return _clean_reason_text(None, fallback="Punch rejected")
     if "already clocked-in" in lower or "already clocked in" in lower:
-        return "Already Has Valid Check-In"
+        return _clean_reason_text("Already Has Valid Check-In")
     if "already clocked-out" in lower or "already clocked out" in lower:
-        return "Already Has Valid Check-Out"
+        return _clean_reason_text("Already Has Valid Check-Out")
     if "cut-off has passed" in lower or "window has ended" in lower:
-        return "Outside Cutoff"
+        return _clean_reason_text("Outside Cutoff")
     if "window" in lower and "check-in" in lower:
-        return "Outside Check-In Window"
+        return _clean_reason_text("Outside Check-In Window")
     if "window" in lower and "check-out" in lower:
-        return "Outside Check-Out Window"
+        return _clean_reason_text("Outside Check-Out Window")
     if "disabled for reporting managers" in lower:
-        return "Attendance Disabled"
+        return _clean_reason_text("Attendance Disabled")
     if "request is required" in lower or "not approved" in lower:
-        return "Rejected by Work Type Rule"
+        return _clean_reason_text("Rejected by Work Type Rule")
     if "must be recorded via biometric" in lower:
-        return "Rejected: WFO must use biometric"
+        return _clean_reason_text("Rejected: WFO must use biometric")
     if "photo is required" in lower:
-        return "Missing Photo"
+        return _clean_reason_text("Missing Photo")
     if "location is required" in lower or "location unavailable" in lower:
-        return "Missing Location"
+        return _clean_reason_text("Missing Location")
     if "missing work information" in lower or "employee details" in lower:
-        return "Employee Not Matched"
-    return msg[:255]
+        return _clean_reason_text("Employee Not Matched")
+    return _clean_reason_text(msg)
 
 
 def humanize_biometric_error(message: Optional[str], *, direction: str) -> str:
     msg = (message or "").strip()
     if not msg:
-        return "Punch rejected"
+        return _clean_reason_text(None, fallback="Punch rejected")
     normalized = humanize_mobile_error(msg, direction=direction)
-    if normalized and normalized != msg[:255]:
+    if normalized and normalized != _clean_reason_text(msg):
         return normalized
 
     lower = msg.lower()
     if "check-in is not allowed after cut-off time" in lower:
-        return "Outside Cutoff"
+        return _clean_reason_text("Outside Cutoff")
     if "window has not started" in lower and direction == AttendancePunchDirection.IN:
-        return "Outside Check-In Window"
+        return _clean_reason_text("Outside Check-In Window")
     if "window has ended" in lower and direction == AttendancePunchDirection.OUT:
-        return "Outside Check-Out Window"
-    return msg[:255]
+        return _clean_reason_text("Outside Check-Out Window")
+    return _clean_reason_text(msg)
 
 
 GENERIC_REASONS = {
@@ -146,7 +229,7 @@ def should_preserve_reason(reason: Optional[str]) -> bool:
     lower = value.lower()
     if lower in GENERIC_REASONS:
         return False
-    if lower.startswith("accepted as "):
+    if lower.startswith("accepted as ") or lower.startswith("used as final "):
         return False
     return True
 
@@ -164,26 +247,6 @@ def _match_allowed_for_log(log: AttendancePunchingHistory, channel: Optional[str
     return bool(expected and channel in {expected, None, ""})
 
 
-def _final_source_reason(channel: Optional[str], *, direction: str) -> Optional[str]:
-    if channel == AttendanceChannel.APPROVED_REQUEST:
-        return (
-            "Final Check-In came from approved request"
-            if direction == AttendancePunchDirection.IN
-            else "Final Check-Out came from approved request"
-        )
-    if channel == AttendanceChannel.CORRECTION_REQUEST:
-        return (
-            "Final Check-In came from correction request"
-            if direction == AttendancePunchDirection.IN
-            else "Final Check-Out came from correction request"
-        )
-    if channel and channel not in RAW_CHANNELS:
-        return (
-            "Final Check-In came from another source"
-            if direction == AttendancePunchDirection.IN
-            else "Final Check-Out came from another source"
-        )
-    return None
 
 
 def _session_prefix(direction: str) -> str:
@@ -656,6 +719,9 @@ def reconcile_attendance_punches(*, employee, attendance_date: date):
                     out_match = log.id
                     break
 
+    in_reject_reason = _attendance_reject_reason(attendance, direction=AttendancePunchDirection.IN)
+    out_reject_reason = _attendance_reject_reason(attendance, direction=AttendancePunchDirection.OUT)
+
     for log in logs:
         accepted = False
         reason = (log.reason or "").strip()
@@ -663,37 +729,43 @@ def reconcile_attendance_punches(*, employee, attendance_date: date):
         if log.punch_direction == AttendancePunchDirection.IN:
             if in_match and log.id == in_match:
                 accepted = True
-                reason = "Accepted as earliest valid Check-In"
+                reason = _accepted_reason(AttendancePunchDirection.IN)
             elif should_preserve_reason(reason):
-                pass
+                reason = _clean_reason_text(reason)
+            elif in_reject_reason:
+                reason = in_reject_reason
             elif in_match:
-                reason = "Duplicate IN / Later valid IN not selected"
+                reason = _superseded_reason(AttendancePunchDirection.IN)
             elif attendance and attendance.attendance_clock_in and in_final_source_reason:
                 reason = in_final_source_reason
             else:
-                reason = reason or "Later IN not selected"
+                reason = "Ignored because this Check-In was not selected"
 
         elif log.punch_direction == AttendancePunchDirection.OUT:
             if out_match and log.id == out_match:
                 accepted = True
-                reason = "Accepted as latest valid Check-Out"
+                reason = _accepted_reason(AttendancePunchDirection.OUT)
             elif should_preserve_reason(reason):
-                pass
+                reason = _clean_reason_text(reason)
+            elif out_reject_reason:
+                reason = out_reject_reason
             elif out_match:
-                reason = "Earlier OUT superseded by later valid OUT"
+                reason = _superseded_reason(AttendancePunchDirection.OUT)
             elif attendance and attendance.attendance_clock_out and out_final_source_reason:
                 reason = out_final_source_reason
             else:
-                reason = reason or "Earlier OUT superseded by later valid OUT"
+                reason = _superseded_reason(AttendancePunchDirection.OUT)
 
         else:
             if not should_preserve_reason(reason):
-                reason = reason or "Punch ignored"
+                reason = "Ignored: unsupported punch direction"
+            else:
+                reason = _clean_reason_text(reason)
 
         update_punch_history(
             log,
             accepted=accepted,
-            reason=reason,
+            reason=_clean_reason_text(reason),
             attendance=attendance,
             attendance_date=attendance_date,
         )
