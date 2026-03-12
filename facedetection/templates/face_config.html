@@ -1,9 +1,21 @@
 {% load i18n %}
-<div class="oh-input__group">
-    <label class="oh-input__label">{% trans "Face Detection" %}</label>
-    <div class="oh-alert-container">
-        <div class="oh-alert oh-alert--success mb-0">
-            {% trans "Face Detection is always active for attendance and cannot be changed from settings." %}
+<div class="oh-profile-section__card">
+    <div class="row">
+        <div class="col-12 col-md-6">
+            <div class="oh-label__info">
+                <label class="oh-label">{% trans "Face Detection" %}</label>
+            </div>
+            <div class="form-control" style="background:#f7f7f7; pointer-events:none;" aria-readonly="true">
+                {% trans "Enabled" %}
+            </div>
+        </div>
+        <div class="col-12 mt-3">
+            <div class="oh-alert oh-alert--success">
+                {% trans "Face Detection is always active for attendance and cannot be changed from settings." %}
+            </div>
+            <p class="text-muted mt-2 mb-1">
+                {% trans "This status is enforced by the system, so even older saved settings that were OFF will still work as ON." %}
+            </p>
         </div>
     </div>
 </div>
