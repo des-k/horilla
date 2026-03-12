@@ -124,6 +124,9 @@
                             hx-target='#activity-table' hx-get="{% url 'attendance-activity-search' %}?{{pd}}&orderby=clock_out_date">
                             {% trans "Out Date" %}
                         </div>
+                        <div data-cell-index="14" data-cell-title="{% trans 'Note' %}" class="oh-sticky-table__th">
+                          {% trans "Note" %}
+                        </div>
                     </div>
                 </div>
                 <div class="oh-sticky-table__tbody">
@@ -146,37 +149,26 @@
                                 </div>
                             </div>
                             <div data-cell-index="1" class="oh-sticky-table__td dateformat_changer">{{activity.attendance_date}}</div>
-                            <div data-cell-index="2" class="oh-sticky-table__td dateformat_changer">{{ activity.clock_in_date|default_if_none:"-"|default:"-" }}</div>
-                            <div data-cell-index="3" class="oh-sticky-table__td timeformat_changer">{{ activity.clock_in|default_if_none:"-"|default:"-" }}</div>
+                            <div data-cell-index="2" class="oh-sticky-table__td dateformat_changer">{{ activity.display_clock_in_date|default_if_none:"-"|default:"-" }}</div>
+                            <div data-cell-index="3" class="oh-sticky-table__td">{{ activity.display_check_in|default_if_none:"-"|default:"-" }}</div>
 
                             <div data-cell-index="12" class="oh-sticky-table__td">
-                              {% if activity.clock_in_channel %}
-                                <span class="oh-badge oh-badge--secondary oh-badge--small oh-badge--round">{{ activity.get_clock_in_channel_display }}</span>
+                              {% if activity.display_clock_in_source and activity.display_clock_in_source != '-' %}
+                                <span class="oh-badge oh-badge--secondary oh-badge--small oh-badge--round">{{ activity.display_clock_in_source }}</span>
                               {% else %}
                                 -
                               {% endif %}
                             </div>
 
                             <div data-cell-index="8" class="oh-sticky-table__td">
-                              {{ activity.get_clock_in_mode_display|default:"-" }}
+                              {{ activity.display_clock_in_mode|default:"-" }}
                             </div>
 
                             <div data-cell-index="10" class="oh-sticky-table__td" onclick="event.stopPropagation();">
-                              {% if activity.clock_in_location %}
-                                {% if activity.clock_in_location.lat != None and activity.clock_in_location.lng != None %}
-                                  <div class="oh-text--sm">
-                                    {{ activity.clock_in_location.lat }}, {{ activity.clock_in_location.lng }}
-                                  </div>
-                                  <a href="https://www.google.com/maps?q={{ activity.clock_in_location.lat }},{{ activity.clock_in_location.lng }}"
-                                     target="_blank" onclick="event.stopPropagation();">{% trans "Map" %}</a>
-                                {% elif activity.clock_in_location.latitude != None and activity.clock_in_location.longitude != None %}
-                                  <div class="oh-text--sm">
-                                    {{ activity.clock_in_location.latitude }}, {{ activity.clock_in_location.longitude }}
-                                  </div>
-                                  <a href="https://www.google.com/maps?q={{ activity.clock_in_location.latitude }},{{ activity.clock_in_location.longitude }}"
-                                     target="_blank" onclick="event.stopPropagation();">{% trans "Map" %}</a>
-                                {% else %}
-                                  {{ activity.clock_in_location }}
+                              {% if activity.display_clock_in_location_text and activity.display_clock_in_location_text != '-' %}
+                                <div class="oh-text--sm">{{ activity.display_clock_in_location_text }}</div>
+                                {% if activity.display_clock_in_map_url %}
+                                  <a href="{{ activity.display_clock_in_map_url }}" target="_blank" onclick="event.stopPropagation();">{% trans "Map" %}</a>
                                 {% endif %}
                               {% else %}
                                 -
@@ -184,46 +176,34 @@
                             </div>
 
                             <div data-cell-index="6" class="oh-sticky-table__td" onclick="event.stopPropagation();">
-                              {% if activity.clock_in_image %}
-                                <a href="{{ activity.clock_in_image.url }}" target="_blank" onclick="event.stopPropagation();">
-                                  <img src="{{ activity.clock_in_image.url }}"
-                                       style="height:32px;width:32px;object-fit:cover;border-radius:6px;" />
+                              {% if activity.display_clock_in_image %}
+                                <a href="{{ activity.display_clock_in_image.url }}" target="_blank" onclick="event.stopPropagation();">
+                                  <img src="{{ activity.display_clock_in_image.url }}" style="height:32px;width:32px;object-fit:cover;border-radius:6px;" />
                                 </a>
                               {% else %}
                                 -
                               {% endif %}
                             </div>
 
-                            <div data-cell-index="4" class="oh-sticky-table__td timeformat_changer">{{ activity.clock_out|default_if_none:"-"|default:"-" }}</div>
+                            <div data-cell-index="4" class="oh-sticky-table__td">{{ activity.display_check_out|default_if_none:"-"|default:"-" }}</div>
 
                             <div data-cell-index="13" class="oh-sticky-table__td">
-                              {% if activity.clock_out_channel %}
-                                <span class="oh-badge oh-badge--secondary oh-badge--small oh-badge--round">{{ activity.get_clock_out_channel_display }}</span>
+                              {% if activity.display_clock_out_source and activity.display_clock_out_source != '-' %}
+                                <span class="oh-badge oh-badge--secondary oh-badge--small oh-badge--round">{{ activity.display_clock_out_source }}</span>
                               {% else %}
                                 -
                               {% endif %}
                             </div>
 
                             <div data-cell-index="9" class="oh-sticky-table__td">
-                              {{ activity.get_clock_out_mode_display|default:"-" }}
+                              {{ activity.display_clock_out_mode|default:"-" }}
                             </div>
 
                             <div data-cell-index="11" class="oh-sticky-table__td" onclick="event.stopPropagation();">
-                              {% if activity.clock_out_location %}
-                                {% if activity.clock_out_location.lat != None and activity.clock_out_location.lng != None %}
-                                  <div class="oh-text--sm">
-                                    {{ activity.clock_out_location.lat }}, {{ activity.clock_out_location.lng }}
-                                  </div>
-                                  <a href="https://www.google.com/maps?q={{ activity.clock_out_location.lat }},{{ activity.clock_out_location.lng }}"
-                                     target="_blank" onclick="event.stopPropagation();">{% trans "Map" %}</a>
-                                {% elif activity.clock_out_location.latitude != None and activity.clock_out_location.longitude != None %}
-                                  <div class="oh-text--sm">
-                                    {{ activity.clock_out_location.latitude }}, {{ activity.clock_out_location.longitude }}
-                                  </div>
-                                  <a href="https://www.google.com/maps?q={{ activity.clock_out_location.latitude }},{{ activity.clock_out_location.longitude }}"
-                                     target="_blank" onclick="event.stopPropagation();">{% trans "Map" %}</a>
-                                {% else %}
-                                  {{ activity.clock_out_location }}
+                              {% if activity.display_clock_out_location_text and activity.display_clock_out_location_text != '-' %}
+                                <div class="oh-text--sm">{{ activity.display_clock_out_location_text }}</div>
+                                {% if activity.display_clock_out_map_url %}
+                                  <a href="{{ activity.display_clock_out_map_url }}" target="_blank" onclick="event.stopPropagation();">{% trans "Map" %}</a>
                                 {% endif %}
                               {% else %}
                                 -
@@ -231,16 +211,16 @@
                             </div>
 
                             <div data-cell-index="7" class="oh-sticky-table__td" onclick="event.stopPropagation();">
-                              {% if activity.clock_out_image %}
-                                <a href="{{ activity.clock_out_image.url }}" target="_blank" onclick="event.stopPropagation();">
-                                  <img src="{{ activity.clock_out_image.url }}"
-                                       style="height:32px;width:32px;object-fit:cover;border-radius:6px;" />
+                              {% if activity.display_clock_out_image %}
+                                <a href="{{ activity.display_clock_out_image.url }}" target="_blank" onclick="event.stopPropagation();">
+                                  <img src="{{ activity.display_clock_out_image.url }}" style="height:32px;width:32px;object-fit:cover;border-radius:6px;" />
                                 </a>
                               {% else %}
                                 -
                               {% endif %}
                             </div>
-                            <div data-cell-index="5" class="oh-sticky-table__td dateformat_changer">{% if activity.clock_out_date %}<span class="dateformat_changer">{{ activity.clock_out_date }}</span>{% else %}-{% endif %}</div>
+                            <div data-cell-index="5" class="oh-sticky-table__td dateformat_changer">{{ activity.display_clock_out_date|default_if_none:"-"|default:"-" }}</div>
+                            <div data-cell-index="14" class="oh-sticky-table__td" title="{{ activity.display_note|default_if_none:'-'|default:'-' }}">{{ activity.display_note|default_if_none:"-"|default:"-" }}</div>
                         </div>
                     {% endfor %}
                 </div>
