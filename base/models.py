@@ -1887,7 +1887,7 @@ class AttendanceAllowedIP(models.Model):
 
 class TrackLateComeEarlyOut(HorillaModel):
     is_enable = models.BooleanField(
-        default=True,
+        default=False,
         verbose_name=_("Enable"),
         help_text=_(
             "By enabling this, you track the late comes and early outs of employees in their attendance."
@@ -1903,6 +1903,7 @@ class TrackLateComeEarlyOut(HorillaModel):
         return f"Tracking late come early out {tracking}"
 
     def save(self, *args, **kwargs):
+        self.is_enable = False
         if not self.pk and TrackLateComeEarlyOut.objects.exists():
             raise ValidationError(
                 _("Only one TrackLateComeEarlyOut instance is allowed.")
