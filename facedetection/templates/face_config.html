@@ -1,4 +1,9 @@
-<form hx-post="{% url 'face-config' %}" hx-swap="none" hx-on-htmx-after-request="$('#reloadMessagesButton').click();">
-    {% csrf_token %}
-    {{form.as_p}}
-</form>
+{% load i18n %}
+<div class="oh-input__group">
+    <label class="oh-input__label">{% trans "Face Detection" %}</label>
+    <div class="oh-alert-container">
+        <div class="oh-alert oh-alert--success mb-0">
+            {% trans "Face Detection is always active for attendance and cannot be changed from settings." %}
+        </div>
+    </div>
+</div>
