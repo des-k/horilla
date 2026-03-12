@@ -10,7 +10,7 @@ class FaceDetectionSetupForm(ModelForm):
 
     class Meta:
         model = FaceDetection
-        exclude = ["company_id"]
+        fields = []
 
     def as_p(self):
         """
