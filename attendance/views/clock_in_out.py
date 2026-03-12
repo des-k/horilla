@@ -1080,7 +1080,7 @@ def clock_out_attendance_and_activity(
             if "out_attendance_reject_reason_code" not in updates:
                 updates.append("out_attendance_reject_reason_code")
 
-    if allow_update and raw_punch_history is not None:
+    if allow_update_clock_out and raw_punch_history is not None:
         assign_raw_punch_to_attendance(attendance, punch=raw_punch_history, direction="out")
     _recalculate_attendance_summary(attendance, shift_start_dt=shift_start_dt)
     attendance.save(update_fields=list(dict.fromkeys(updates + [
