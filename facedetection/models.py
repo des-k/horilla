@@ -19,7 +19,7 @@ class FaceDetection(models.Model):
         null=True,
         blank=True,
     )
-    start = models.BooleanField(default=False)
+    start = models.BooleanField(default=True)
 
     def clean(self):
         if self.company_id is None:
@@ -32,6 +32,7 @@ class FaceDetection(models.Model):
                 )
 
     def save(self, *args, **kwargs):
+        self.start = True
         self.full_clean()  # Ensures `clean()` runs
         super().save(*args, **kwargs)
 
