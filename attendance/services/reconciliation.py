@@ -21,7 +21,6 @@ from attendance.models import (
     WorkModeRequest,
     WorkModeRequestStatus,
 )
-from attendance.views.clock_in_out import _resolve_grace_time, get_shift_rules
 from attendance.methods.utils import format_time, strtime_seconds, shift_schedule_today
 from base.models import EmployeeShiftDay
 
@@ -29,6 +28,11 @@ try:
     from leave.models import LeaveRequest
 except Exception:  # pragma: no cover
     LeaveRequest = None  # type: ignore
+
+try:
+    from leave.half_day_rules import leave_breakdown_for_attendance_date
+except Exception:  # pragma: no cover
+    leave_breakdown_for_attendance_date = None  # type: ignore
 
 
 SOURCE_NORMAL = "Normal"
@@ -84,8 +88,8 @@ class ShiftContext:
 class LeaveContext:
     request: object | None
     kind: str | None
-    effective_start_dt: datetime | None
-    effective_end_dt: datetime | None
+    late_reference_dt: datetime | None
+    early_reference_dt: datetime | None
     minimum_hour: str
 
     @property
@@ -161,12 +165,43 @@ def _half_day_segment_boundary(kind: str, ctx: "ShiftContext") -> Optional[datet
     return None
 
 
+def _time_to_shift_instance_dt(
+    threshold_time: Optional[time],
+    *,
+    shift_start_dt: Optional[datetime],
+    shift_end_dt: Optional[datetime],
+) -> Optional[datetime]:
+    if not (threshold_time and shift_start_dt and shift_end_dt):
+        return None
+
+    candidate = datetime.combine(shift_start_dt.date(), threshold_time)
+    candidate = _localize(candidate)
+    if candidate is None:
+        return None
+
+    if shift_end_dt < shift_start_dt:
+        shift_end_dt = shift_end_dt + timedelta(days=1)
+
+    if candidate < shift_start_dt and shift_end_dt.date() > shift_start_dt.date():
+        candidate = candidate + timedelta(days=1)
+
+    return candidate
+
+
 def _half_minimum_hour(minimum_hour: str) -> str:
     try:
         secs = max(0, strtime_seconds(minimum_hour or "00:00"))
         return format_time(secs // 2)
     except Exception:
         return "00:00"
+
+
+def _get_shift_rule_helpers():
+    """Import shift rule helpers lazily to avoid attendance view circular imports."""
+
+    from attendance.views.clock_in_out import _resolve_grace_time, get_shift_rules
+
+    return get_shift_rules, _resolve_grace_time
 
 
 def _resolve_shift_context(employee, attendance_date: date) -> ShiftContext:
@@ -185,6 +220,7 @@ def _resolve_shift_context(employee, attendance_date: date) -> ShiftContext:
     grace_clock_in_type = "after"
 
     if shift and day:
+        get_shift_rules, _resolve_grace_time = _get_shift_rule_helpers()
         try:
             minimum_hour, start_sec, end_sec = shift_schedule_today(day=day, shift=shift)
         except Exception:
@@ -246,33 +282,50 @@ def _resolve_leave_context(employee, attendance_date: date, ctx: ShiftContext) -
     if LeaveRequest is None:
         return LeaveContext(None, None, ctx.shift_start_dt, ctx.shift_end_dt, ctx.minimum_hour)
 
-    leave_qs = (
-        LeaveRequest.objects.filter(
-            employee_id=employee,
-            status="approved",
-            start_date__lte=attendance_date,
-            end_date__gte=attendance_date,
-        )
-        .order_by("-id")
-    )
+    leave_qs = LeaveRequest.objects.filter(employee_id=employee, status="approved").filter(
+        start_date__lte=attendance_date + timedelta(days=1),
+        end_date__gte=attendance_date - timedelta(days=1),
+    ).order_by("-id")
     leave_request = leave_qs.first()
-    if not leave_request:
+    if leave_breakdown_for_attendance_date is not None:
+        try:
+            kind = leave_breakdown_for_attendance_date(employee, attendance_date) or None
+        except Exception:
+            kind = None
+    else:
+        kind = None
+
+    if not kind and leave_request:
+        kind = _leave_kind_for_date(leave_request, attendance_date) or None
+
+    if not kind:
         return LeaveContext(None, None, ctx.shift_start_dt, ctx.shift_end_dt, ctx.minimum_hour)
 
-    kind = _leave_kind_for_date(leave_request, attendance_date) or "full_day"
-    effective_start_dt = ctx.shift_start_dt
-    effective_end_dt = ctx.shift_end_dt
+    late_reference_dt = ctx.shift_start_dt
+    early_reference_dt = ctx.shift_end_dt
     minimum_hour = ctx.minimum_hour
-    split_dt = _half_day_segment_boundary(kind, ctx)
+    schedule = ctx.schedule
 
     if kind == "first_half":
-        effective_start_dt = split_dt or ctx.shift_start_dt
+        threshold_time = getattr(schedule, "first_half_leave_latest_check_in_time", None) if schedule else None
+        if getattr(schedule, "enable_first_half_leave_rule", False) and threshold_time is not None:
+            late_reference_dt = _time_to_shift_instance_dt(
+                threshold_time,
+                shift_start_dt=ctx.shift_start_dt,
+                shift_end_dt=ctx.shift_end_dt,
+            )
         minimum_hour = _half_minimum_hour(ctx.minimum_hour)
     elif kind == "second_half":
-        effective_end_dt = split_dt or ctx.shift_end_dt
+        threshold_time = getattr(schedule, "second_half_leave_earliest_check_out_time", None) if schedule else None
+        if getattr(schedule, "enable_second_half_leave_rule", False) and threshold_time is not None:
+            early_reference_dt = _time_to_shift_instance_dt(
+                threshold_time,
+                shift_start_dt=ctx.shift_start_dt,
+                shift_end_dt=ctx.shift_end_dt,
+            )
         minimum_hour = _half_minimum_hour(ctx.minimum_hour)
 
-    return LeaveContext(leave_request, kind, effective_start_dt, effective_end_dt, minimum_hour)
+    return LeaveContext(leave_request, kind, late_reference_dt, early_reference_dt, minimum_hour)
 
 
 def _approved_work_mode_request(employee, attendance_date: date) -> Optional[WorkModeRequest]:
@@ -415,18 +468,29 @@ def _set_late_early_rows(attendance: Attendance, late_minutes: int, early_minute
         AttendanceLateComeEarlyOut.objects.get_or_create(attendance_id=attendance, type="early_out")
 
 
-def _calculate_late_early(final_in_dt: Optional[datetime], final_out_dt: Optional[datetime], effective_start_dt: Optional[datetime], effective_end_dt: Optional[datetime], grace_seconds: int, grace_clock_in_type: str):
+def _calculate_late_early(
+    final_in_dt: Optional[datetime],
+    final_out_dt: Optional[datetime],
+    late_reference_dt: Optional[datetime],
+    early_reference_dt: Optional[datetime],
+    grace_seconds: int,
+    grace_clock_in_type: str,
+    *,
+    apply_grace_to_late: bool = True,
+):
     late_minutes = 0
     early_minutes = 0
     credit_seconds = 0
 
-    if final_in_dt and effective_start_dt:
-        if final_in_dt < effective_start_dt and grace_clock_in_type == "before_after":
-            credit_seconds = int((effective_start_dt - final_in_dt).total_seconds())
-        late_seconds = int((final_in_dt - effective_start_dt).total_seconds()) - int(grace_seconds or 0)
+    if final_in_dt and late_reference_dt:
+        if final_in_dt < late_reference_dt and grace_clock_in_type == "before_after":
+            credit_seconds = int((late_reference_dt - final_in_dt).total_seconds())
+        late_seconds = int((final_in_dt - late_reference_dt).total_seconds())
+        if apply_grace_to_late:
+            late_seconds = late_seconds - int(grace_seconds or 0)
         late_minutes = max(0, late_seconds // 60)
 
-    adjusted_end = effective_end_dt
+    adjusted_end = early_reference_dt
     if adjusted_end and credit_seconds > 0:
         adjusted_end = adjusted_end - timedelta(seconds=credit_seconds)
 
@@ -451,6 +515,15 @@ def _work_hours(final_in_dt: Optional[datetime], final_out_dt: Optional[datetime
 
 
 def _sync_attendance_and_activity(attendance: Attendance, activity: AttendanceActivity, *, final_in_dt: Optional[datetime], final_out_dt: Optional[datetime], final_in_punch: Optional[AttendancePunchingHistory], final_out_punch: Optional[AttendancePunchingHistory], source: str, note: str, final_mode: str, work_request: Optional[WorkModeRequest], ctx: ShiftContext, minimum_hour: str, is_presence_only: bool, late_minutes: int, early_minutes: int):
+    existing_in_channel = getattr(attendance, "attendance_clock_in_channel", None)
+    existing_out_channel = getattr(attendance, "attendance_clock_out_channel", None)
+    existing_in_mode = getattr(attendance, "attendance_clock_in_mode", None)
+    existing_out_mode = getattr(attendance, "attendance_clock_out_mode", None)
+    existing_in_image = getattr(attendance, "attendance_clock_in_image", None)
+    existing_out_image = getattr(attendance, "attendance_clock_out_image", None)
+    existing_in_location = getattr(attendance, "attendance_clock_in_location", None)
+    existing_out_location = getattr(attendance, "attendance_clock_out_location", None)
+
     attendance.employee_id = ctx.employee
     attendance.attendance_date = ctx.attendance_date
     attendance.shift_id = ctx.shift
@@ -482,6 +555,10 @@ def _sync_attendance_and_activity(attendance: Attendance, activity: AttendanceAc
         attendance.in_attendance_reject_reason_code = None
     elif _request_is_approved_request_override(attendance, AttendancePunchDirection.IN):
         attendance.attendance_clock_in_punch = None
+        attendance.attendance_clock_in_channel = existing_in_channel
+        attendance.attendance_clock_in_mode = existing_in_mode or final_mode
+        attendance.attendance_clock_in_image = existing_in_image
+        attendance.attendance_clock_in_location = existing_in_location
     else:
         attendance.attendance_clock_in_punch = None
         if not final_in_dt:
@@ -500,6 +577,10 @@ def _sync_attendance_and_activity(attendance: Attendance, activity: AttendanceAc
         attendance.out_attendance_reject_reason_code = None
     elif _request_is_approved_request_override(attendance, AttendancePunchDirection.OUT):
         attendance.attendance_clock_out_punch = None
+        attendance.attendance_clock_out_channel = existing_out_channel
+        attendance.attendance_clock_out_mode = existing_out_mode or final_mode
+        attendance.attendance_clock_out_image = existing_out_image
+        attendance.attendance_clock_out_location = existing_out_location
     else:
         attendance.attendance_clock_out_punch = None
         if not final_out_dt:
@@ -532,27 +613,15 @@ def _sync_attendance_and_activity(attendance: Attendance, activity: AttendanceAc
     activity.clock_out = final_out_dt.time().replace(microsecond=0) if final_out_dt else None
     activity.out_datetime = final_out_dt
 
-    if final_in_punch:
-        activity.clock_in_channel = attendance.attendance_clock_in_channel
-        activity.clock_in_image = attendance.attendance_clock_in_image
-        activity.clock_in_location = attendance.attendance_clock_in_location
-        activity.clock_in_mode = final_mode
-    elif not final_in_dt:
-        activity.clock_in_channel = None
-        activity.clock_in_image = None
-        activity.clock_in_location = None
-        activity.clock_in_mode = None
+    activity.clock_in_channel = attendance.attendance_clock_in_channel if final_in_dt else None
+    activity.clock_in_image = attendance.attendance_clock_in_image if final_in_dt else None
+    activity.clock_in_location = attendance.attendance_clock_in_location if final_in_dt else None
+    activity.clock_in_mode = attendance.attendance_clock_in_mode if final_in_dt else None
 
-    if final_out_punch:
-        activity.clock_out_channel = attendance.attendance_clock_out_channel
-        activity.clock_out_image = attendance.attendance_clock_out_image
-        activity.clock_out_location = attendance.attendance_clock_out_location
-        activity.clock_out_mode = final_mode
-    elif not final_out_dt:
-        activity.clock_out_channel = None
-        activity.clock_out_image = None
-        activity.clock_out_location = None
-        activity.clock_out_mode = None
+    activity.clock_out_channel = attendance.attendance_clock_out_channel if final_out_dt else None
+    activity.clock_out_image = attendance.attendance_clock_out_image if final_out_dt else None
+    activity.clock_out_location = attendance.attendance_clock_out_location if final_out_dt else None
+    activity.clock_out_mode = attendance.attendance_clock_out_mode if final_out_dt else None
 
     activity.save()
 
@@ -640,8 +709,8 @@ def recompute_attendance(employee, attendance_date: date) -> ReconciliationResul
         elif final_in_dt and not final_out_dt:
             note = NOTE_MISSING_OUT if source == SOURCE_NORMAL else note
 
-    effective_start_dt = leave_ctx.effective_start_dt
-    effective_end_dt = leave_ctx.effective_end_dt
+    late_reference_dt = leave_ctx.late_reference_dt or ctx.shift_start_dt
+    early_reference_dt = leave_ctx.early_reference_dt or ctx.shift_end_dt
     minimum_hour = _minimum_for_final(ctx, leave_ctx, is_presence_only)
     late_minutes = 0
     early_minutes = 0
@@ -653,10 +722,11 @@ def recompute_attendance(employee, attendance_date: date) -> ReconciliationResul
         late_minutes, early_minutes = _calculate_late_early(
             final_in_dt,
             final_out_dt,
-            effective_start_dt,
-            effective_end_dt,
+            late_reference_dt,
+            early_reference_dt,
             ctx.grace_seconds,
             ctx.grace_clock_in_type,
+            apply_grace_to_late=not leave_ctx.is_half_day,
         )
 
     _sync_attendance_and_activity(
