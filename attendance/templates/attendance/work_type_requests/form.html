@@ -43,6 +43,22 @@
         </div>
       </div>
 
+      <div class="col-md-6">
+        <div class="oh-input-group">
+          <label class="oh-label">{{ form.duty_destination_location.label }}</label>
+          {{ form.duty_destination_location }}
+          {% if form.duty_destination_location.errors %}<small class="text-danger">{{ form.duty_destination_location.errors|join:", " }}</small>{% endif %}
+        </div>
+      </div>
+
+      <div class="col-md-6">
+        <div class="oh-input-group">
+          <label class="oh-label">{{ form.duty_destination_detail.label }}</label>
+          {{ form.duty_destination_detail }}
+          {% if form.duty_destination_detail.errors %}<small class="text-danger">{{ form.duty_destination_detail.errors|join:", " }}</small>{% endif %}
+        </div>
+      </div>
+
       <div class="col-md-12">
         <div class="oh-input-group">
           <label class="oh-label">{{ form.reason.label }}</label>
