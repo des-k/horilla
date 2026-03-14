@@ -669,6 +669,10 @@ def update_punch_history(
     attendance=None,
     attendance_date: Optional[date] = None,
     device_info: Optional[str] = None,
+    work_mode: Optional[str] = None,
+    related_work_mode_request=None,
+    decision_source: Optional[str] = None,
+    decision_status: Optional[str] = None,
 ):
     if not punch:
         return
@@ -688,6 +692,18 @@ def update_punch_history(
     if device_info:
         punch.device_info = device_info[:255]
         fields.append("device_info")
+    if work_mode is not None and hasattr(punch, "work_mode"):
+        punch.work_mode = work_mode
+        fields.append("work_mode")
+    if related_work_mode_request is not None and hasattr(punch, "related_work_mode_request"):
+        punch.related_work_mode_request = related_work_mode_request
+        fields.append("related_work_mode_request")
+    if decision_source is not None and hasattr(punch, "decision_source"):
+        punch.decision_source = (decision_source or "")[:64] or None
+        fields.append("decision_source")
+    if decision_status is not None and hasattr(punch, "decision_status"):
+        punch.decision_status = decision_status
+        fields.append("decision_status")
     if fields:
         punch.save(update_fields=fields)
 
@@ -705,101 +721,13 @@ def _logs_for_attendance(employee, attendance_date: date):
 def reconcile_attendance_punches(*, employee, attendance_date: date):
     if not employee or not attendance_date:
         return
-    attendance = Attendance.objects.filter(employee_id=employee, attendance_date=attendance_date).first()
-    logs = list(_logs_for_attendance(employee, attendance_date))
-    if not logs:
+
+    try:
+        from attendance.services.reconciliation import recompute_attendance
+    except Exception:
         return
 
-    in_match = None
-    out_match = None
-    in_final_source_reason = None
-    out_final_source_reason = None
-
-    if attendance:
-        in_final_source_reason = _final_source_reason(
-            attendance.attendance_clock_in_channel,
-            direction=AttendancePunchDirection.IN,
-        )
-        out_final_source_reason = _final_source_reason(
-            attendance.attendance_clock_out_channel,
-            direction=AttendancePunchDirection.OUT,
-        )
-
-        in_match = getattr(attendance, "attendance_clock_in_punch_id", None)
-        out_match = getattr(attendance, "attendance_clock_out_punch_id", None)
-
-        if not in_match and attendance.attendance_clock_in and attendance.attendance_clock_in_channel in RAW_CHANNELS.union({None, ""}):
-            for log in logs:
-                localized_ts = _aware_local(log.punch_timestamp)
-                if (
-                    log.punch_direction == AttendancePunchDirection.IN
-                    and _match_allowed_for_log(log, attendance.attendance_clock_in_channel)
-                    and _same_timestamp(attendance.attendance_clock_in_date, attendance.attendance_clock_in, localized_ts)
-                ):
-                    in_match = log.id
-                    break
-        if not out_match and attendance.attendance_clock_out and attendance.attendance_clock_out_channel in RAW_CHANNELS.union({None, ""}):
-            for log in reversed(logs):
-                localized_ts = _aware_local(log.punch_timestamp)
-                if (
-                    log.punch_direction == AttendancePunchDirection.OUT
-                    and _match_allowed_for_log(log, attendance.attendance_clock_out_channel)
-                    and _same_timestamp(attendance.attendance_clock_out_date, attendance.attendance_clock_out, localized_ts)
-                ):
-                    out_match = log.id
-                    break
-
-    in_reject_reason = _attendance_reject_reason(attendance, direction=AttendancePunchDirection.IN)
-    out_reject_reason = _attendance_reject_reason(attendance, direction=AttendancePunchDirection.OUT)
-    leave_breakdown = _leave_breakdown_for_date(employee, attendance_date)
-
-    for log in logs:
-        accepted = False
-        reason = (log.reason or "").strip()
-
-        if log.punch_direction == AttendancePunchDirection.IN:
-            if in_match and log.id == in_match:
-                accepted = True
-                reason = _accepted_reason(AttendancePunchDirection.IN, leave_breakdown=leave_breakdown)
-            elif should_preserve_reason(reason):
-                reason = _clean_reason_text(reason)
-            elif in_reject_reason:
-                reason = in_reject_reason
-            elif in_match:
-                reason = _superseded_reason(AttendancePunchDirection.IN)
-            elif attendance and attendance.attendance_clock_in and in_final_source_reason:
-                reason = in_final_source_reason
-            else:
-                reason = "Ignored because this Check-In was not selected"
-
-        elif log.punch_direction == AttendancePunchDirection.OUT:
-            if out_match and log.id == out_match:
-                accepted = True
-                reason = _accepted_reason(AttendancePunchDirection.OUT, leave_breakdown=leave_breakdown)
-            elif should_preserve_reason(reason):
-                reason = _clean_reason_text(reason)
-            elif out_reject_reason:
-                reason = out_reject_reason
-            elif out_match:
-                reason = _superseded_reason(AttendancePunchDirection.OUT)
-            elif attendance and attendance.attendance_clock_out and out_final_source_reason:
-                reason = out_final_source_reason
-            else:
-                reason = _superseded_reason(AttendancePunchDirection.OUT)
-
-        else:
-            if not should_preserve_reason(reason):
-                reason = "Ignored: unsupported punch direction"
-            else:
-                reason = _clean_reason_text(reason)
-
-        update_punch_history(
-            log,
-            accepted=accepted,
-            reason=_clean_reason_text(reason),
-            attendance=attendance,
-            attendance_date=attendance_date,
-        )
+    recompute_attendance(employee, attendance_date)
 
 
 def reconcile_single_punch_against_attendance(punch: AttendancePunchingHistory):
