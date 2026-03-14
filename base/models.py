@@ -85,6 +85,16 @@ def validate_time_format(value):
 
 
 
+def default_first_half_leave_latest_check_in_time():
+    """Default latest check-in cutoff for first-half leave."""
+    return datetime.strptime("13:00", "%H:%M").time()
+
+
+def default_second_half_leave_earliest_check_out_time():
+    """Default earliest check-out cutoff for second-half leave."""
+    return datetime.strptime("12:00", "%H:%M").time()
+
+
 def _normalize_hh_mm_ss_to_secs(value: str) -> tuple[str, int]:
     """
     Normalizes HH:MM:SS string (zero-pad) and returns (normalized_str, total_seconds).
@@ -679,6 +689,37 @@ class EmployeeShiftSchedule(HorillaModel):
         verbose_name=_("Early Check-Out Grace Minutes"),
         help_text=_("Earliest check-out (WFO/WFA) = end_time - this many minutes."),
     )
+
+    enable_first_half_leave_rule = models.BooleanField(
+        default=True,
+        verbose_name=_("Enable First Half Leave Attendance Rule"),
+        help_text=_("Apply a dedicated latest check-in threshold when first half leave is approved for this shift day."),
+    )
+    first_half_leave_latest_check_in_time = models.TimeField(
+        null=True,
+        blank=True,
+        default=default_first_half_leave_latest_check_in_time,
+        verbose_name=_("First Half Leave Latest Check-In Time"),
+        help_text=_("Employees who take first half leave must check in no later than this time."),
+    )
+    enable_second_half_leave_rule = models.BooleanField(
+        default=True,
+        verbose_name=_("Enable Second Half Leave Attendance Rule"),
+        help_text=_("Apply a dedicated earliest check-out threshold when second half leave is approved for this shift day."),
+    )
+    second_half_leave_earliest_check_out_time = models.TimeField(
+        null=True,
+        blank=True,
+        default=default_second_half_leave_earliest_check_out_time,
+        verbose_name=_("Second Half Leave Earliest Check-Out Time"),
+        help_text=_("Employees who take second half leave must not check out before this time."),
+    )
+    require_check_out_before_second_half_leave = models.BooleanField(
+        default=True,
+        verbose_name=_("Require Check-Out Before Submitting Second Half Leave After Check-In"),
+        help_text=_("When enabled, employees who already checked in must check out before submitting second half leave."),
+    )
+
     max_late_checkout_hours = models.IntegerField(
         default=12,
         verbose_name=_("Max Late Check-Out Hours"),
@@ -782,6 +823,34 @@ class EmployeeShiftSchedule(HorillaModel):
     
         super().save(*args, **kwargs)
 
+    def _time_seconds(self, value):
+        if value is None:
+            return None
+        return (value.hour * 3600) + (value.minute * 60) + value.second
+
+    def _validate_half_day_threshold(self, *, field_name, value):
+        if not (self.start_time and self.end_time and value):
+            return
+
+        start_sec = self._time_seconds(self.start_time)
+        end_sec = self._time_seconds(self.end_time)
+        threshold_sec = self._time_seconds(value)
+        if start_sec is None or end_sec is None or threshold_sec is None:
+            return
+
+        night_shift = bool(self.is_night_shift or (self.start_time and self.end_time and self.start_time > self.end_time))
+        if night_shift and threshold_sec < start_sec:
+            threshold_sec += 24 * 3600
+        if night_shift and end_sec <= start_sec:
+            end_sec += 24 * 3600
+
+        if threshold_sec < start_sec or threshold_sec > end_sec:
+            raise ValidationError(
+                {
+                    field_name: _("Half-day leave threshold must fall within the configured shift span for this day.")
+                }
+            )
+
     def clean(self):
         super().clean()
     
@@ -795,6 +864,36 @@ class EmployeeShiftSchedule(HorillaModel):
             _, cutoff_out_secs = _normalize_hh_mm_ss_to_secs(self.cutoff_check_out_offset)
         else:
             cutoff_out_secs = 0
+
+        if self.enable_first_half_leave_rule and not self.first_half_leave_latest_check_in_time:
+            raise ValidationError(
+                {
+                    "first_half_leave_latest_check_in_time": _(
+                        "First Half Leave Latest Check-In Time is required when first half leave attendance rule is enabled."
+                    )
+                }
+            )
+
+        if self.enable_first_half_leave_rule and self.first_half_leave_latest_check_in_time:
+            self._validate_half_day_threshold(
+                field_name="first_half_leave_latest_check_in_time",
+                value=self.first_half_leave_latest_check_in_time,
+            )
+
+        if self.enable_second_half_leave_rule and not self.second_half_leave_earliest_check_out_time:
+            raise ValidationError(
+                {
+                    "second_half_leave_earliest_check_out_time": _(
+                        "Second Half Leave Earliest Check-Out Time is required when second half leave attendance rule is enabled."
+                    )
+                }
+            )
+
+        if self.enable_second_half_leave_rule and self.second_half_leave_earliest_check_out_time:
+            self._validate_half_day_threshold(
+                field_name="second_half_leave_earliest_check_out_time",
+                value=self.second_half_leave_earliest_check_out_time,
+            )
     
         # Validate cutoff >= grace when grace applies
         if apps.is_installed("attendance") and self.grace_time_id:
