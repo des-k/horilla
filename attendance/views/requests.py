@@ -53,10 +53,12 @@ from attendance.services.activity_sync import (
 )
 from attendance.services.punching_history import (
     capture_request_restore_snapshot,
+    clear_request_restore_snapshot,
     clear_raw_links_for_request_override,
     reconcile_attendance_punches,
     restore_raw_state_after_request,
 )
+from attendance.services.reconciliation import recompute_attendance
 from attendance.services.request_audit import log_request_action
 from base.methods import (
     choosesubordinates,
@@ -233,12 +235,60 @@ def _detach_request_overridden_raw_links(attendance: Attendance, *, include_in: 
 
 
 def _restore_request_back_to_raw(attendance: Attendance, *, include_in: bool, include_out: bool, prev_attendance_date=None):
-    restore_raw_state_after_request(attendance, include_in=include_in, include_out=include_out)
-    attendance.attendance_validated = cio.attendance_validate(attendance)
-    attendance.save()
-    _ensure_single_session_activity(attendance, prev_attendance_date=prev_attendance_date)
-    _refresh_late_come_early_out(attendance)
-    reconcile_attendance_punches(employee=attendance.employee_id, attendance_date=attendance.attendance_date)
+    update_fields = []
+    if include_in:
+        attendance.attendance_clock_in_date = None
+        attendance.attendance_clock_in = None
+        attendance.attendance_clock_in_channel = None
+        attendance.attendance_clock_in_mode = None
+        attendance.attendance_clock_in_punch = None
+        attendance.attendance_clock_in_image = None
+        attendance.attendance_clock_in_location = None
+        attendance.in_attendance_status = None
+        attendance.in_attendance_reject_reason_code = None
+        attendance.in_related_work_type_request_id = None
+        update_fields.extend([
+            "attendance_clock_in_date",
+            "attendance_clock_in",
+            "attendance_clock_in_channel",
+            "attendance_clock_in_mode",
+            "attendance_clock_in_punch",
+            "attendance_clock_in_image",
+            "attendance_clock_in_location",
+            "in_attendance_status",
+            "in_attendance_reject_reason_code",
+            "in_related_work_type_request_id",
+        ])
+    if include_out:
+        attendance.attendance_clock_out_date = None
+        attendance.attendance_clock_out = None
+        attendance.attendance_clock_out_channel = None
+        attendance.attendance_clock_out_mode = None
+        attendance.attendance_clock_out_punch = None
+        attendance.attendance_clock_out_image = None
+        attendance.attendance_clock_out_location = None
+        attendance.out_attendance_status = None
+        attendance.out_attendance_reject_reason_code = None
+        attendance.out_related_work_type_request_id = None
+        update_fields.extend([
+            "attendance_clock_out_date",
+            "attendance_clock_out",
+            "attendance_clock_out_channel",
+            "attendance_clock_out_mode",
+            "attendance_clock_out_punch",
+            "attendance_clock_out_image",
+            "attendance_clock_out_location",
+            "out_attendance_status",
+            "out_attendance_reject_reason_code",
+            "out_related_work_type_request_id",
+        ])
+    attendance.work_mode_request_id = None
+    attendance.request_restore_snapshot = None
+    update_fields.extend(["work_mode_request_id", "request_restore_snapshot"])
+    attendance.save(update_fields=list(dict.fromkeys(update_fields)))
+    result = recompute_attendance(attendance.employee_id, attendance.attendance_date)
+    attendance = result.attendance if result is not None else attendance
+    clear_request_restore_snapshot(attendance, include_in=include_in, include_out=include_out)
     return attendance
 
 
@@ -1106,70 +1156,9 @@ def approve_validate_attendance_request(request, attendance_id):
     _mark_approved_request_channels(attendance)
     _detach_request_overridden_raw_links(attendance, include_in=wants_in, include_out=wants_out)
     attendance.refresh_from_db()
-    reconcile_attendance_punches(employee=attendance.employee_id, attendance_date=attendance.attendance_date)
-
-    # -----------------------------------------------------------------
-    # SINGLE-SESSION SYNC
-    # Ensure there is exactly ONE AttendanceActivity per (employee, attendance_date)
-    # and keep it aligned with the approved Attendance values.
-    # -----------------------------------------------------------------
-    _ensure_single_session_activity(attendance, prev_attendance_date=prev_attendance_date)
-    _refresh_late_come_early_out(attendance)
-
-    # -------------------------------------------------------------
-    # FINAL spec: If approving an attendance request that effectively
-    # approves an early-checkout which was previously REJECTED,
-    # flip OUT status back to VALID + clear reject reason.
-    # Also recompute worked hours using shift_start as baseline.
-    # -------------------------------------------------------------
-    try:
-        if (
-            getattr(attendance, "out_attendance_status", None) == "REJECTED"
-            and getattr(attendance, "out_attendance_reject_reason_code", None)
-            in (
-                "EARLY_CHECKOUT_BEFORE_SHIFT_END",
-                "EARLY_CHECKOUT_BEFORE_CUTOFF_IN",
-            )
-        ):
-            attendance.out_attendance_status = "VALID"
-            attendance.out_attendance_reject_reason_code = None
-
-            # Recompute worked hours from max(real_in, shift_start)
-            if (
-                attendance.attendance_clock_in_date
-                and attendance.attendance_clock_in
-                and attendance.attendance_clock_out_date
-                and attendance.attendance_clock_out
-            ):
-                shift = getattr(attendance, "shift_id", None)
-                day_obj = getattr(attendance, "attendance_day", None)
-                if shift and day_obj:
-                    _min_h, start_sec, end_sec = shift_schedule_today(day=day_obj, shift=shift)
-                    rules = cio.get_shift_rules(
-                        attendance.attendance_date,
-                        shift,
-                        day_obj,
-                        start_time_sec=start_sec,
-                        end_time_sec=end_sec,
-                    )
-                    shift_start_dt = rules.get("shift_start_dt")
-                else:
-                    shift_start_dt = None
-
-                in_dt = cio._combine_local_datetime(attendance.attendance_clock_in_date, attendance.attendance_clock_in)
-                out_dt = cio._combine_local_datetime(attendance.attendance_clock_out_date, attendance.attendance_clock_out)
-
-                worked_start_dt = max(in_dt, shift_start_dt) if shift_start_dt else in_dt
-                duration_seconds = int((out_dt - worked_start_dt).total_seconds())
-                if duration_seconds < 0:
-                    duration_seconds = 0
-
-                attendance.attendance_worked_hour = cio.format_time(duration_seconds)
-                attendance.attendance_overtime = cio.overtime_calculation(attendance)
-            attendance.save()
-    except Exception:
-        # Approval must not fail due to window recompute.
-        pass
+    result = recompute_attendance(attendance.employee_id, attendance.attendance_date)
+    if result is not None:
+        attendance = result.attendance
 
     messages.success(request, _("Attendance request has been approved"))
     employee = attendance.employee_id
@@ -1259,9 +1248,9 @@ def revoke_validate_attendance_request(request, attendance_id):
             new_status="revoke_request",
         )
 
-        _ensure_single_session_activity(attendance, prev_attendance_date=prev_attendance_date)
-        _refresh_late_come_early_out(attendance)
-        reconcile_attendance_punches(employee=attendance.employee_id, attendance_date=attendance.attendance_date)
+        result = recompute_attendance(attendance.employee_id, attendance.attendance_date)
+        if result is not None:
+            attendance = result.attendance
 
         messages.success(request, _("Attendance request approval revoked."))
     except Attendance.DoesNotExist:
@@ -1340,9 +1329,9 @@ def cancel_attendance_request(request, attendance_id):
             AttendanceLateComeEarlyOut.objects.filter(attendance_id=attendance).delete()
 
         if is_approved_request:
-            _ensure_single_session_activity(attendance, prev_attendance_date=req_date)
-            _refresh_late_come_early_out(attendance)
-            reconcile_attendance_punches(employee=req_employee, attendance_date=req_date)
+            result = recompute_attendance(req_employee, req_date)
+            if result is not None:
+                attendance = result.attendance
         messages.success(request, _("Attendance request canceled."))
 
     except Attendance.DoesNotExist:
@@ -1589,11 +1578,9 @@ def bulk_approve_attendance_request(request):
         _mark_approved_request_channels(attendance)
         _detach_request_overridden_raw_links(attendance, include_in=wants_in, include_out=wants_out)
         attendance.refresh_from_db()
-        reconcile_attendance_punches(employee=attendance.employee_id, attendance_date=attendance.attendance_date)
-
-        # Keep single-session activity consistent
-        _ensure_single_session_activity(attendance, prev_attendance_date=prev_attendance_date)
-        _refresh_late_come_early_out(attendance)
+        result = recompute_attendance(attendance.employee_id, attendance.attendance_date)
+        if result is not None:
+            attendance = result.attendance
 
         messages.success(request, _("Attendance request has been approved"))
 
