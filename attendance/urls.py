@@ -310,6 +310,16 @@ urlpatterns = [
         name="attendance-work-type-request-reject",
     ),
     path(
+        "work-type-requests/revoke/<int:obj_id>/",
+        attendance.views.work_type_requests.work_type_request_revoke,
+        name="attendance-work-type-request-revoke",
+    ),
+    path(
+        "work-type-requests/document/<int:obj_id>/<str:action>/",
+        attendance.views.work_type_requests.work_type_request_document_action,
+        name="attendance-work-type-request-document-action",
+    ),
+    path(
         "work-type-requests/attachments/<int:obj_id>/",
         attendance.views.work_type_requests.work_type_request_attachments,
         name="attendance-work-type-request-attachments",
