@@ -53,18 +53,21 @@ if apps.is_installed("attendance"):
 
     def _reconcile_leave_related_punches(instance):
         try:
-            from attendance.services.punching_history import reconcile_attendance_punches
+            from attendance.services.reconciliation import recompute_attendance_range
         except Exception:
             return
 
-        for attendance_date in _affected_attendance_dates(instance):
-            try:
-                reconcile_attendance_punches(
-                    employee=instance.employee_id,
-                    attendance_date=attendance_date,
-                )
-            except Exception:
-                continue
+        attendance_dates = _affected_attendance_dates(instance)
+        if not attendance_dates:
+            return
+        try:
+            recompute_attendance_range(
+                instance.employee_id,
+                min(attendance_dates),
+                max(attendance_dates),
+            )
+        except Exception:
+            return
 
     def _day_object_for_date(target_date):
         try:
@@ -379,36 +382,8 @@ if apps.is_installed("attendance"):
                 AttendanceLateComeEarlyOut.objects.get_or_create(attendance_id=attendance, type="early_out", defaults={"employee_id": attendance.employee_id})
 
     def _sync_leave_related_attendance_layers(instance):
-        try:
-            from attendance.models import Attendance
-            from attendance.services.activity_sync import sync_single_session_activity
-            from attendance.services.punching_history import reconcile_attendance_punches
-        except Exception:
-            return
-
-        attendance_dates = _affected_attendance_dates(instance)
-        materialized = []
-        for attendance_date in attendance_dates:
-            try:
-                attendance = _materialize_attendance_for_leave_date(instance.employee_id, attendance_date)
-                if attendance is not None:
-                    materialized.append(attendance.id)
-                    reconcile_attendance_punches(employee=instance.employee_id, attendance_date=attendance_date)
-            except Exception:
-                continue
-
-        attendances = Attendance.objects.filter(
-            employee_id=instance.employee_id,
-            attendance_date__in=attendance_dates,
-        ).order_by("attendance_date", "id")
-
-        for attendance in attendances:
-            try:
-                _rebuild_attendance_summary(attendance)
-                sync_single_session_activity(attendance)
-                _rebuild_late_early_records(attendance)
-            except Exception:
-                continue
+        """Canonical reconciliation already synchronizes attendance, activity, and punch decisions."""
+        return
 
     @receiver(post_save, sender=LeaveRequest)
     def leaverequest_pre_save(sender, instance, **_kwargs):
@@ -454,7 +429,6 @@ if apps.is_installed("attendance"):
             _cleanup_leave_work_records(WorkRecords, instance)
 
         _reconcile_leave_related_punches(instance)
-        _sync_leave_related_attendance_layers(instance)
 
     @receiver(post_delete, sender=LeaveRequest)
     def leaverequest_post_delete(sender, instance, **kwargs):
@@ -474,7 +448,6 @@ if apps.is_installed("attendance"):
             else:
                 work_entry.delete()
         _reconcile_leave_related_punches(instance)
-        _sync_leave_related_attendance_layers(instance)
 
 
 # @receiver(post_migrate)
