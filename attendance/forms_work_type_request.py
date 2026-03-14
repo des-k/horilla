@@ -77,6 +77,18 @@ class WorkTypeRequestCreateForm(forms.ModelForm):
         widget=forms.Textarea(attrs={"class": "oh-input w-100", "rows": 3}),
     )
 
+    duty_destination_location = forms.CharField(
+        label="Duty Destination Location",
+        required=False,
+        widget=forms.TextInput(attrs={"class": "oh-input w-100"}),
+    )
+
+    duty_destination_detail = forms.CharField(
+        label="Duty Destination Detail",
+        required=False,
+        widget=forms.Textarea(attrs={"class": "oh-input w-100", "rows": 2}),
+    )
+
     files = MultipleFileField(
         label="Attachments",
         required=False,
@@ -101,7 +113,7 @@ class WorkTypeRequestCreateForm(forms.ModelForm):
 
     class Meta:
         model = WorkModeRequest
-        fields = ["mode", "scope", "start_date", "end_date", "reason"]
+        fields = ["mode", "scope", "start_date", "end_date", "reason", "duty_destination_location", "duty_destination_detail"]
 
     def clean(self):
         cleaned = super().clean()
@@ -120,6 +132,9 @@ class WorkTypeRequestCreateForm(forms.ModelForm):
         if not reason:
             raise ValidationError({"reason": "Reason / Note is required"})
         cleaned["reason"] = reason
+
+        if mode == AttendanceWorkMode.ON_DUTY and not (cleaned.get("duty_destination_location") or "").strip():
+            raise ValidationError({"duty_destination_location": "Duty destination location is required for On Duty."})
 
         if not start_date:
             return cleaned
@@ -153,6 +168,18 @@ class WorkTypeRequestUpdateForm(forms.Form):
         label="Reason / Note",
         required=False,
         widget=forms.Textarea(attrs={"class": "oh-input w-100", "rows": 3}),
+    )
+
+    duty_destination_location = forms.CharField(
+        label="Duty Destination Location",
+        required=False,
+        widget=forms.TextInput(attrs={"class": "oh-input w-100"}),
+    )
+
+    duty_destination_detail = forms.CharField(
+        label="Duty Destination Detail",
+        required=False,
+        widget=forms.Textarea(attrs={"class": "oh-input w-100", "rows": 2}),
     )
 
     files = MultipleFileField(
