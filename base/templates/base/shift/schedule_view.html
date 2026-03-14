@@ -157,6 +157,21 @@
                                 +{{ schedule.cutoff_check_out_offset|default_if_none:"00:00:00" }}
                               </span>
 
+                              <span>
+                                <b>{% trans "1st Half Latest IN" %}:</b>
+                                {% if schedule.first_half_leave_latest_check_in_time %}{{ schedule.first_half_leave_latest_check_in_time|time:"H:i" }}{% else %}-{% endif %}
+                              </span>
+
+                              <span>
+                                <b>{% trans "2nd Half Earliest OUT" %}:</b>
+                                {% if schedule.second_half_leave_earliest_check_out_time %}{{ schedule.second_half_leave_earliest_check_out_time|time:"H:i" }}{% else %}-{% endif %}
+                              </span>
+
+                              <span>
+                                <b>{% trans "2nd Half Submit Rule" %}:</b>
+                                {% if schedule.require_check_out_before_second_half_leave %}{% trans "Check-out first" %}{% else %}{% trans "Flexible" %}{% endif %}
+                              </span>
+
                             </div>
                           </div>
 
