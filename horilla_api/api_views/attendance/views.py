@@ -3006,7 +3006,8 @@ class CheckingStatus(APIView):
         clock_in_t = getattr(attendance, "attendance_clock_in", None) if attendance else None
         clock_out_t = getattr(attendance, "attendance_clock_out", None) if attendance else None
 
-        # If this attendance is presence-only (On Duty), force worked hours to 00:00
+        # If this attendance is presence-only (for example, final verified On Duty),
+        # force worked hours to 00:00.
         is_presensi_only = bool(attendance and getattr(attendance, "is_presensi_only", False))
 
         out_punch_status = getattr(attendance, "out_attendance_status", None) if attendance else None
