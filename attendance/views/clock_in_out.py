@@ -779,7 +779,7 @@ def clock_in_attendance_and_activity(
     activity_defaults = {"shift_day": day}
 
     attendance, attendance_created = _locked_attendance(employee, attendance_date, attendance_defaults)
-    activity, _ = _locked_activity(employee, attendance_date, activity_defaults)
+    activity, activity_created = _locked_activity(employee, attendance_date, activity_defaults)
 
     if getattr(activity, "shift_day_id", None) != day.id:
         activity.shift_day = day
@@ -963,8 +963,8 @@ def clock_out_attendance_and_activity(
 
     activity_defaults = {"shift_day": day}
 
-    attendance, _ = _locked_attendance(employee, attendance_date, attendance_defaults)
-    activity, _ = _locked_activity(employee, attendance_date, activity_defaults)
+    attendance, attendance_created = _locked_attendance(employee, attendance_date, attendance_defaults)
+    activity, activity_created = _locked_activity(employee, attendance_date, activity_defaults)
 
     missing_check_in_original = not (
         (attendance.attendance_clock_in and attendance.attendance_clock_in_date)
@@ -1065,27 +1065,6 @@ def clock_out_attendance_and_activity(
         activity.work_mode_request_id = work_mode_request
         act_updates.append("work_mode_request_id")
     activity.save(update_fields=list(dict.fromkeys(act_updates)))
-
-    is_early_checkout = False
-    try:
-        if earliest_checkout_dt and out_datetime < earliest_checkout_dt:
-            is_early_checkout = True
-    except Exception:
-        is_early_checkout = False
-
-    if is_early_checkout:
-        if _has_model_field(Attendance, "out_attendance_status"):
-            attendance.out_attendance_status = "REJECTED"
-            if "out_attendance_status" not in updates:
-                updates.append("out_attendance_status")
-        if _has_model_field(Attendance, "out_attendance_reject_reason_code"):
-            attendance.out_attendance_reject_reason_code = (
-                "EARLY_CHECKOUT_BEFORE_CUTOFF_IN"
-                if is_presensi_only
-                else "EARLY_CHECKOUT_BEFORE_SHIFT_END"
-            )
-            if "out_attendance_reject_reason_code" not in updates:
-                updates.append("out_attendance_reject_reason_code")
 
     if allow_update_clock_out and raw_punch_history is not None:
         assign_raw_punch_to_attendance(attendance, punch=raw_punch_history, direction="out")
