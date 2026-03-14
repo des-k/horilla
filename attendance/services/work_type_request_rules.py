@@ -180,13 +180,10 @@ def punch_allowed(eff: EffectiveWorkType) -> bool:
     if req.mode == AttendanceWorkMode.WFA:
         return req.status == WorkModeRequestStatus.APPROVED
 
-    # ON_DUTY is provisional
+    # ON_DUTY request requires approval before punch.
+    # Benefit finalization is handled later by reconciliation based on document verification.
     if req.mode == AttendanceWorkMode.ON_DUTY:
-        return req.status in (
-            WorkModeRequestStatus.PENDING,
-            WorkModeRequestStatus.WAITING_FOR_APPROVAL,
-            WorkModeRequestStatus.APPROVED,
-        )
+        return req.status == WorkModeRequestStatus.APPROVED
 
     return False
 
