@@ -1,4 +1,5 @@
 from io import BytesIO
+import datetime as dt
 import os
 import unittest
 
@@ -105,3 +106,59 @@ class AttendanceImageCompressionTests(unittest.TestCase):
         uploaded = SimpleUploadedFile("fresh.jpg", self._make_image_bytes(size=(640, 480), fmt="JPEG"), content_type="image/jpeg")
         chosen = canonical_punch_image_reference(punch=None, uploaded=uploaded)
         self.assertIs(chosen, uploaded)
+
+from unittest.mock import Mock, patch
+
+from attendance.models import Attendance
+
+
+class AttendanceSaveUpdateFieldsTests(unittest.TestCase):
+    def test_request_restore_snapshot_only_save_skips_recalculation(self):
+        attendance = Attendance(request_restore_snapshot={"in": {"dummy": True}})
+
+        with patch("attendance.models.compress_model_image_field") as compress_mock, \
+             patch("attendance.models.Attendance.update_attendance_overtime") as update_ot_mock, \
+             patch("attendance.models.Attendance.adjust_minimum_hour") as adjust_min_mock, \
+             patch("attendance.models.Attendance.handle_overtime_conditions") as handle_ot_mock, \
+             patch("attendance.models.EmployeeShiftDay.objects.get") as shift_day_get_mock, \
+             patch("attendance.models.HorillaModel.save", autospec=True, return_value=None) as super_save_mock:
+            attendance.save(update_fields=["request_restore_snapshot"])
+
+        compress_mock.assert_not_called()
+        update_ot_mock.assert_not_called()
+        adjust_min_mock.assert_not_called()
+        handle_ot_mock.assert_not_called()
+        shift_day_get_mock.assert_not_called()
+        super_save_mock.assert_called_once()
+
+    def test_other_partial_update_still_uses_existing_save_flow(self):
+        attendance = Attendance()
+        attendance.attendance_date = dt.date(2026, 3, 14)
+        attendance.attendance_overtime_approve = False
+        attendance.approved_overtime_second = 0
+        attendance.overtime_second = 0
+        attendance.is_validate_request = False
+        attendance.is_presensi_only = False
+        overtime_account = Mock()
+        overtime_account.overtime_second = 0
+        employee_overtime_qs = Mock()
+        employee_overtime_qs.first.return_value = overtime_account
+        attendance.employee_id = Mock()
+        attendance.employee_id.employee_overtime.filter.return_value = employee_overtime_qs
+
+        with patch("attendance.models.compress_model_image_field") as compress_mock, \
+             patch("attendance.models.Attendance.update_attendance_overtime") as update_ot_mock, \
+             patch("attendance.models.Attendance.adjust_minimum_hour") as adjust_min_mock, \
+             patch("attendance.models.Attendance.handle_overtime_conditions") as handle_ot_mock, \
+             patch("attendance.models.EmployeeShiftDay.objects.get", return_value=Mock()), \
+             patch("attendance.models.Attendance.update_ot") as update_ot_account_mock, \
+             patch("attendance.models.HorillaModel.save", autospec=True, return_value=None) as super_save_mock:
+            attendance.save(update_fields=["request_description"])
+
+        compress_mock.assert_any_call(attendance, "attendance_clock_in_image")
+        compress_mock.assert_any_call(attendance, "attendance_clock_out_image")
+        update_ot_mock.assert_called_once()
+        adjust_min_mock.assert_called_once()
+        handle_ot_mock.assert_called_once()
+        overtime_account.save.assert_called_once()
+        super_save_mock.assert_called_once()
