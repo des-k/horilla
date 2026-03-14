@@ -63,14 +63,37 @@ class WorkModeRequestStatus(models.TextChoices):
     WAITING_FOR_APPROVAL = "waiting_for_approval", _("Waiting For Approval")
     APPROVED = "approved", _("Approved")
     REJECTED = "rejected", _("Rejected")
+    REVOKED = "revoked", _("Revoked")
     CANCELED = "canceled", _("Canceled")
 
+
+class WorkModeRequestDocumentStatus(models.TextChoices):
+    NOT_UPLOADED = "not_uploaded", _("Not Uploaded")
+    SUBMITTED = "submitted", _("Submitted")
+    PENDING_VERIFICATION = "pending_verification", _("Pending Verification")
+    VERIFIED = "verified", _("Verified")
+    REJECTED = "rejected", _("Rejected")
+
+
+class PunchDecisionStatus(models.TextChoices):
+    ACCEPTED = "accepted", _("Accepted")
+    NOT_ACCEPTED = "not_accepted", _("Not Accepted")
+    INVALID = "invalid", _("Invalid")
+    SUPERSEDED = "superseded", _("Superseded")
+
+
+class GraceClockInType(models.TextChoices):
+    AFTER = "after", _("After")
+    BEFORE_AND_AFTER = "before_after", _("Before & After")
 
 
 class WorkModeRequestActionType(models.TextChoices):
     """Audit action applied to a work-mode request."""
     APPROVED = "APPROVED", _("Approved")
     REJECTED = "REJECTED", _("Rejected")
+    VERIFIED = "VERIFIED", _("Verified")
+    REVOKED = "REVOKED", _("Revoked")
+    REOPENED = "REOPENED", _("Reopened")
     CANCELED = "CANCELED", _("Canceled")
 
 
@@ -211,6 +234,10 @@ class AttendanceActivity(HorillaModel):
         related_name="attendance_activities",
         verbose_name=_("Work Mode Request"),
     )
+    reconciliation_source = models.CharField(max_length=64, null=True, blank=True, verbose_name=_("Final Source"))
+    reconciliation_note = models.CharField(max_length=255, null=True, blank=True, verbose_name=_("Final Note"))
+    late_minutes = models.PositiveIntegerField(default=0, verbose_name=_("Late Minutes"))
+    early_out_minutes = models.PositiveIntegerField(default=0, verbose_name=_("Early Out Minutes"))
 
     class Meta:
         """
@@ -285,6 +312,28 @@ class AttendancePunchingHistory(HorillaModel):
     location = models.JSONField(null=True, blank=True, verbose_name=_("Location"))
     accepted_to_attendance = models.BooleanField(default=False, verbose_name=_("Accepted to Attendance"))
     reason = models.CharField(max_length=255, null=True, blank=True, verbose_name=_("Reason"))
+    decision_status = models.CharField(
+        max_length=24,
+        choices=PunchDecisionStatus.choices,
+        default=PunchDecisionStatus.NOT_ACCEPTED,
+        verbose_name=_("Decision Status"),
+    )
+    decision_source = models.CharField(max_length=64, null=True, blank=True, verbose_name=_("Decision Source"))
+    work_mode = models.CharField(
+        max_length=20,
+        null=True,
+        blank=True,
+        choices=AttendanceWorkMode.choices,
+        verbose_name=_("Work Mode"),
+    )
+    related_work_mode_request = models.ForeignKey(
+        "attendance.WorkModeRequest",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="punching_history_entries",
+        verbose_name=_("Related Work Mode Request"),
+    )
     raw_payload = models.JSONField(null=True, blank=True, verbose_name=_("Raw Payload"))
     raw_employee_identifier = models.CharField(max_length=128, null=True, blank=True, verbose_name=_("Raw Employee Identifier"))
 
@@ -426,6 +475,24 @@ class WorkModeRequest(HorillaModel):
         choices=WorkModeRequestActionType.choices,
         verbose_name=_("Action Type"),
     )
+    document_status = models.CharField(
+        max_length=32,
+        choices=WorkModeRequestDocumentStatus.choices,
+        default=WorkModeRequestDocumentStatus.NOT_UPLOADED,
+        verbose_name=_("Document Status"),
+    )
+    document_remark = models.TextField(null=True, blank=True, verbose_name=_("Document Remark"))
+    document_verified_by = models.ForeignKey(
+        Employee,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="verified_work_mode_requests",
+        verbose_name=_("Document Verified By"),
+    )
+    document_verified_at = models.DateTimeField(null=True, blank=True, verbose_name=_("Document Verified At"))
+    duty_destination_location = models.CharField(max_length=255, null=True, blank=True, verbose_name=_("Duty Destination Location"))
+    duty_destination_detail = models.TextField(null=True, blank=True, verbose_name=_("Duty Destination Detail"))
 
     objects = HorillaCompanyManager(
         related_company_field="employee_id__employee_work_info__company_id"
@@ -455,6 +522,10 @@ class WorkModeRequest(HorillaModel):
     def covers_out(self) -> bool:
         return self.scope in (WorkModeRequestScope.OUT, WorkModeRequestScope.FULL)
 
+    @property
+    def is_document_locked(self) -> bool:
+        return self.document_status == WorkModeRequestDocumentStatus.VERIFIED
+
     def clean(self):
         super().clean()
         if self.end_date and self.start_date and self.end_date < self.start_date:
@@ -464,6 +535,46 @@ class WorkModeRequest(HorillaModel):
         if self.mode == AttendanceWorkMode.WFO:
             raise ValidationError({"mode": _("WFO should not be requested. Use WFA or On Duty.")})
 
+
+class AttendanceRequestAuditLog(HorillaModel):
+    attendance = models.ForeignKey(
+        "attendance.Attendance",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="action_logs",
+        verbose_name=_("Attendance Request"),
+    )
+    work_mode_request = models.ForeignKey(
+        "attendance.WorkModeRequest",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="action_logs",
+        verbose_name=_("Work Mode Request"),
+    )
+    actor = models.ForeignKey(
+        Employee,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="attendance_action_logs",
+        verbose_name=_("Actor"),
+    )
+    action_type = models.CharField(max_length=32, verbose_name=_("Action Type"))
+    old_status = models.CharField(max_length=64, null=True, blank=True, verbose_name=_("Old Status"))
+    new_status = models.CharField(max_length=64, null=True, blank=True, verbose_name=_("New Status"))
+    remark = models.TextField(null=True, blank=True, verbose_name=_("Remark"))
+    acted_at = models.DateTimeField(default=timezone.now, verbose_name=_("Acted At"))
+
+    class Meta:
+        ordering = ["-acted_at", "-id"]
+        verbose_name = _("Attendance Action Audit Log")
+        verbose_name_plural = _("Attendance Action Audit Logs")
+
+    def __str__(self):
+        target = self.work_mode_request or self.attendance
+        return f"{self.action_type} - {target}"
 
 
 class Attendance(HorillaModel):
@@ -716,7 +827,10 @@ class Attendance(HorillaModel):
         related_name="attendances",
         verbose_name=_("Work Mode Request"),
     )
-
+    reconciliation_source = models.CharField(max_length=64, null=True, blank=True, verbose_name=_("Final Source"))
+    reconciliation_note = models.CharField(max_length=255, null=True, blank=True, verbose_name=_("Final Note"))
+    late_minutes = models.PositiveIntegerField(default=0, verbose_name=_("Late Minutes"))
+    early_out_minutes = models.PositiveIntegerField(default=0, verbose_name=_("Early Out Minutes"))
 
     class Meta:
         """
@@ -1386,6 +1500,12 @@ class GraceTime(HorillaModel):
         default=False,
         help_text=_("Allcocate this grace time for Check-Out Attendance"),
         verbose_name=_("Allowed Clock-Out"),
+    )
+    clock_in_type = models.CharField(
+        max_length=24,
+        choices=GraceClockInType.choices,
+        default=GraceClockInType.AFTER,
+        verbose_name=_("Clock-In Type"),
     )
     is_default = models.BooleanField(default=False)
 
