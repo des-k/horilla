@@ -57,6 +57,7 @@ from attendance.services.punching_history import (
     reconcile_attendance_punches,
     restore_raw_state_after_request,
 )
+from attendance.services.request_audit import log_request_action
 from base.methods import (
     choosesubordinates,
     closest_numbers,
@@ -239,6 +240,20 @@ def _restore_request_back_to_raw(attendance: Attendance, *, include_in: bool, in
     _refresh_late_come_early_out(attendance)
     reconcile_attendance_punches(employee=attendance.employee_id, attendance_date=attendance.attendance_date)
     return attendance
+
+
+def _log_attendance_request_action(attendance: Attendance, request, *, action_type: str, old_status: str = None, new_status: str = None, remark: str = None):
+    try:
+        log_request_action(
+            attendance=attendance,
+            actor=getattr(request.user, 'employee_get', None),
+            action_type=action_type,
+            old_status=old_status,
+            new_status=new_status,
+            remark=remark,
+        )
+    except Exception:
+        pass
 
 
 @login_required
@@ -1028,6 +1043,7 @@ def approve_validate_attendance_request(request, attendance_id):
         return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
 
     prev_attendance_date = attendance.attendance_date
+    old_status = attendance.request_type or "waiting_request"
 
     is_valid_request, validation_error = validate_requested_data_with_windows(attendance)
     if not is_valid_request:
@@ -1049,6 +1065,13 @@ def approve_validate_attendance_request(request, attendance_id):
     # Keep request_description for history
     attendance.action_at = timezone.now()
     attendance.save()
+    _log_attendance_request_action(
+        attendance,
+        request,
+        action_type=AttendanceRequestActionType.APPROVED,
+        old_status=old_status,
+        new_status="approved",
+    )
 
     # Apply requested field changes (if any)
     if attendance.requested_data:
@@ -1213,6 +1236,7 @@ def revoke_validate_attendance_request(request, attendance_id):
             pass
 
         prev_attendance_date = attendance.attendance_date
+        old_status = attendance.request_type or "approved"
         wants_in, wants_out = get_requested_sessions(attendance)
         _restore_request_back_to_raw(attendance, include_in=wants_in, include_out=wants_out, prev_attendance_date=prev_attendance_date)
         attendance.refresh_from_db()
@@ -1227,6 +1251,13 @@ def revoke_validate_attendance_request(request, attendance_id):
             attendance.action_by = None
         attendance.attendance_validated = cio.attendance_validate(attendance)
         attendance.save()
+        _log_attendance_request_action(
+            attendance,
+            request,
+            action_type=AttendanceRequestActionType.REVOKED,
+            old_status=old_status,
+            new_status="revoke_request",
+        )
 
         _ensure_single_session_activity(attendance, prev_attendance_date=prev_attendance_date)
         _refresh_late_come_early_out(attendance)
@@ -1270,6 +1301,7 @@ def cancel_attendance_request(request, attendance_id):
             return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
 
         req_type = attendance.request_type
+        old_status = attendance.request_type or ("approved" if is_approved_request else "waiting_request")
         req_date = attendance.attendance_date
         req_employee = attendance.employee_id
         wants_in, wants_out = get_requested_sessions(attendance)
@@ -1291,6 +1323,13 @@ def cancel_attendance_request(request, attendance_id):
         attendance.action_type = AttendanceRequestActionType.CANCELED
         attendance.action_at = timezone.now()
         attendance.save()
+        _log_attendance_request_action(
+            attendance,
+            request,
+            action_type=AttendanceRequestActionType.CANCELED,
+            old_status=old_status,
+            new_status="cancel_request",
+        )
 
         # For create_request, remove derived daily artifacts so it won't affect reporting.
         if req_type == "create_request":
@@ -1344,6 +1383,7 @@ def reject_validate_attendance_request(request, attendance_id):
             pass
 
         req_type = attendance.request_type
+        old_status = attendance.request_type or "waiting_request"
         req_date = attendance.attendance_date
         req_employee = attendance.employee_id
 
@@ -1358,6 +1398,15 @@ def reject_validate_attendance_request(request, attendance_id):
         attendance.action_type = AttendanceRequestActionType.REJECTED
         attendance.action_at = timezone.now()
         attendance.save()
+        comment_text = (request.POST.get("comment") or request.POST.get("reason") or "").strip() or None
+        _log_attendance_request_action(
+            attendance,
+            request,
+            action_type=AttendanceRequestActionType.REJECTED,
+            old_status=old_status,
+            new_status="reject_request",
+            remark=comment_text,
+        )
 
         # For create_request, remove derived daily artifacts so it won't affect reporting.
         if req_type == "create_request":
@@ -1484,6 +1533,7 @@ def bulk_approve_attendance_request(request):
             continue
 
         prev_attendance_date = attendance.attendance_date
+        old_status = attendance.request_type or "waiting_request"
 
         is_valid_request, _validation_error = validate_requested_data_with_windows(attendance)
         if not is_valid_request:
@@ -1503,6 +1553,13 @@ def bulk_approve_attendance_request(request):
         attendance.action_type = AttendanceRequestActionType.APPROVED
         attendance.action_at = timezone.now()
         attendance.save()
+        _log_attendance_request_action(
+            attendance,
+            request,
+            action_type=AttendanceRequestActionType.APPROVED,
+            old_status=old_status,
+            new_status="approved",
+        )
 
         # Apply requested changes
         if attendance.requested_data is not None:
@@ -1618,6 +1675,7 @@ def bulk_reject_attendance_request(request):
                 pass
 
             req_type = attendance.request_type
+            old_status = attendance.request_type or "waiting_request"
             req_date = attendance.attendance_date
             req_employee = attendance.employee_id
 
@@ -1632,6 +1690,13 @@ def bulk_reject_attendance_request(request):
             attendance.action_type = AttendanceRequestActionType.REJECTED
             attendance.action_at = timezone.now()
             attendance.save()
+            _log_attendance_request_action(
+                attendance,
+                request,
+                action_type=AttendanceRequestActionType.REJECTED,
+                old_status=old_status,
+                new_status="reject_request",
+            )
 
             if req_type == "create_request":
                 AttendanceActivity.objects.filter(
