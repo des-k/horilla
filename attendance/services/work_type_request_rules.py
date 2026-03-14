@@ -18,7 +18,10 @@ This module enforces the FINAL spec:
   - Schedule WFA/ON_DUTY => mobile punch allowed without request.
   - Schedule WFO => punch allowed only via relevant request:
     - WFA => only if APPROVED
-    - ON_DUTY => allowed even if PENDING/WAITING_FOR_APPROVAL (provisional)
+    - ON_DUTY => only if APPROVED
+- On Duty finalization:
+  - Approval only unlocks punch permission for request-based ON_DUTY.
+  - Late/early-out benefit remains normal until the supporting document is VERIFIED.
 - Auto reject:
   - WFA WAITING_FOR_APPROVAL that passes cutoff is auto REJECTED with reason_code.
 - Option B audit:
