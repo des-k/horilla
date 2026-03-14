@@ -724,7 +724,7 @@ class ClockInAPIView(APIView):
 
         out_mode, out_source, out_req = _resolve_effective_work_type(employee, attendance_date, "out")
         attendance = Attendance.objects.filter(employee_id=employee, attendance_date=attendance_date).first()
-        update_punch_history(punch_log, attendance=attendance, attendance_date=attendance_date, work_mode=out_mode, related_work_mode_request=out_req, decision_source=getattr(attendance, "reconciliation_source", None) if attendance else None)
+        update_punch_history(punch_log, attendance=attendance, attendance_date=attendance_date, work_mode=in_mode, related_work_mode_request=in_req, decision_source=getattr(attendance, "reconciliation_source", None) if attendance else None)
         reconcile_attendance_punches(employee=employee, attendance_date=attendance_date)
 
         return Response(
