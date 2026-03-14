@@ -1,6 +1,7 @@
 from rest_framework import serializers
 
 from employee.models import Employee
+from leave.half_day_rules import validate_second_half_leave_submission
 from leave.methods import calculate_requested_days
 from leave.models import *
 
@@ -68,6 +69,14 @@ def leave_Validations(self, data):
         raise serializers.ValidationError(
             "There is a mismatch in the breakdown of the start date and end date."
         )
+
+    validate_second_half_leave_submission(
+        employee=employee,
+        start_date=start_date,
+        end_date=end_date,
+        start_date_breakdown=start_date_breakdown,
+        end_date_breakdown=end_date_breakdown,
+    )
 
     if not effective_requested_days <= total_leave_days:
         raise serializers.ValidationError("Employee doesn't have enough leave days..")
