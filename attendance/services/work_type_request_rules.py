@@ -47,6 +47,8 @@ from attendance.models import (
     WorkModeRequestStatus,
 )
 
+from attendance.services.reconciliation import recompute_attendance_range
+
 
 # -----------------------------------------------------------------------------
 # Schedule resolver
@@ -347,122 +349,18 @@ def _daterange(start: date, end: date):
 
 @transaction.atomic
 def apply_rejection_to_attendance(req: WorkModeRequest) -> int:
-    """If a request that has been used for punch becomes REJECTED, mark attendance IN/OUT as REJECTED.
+    """Recompute final attendance after a rejected work type request.
 
-    Returns number of attendance rows updated.
+    Raw punches remain stored; canonical reconciliation decides the restored final state.
+    Returns the number of attendance dates recomputed.
     """
 
     if req.status != WorkModeRequestStatus.REJECTED:
         return 0
     if not req.reason_code:
-        # Keep data integrity; spec requires reason_code for REJECTED.
         req.reason_code = WorkModeRequestRejectReasonCode.MANUAL_REJECT
         req.save(update_fields=["reason_code"])
 
-    att_qs = Attendance.objects.select_for_update().filter(
-        employee_id=req.employee_id,
-        attendance_date__gte=req.start_date,
-        attendance_date__lte=req.end_date,
-    )
+    recompute_attendance_range(req.employee_id, req.start_date, req.end_date)
+    return sum(1 for _ in _daterange(req.start_date, req.end_date))
 
-    updated = 0
-    for att in att_qs:
-        used_for_in = False
-        used_for_out = False
-        try:
-            used_for_in = getattr(att, "in_related_work_type_request_id", None) == req.id
-        except Exception:
-            used_for_in = False
-        try:
-            used_for_out = getattr(att, "out_related_work_type_request_id", None) == req.id
-        except Exception:
-            used_for_out = False
-
-        # Fallback: legacy single FK
-        try:
-            if getattr(att, "work_mode_request_id_id", None) == req.id:
-                used_for_in = True
-                used_for_out = True
-        except Exception:
-            pass
-
-        if req.scope == WorkModeRequestScope.IN:
-            if not used_for_in:
-                continue
-            if hasattr(att, "in_attendance_status"):
-                att.in_attendance_status = AttendancePunchStatus.REJECTED
-            if hasattr(att, "in_attendance_reject_reason_code"):
-                att.in_attendance_reject_reason_code = req.reason_code
-            if hasattr(att, "in_related_work_type_request_id") and not getattr(att, "in_related_work_type_request_id", None):
-                att.in_related_work_type_request_id = req.id
-            att.save(
-                update_fields=[
-                    f
-                    for f in [
-                        "in_attendance_status",
-                        "in_attendance_reject_reason_code",
-                        "in_related_work_type_request_id",
-                    ]
-                    if hasattr(att, f)
-                ]
-            )
-            updated += 1
-            continue
-
-        if req.scope == WorkModeRequestScope.OUT:
-            if not used_for_out:
-                continue
-            if hasattr(att, "out_attendance_status"):
-                att.out_attendance_status = AttendancePunchStatus.REJECTED
-            if hasattr(att, "out_attendance_reject_reason_code"):
-                att.out_attendance_reject_reason_code = req.reason_code
-            if hasattr(att, "out_related_work_type_request_id") and not getattr(att, "out_related_work_type_request_id", None):
-                att.out_related_work_type_request_id = req.id
-            att.save(
-                update_fields=[
-                    f
-                    for f in [
-                        "out_attendance_status",
-                        "out_attendance_reject_reason_code",
-                        "out_related_work_type_request_id",
-                    ]
-                    if hasattr(att, f)
-                ]
-            )
-            updated += 1
-            continue
-
-        # FULL
-        if not (used_for_in or used_for_out):
-            continue
-
-        if hasattr(att, "in_attendance_status"):
-            att.in_attendance_status = AttendancePunchStatus.REJECTED
-        if hasattr(att, "out_attendance_status"):
-            att.out_attendance_status = AttendancePunchStatus.REJECTED
-        if hasattr(att, "in_attendance_reject_reason_code"):
-            att.in_attendance_reject_reason_code = req.reason_code
-        if hasattr(att, "out_attendance_reject_reason_code"):
-            att.out_attendance_reject_reason_code = req.reason_code
-        if hasattr(att, "in_related_work_type_request_id") and not getattr(att, "in_related_work_type_request_id", None):
-            att.in_related_work_type_request_id = req.id
-        if hasattr(att, "out_related_work_type_request_id") and not getattr(att, "out_related_work_type_request_id", None):
-            att.out_related_work_type_request_id = req.id
-
-        att.save(
-            update_fields=[
-                f
-                for f in [
-                    "in_attendance_status",
-                    "out_attendance_status",
-                    "in_attendance_reject_reason_code",
-                    "out_attendance_reject_reason_code",
-                    "in_related_work_type_request_id",
-                    "out_related_work_type_request_id",
-                ]
-                if hasattr(att, f)
-            ]
-        )
-        updated += 1
-
-    return updated
