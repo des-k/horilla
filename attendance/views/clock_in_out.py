@@ -61,6 +61,7 @@ from attendance.services.punching_history import (
     assign_raw_punch_to_attendance,
     canonical_punch_image_reference,
 )
+from attendance.services.reconciliation import recompute_attendance
 from base.context_processors import (
     enable_late_come_early_out_tracking,
     timerunner_enabled,
@@ -885,6 +886,9 @@ def clock_in_attendance_and_activity(
             schedule=schedule,
         )
 
+    result = recompute_attendance(employee, attendance_date)
+    if result is not None:
+        return result.attendance
     return attendance
 
 
@@ -1091,6 +1095,9 @@ def clock_out_attendance_and_activity(
         "attendance_overtime",
         "attendance_validated",
     ])))
+    result = recompute_attendance(employee, attendance_date)
+    if result is not None:
+        attendance = result.attendance
     return attendance, missing_check_in_original
 
 
