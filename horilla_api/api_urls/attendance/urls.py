@@ -47,6 +47,11 @@ urlpatterns = [
         AttendanceRequestRejectView.as_view(),
         name="api-",
     ),
+    path(
+        "attendance-request-revoke/<int:pk>",
+        AttendanceRequestRevokeView.as_view(),
+        name="api-",
+    ),
     path("overtime-approve/<int:pk>", OvertimeApproveView.as_view(), name="api-"),
     path(
         "attendance-hour-account/<int:pk>/",
@@ -112,6 +117,11 @@ urlpatterns = [
         WorkModeRequestCancelView.as_view(),
         name="api-work-mode-request-cancel",
     ),
+    path(
+        "work-mode-request-action/<int:pk>/<str:action>",
+        WorkModeRequestDocumentActionView.as_view(),
+        name="api-work-mode-request-action",
+    ),
 
 
     # Work type requests (alias for work-mode-request)
@@ -158,6 +168,11 @@ urlpatterns = [
         "work-type-request-cancel/<int:pk>",
         WorkModeRequestCancelView.as_view(),
         name="api-work-type-request-cancel",
+    ),
+    path(
+        "work-type-request-action/<int:pk>/<str:action>",
+        WorkModeRequestDocumentActionView.as_view(),
+        name="api-work-type-request-action",
     ),
 
     path("checking-in", CheckingStatus.as_view()),
