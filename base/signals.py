@@ -13,10 +13,17 @@ from django.dispatch import receiver
 from django.http import Http404
 from django.shortcuts import redirect, render
 from datetime import time as dt_time
-from django.db import transaction
+from django.db import connection, transaction
 
 from base.models import Announcement, PenaltyAccounts
 from horilla.methods import get_horilla_model_class
+
+
+def _table_exists(table_name):
+    try:
+        return table_name in connection.introspection.table_names()
+    except Exception:
+        return False
 
 
 def _ensure_wfo_wfa_worktypes(company=None):
@@ -344,6 +351,18 @@ def ensure_default_company_and_shift(sender, **kwargs):
     # Fetch Employee model safely (in case of import order issues)
     from django.apps import apps
     Employee = apps.get_model("employee", "Employee")
+
+    required_tables = {
+        Company._meta.db_table,
+        EmployeeShift._meta.db_table,
+        EmployeeShiftDay._meta.db_table,
+        EmployeeShiftSchedule._meta.db_table,
+    }
+    employee_table = getattr(getattr(Employee, "_meta", None), "db_table", None)
+    if employee_table:
+        required_tables.add(employee_table)
+    if not all(_table_exists(table_name) for table_name in required_tables):
+        return
 
     with transaction.atomic(using=using):
         # =========================
