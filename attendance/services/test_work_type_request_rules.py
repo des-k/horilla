@@ -33,3 +33,21 @@ class WorkTypeRequestRuleTests(SimpleTestCase):
         self.assertEqual(recomputed, 3)
         self.assertEqual(req.reason_code, WorkModeRequestRejectReasonCode.MANUAL_REJECT)
         self.assertEqual(calls, [("EMP-1", date(2026, 3, 14), date(2026, 3, 16))])
+
+
+    def test_on_duty_request_requires_approval_before_punch(self):
+        request = SimpleNamespace(mode="on_duty", status=WorkModeRequestStatus.PENDING)
+        eff = work_type_request_rules.EffectiveWorkType(mode="on_duty", source="request", request=request)
+
+        self.assertFalse(work_type_request_rules.punch_allowed(eff))
+
+        request.status = WorkModeRequestStatus.WAITING_FOR_APPROVAL
+        self.assertFalse(work_type_request_rules.punch_allowed(eff))
+
+        request.status = WorkModeRequestStatus.APPROVED
+        self.assertTrue(work_type_request_rules.punch_allowed(eff))
+
+    def test_scheduled_on_duty_still_allows_punch(self):
+        eff = work_type_request_rules.EffectiveWorkType(mode="on_duty", source="schedule", request=None)
+
+        self.assertTrue(work_type_request_rules.punch_allowed(eff))
