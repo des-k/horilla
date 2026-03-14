@@ -7,6 +7,7 @@ import os
 import sys
 
 from django.apps import AppConfig
+from django.db import connection
 
 
 class HorillaAutomationConfig(AppConfig):
@@ -14,6 +15,13 @@ class HorillaAutomationConfig(AppConfig):
 
     default_auto_field = "django.db.models.BigAutoField"
     name = "horilla_automations"
+
+    @staticmethod
+    def _table_exists(table_name: str) -> bool:
+        try:
+            return table_name in connection.introspection.table_names()
+        except Exception:
+            return False
 
     def ready(self) -> None:
         ready = super().ready()
@@ -25,6 +33,7 @@ class HorillaAutomationConfig(AppConfig):
                 "compilemessages",
                 "flush",
                 "shell",
+                "test",
             ]
         ):
             return ready
@@ -59,6 +68,10 @@ class HorillaAutomationConfig(AppConfig):
 
             MODEL_CHOICES = list(set(MODEL_CHOICES))
             try:
+                from horilla_automations.models import MailAutomation
+                if not self._table_exists(MailAutomation._meta.db_table):
+                    return ready
+
                 from horilla_automations.signals import start_automation
 
                 start_automation()
