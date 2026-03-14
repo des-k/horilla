@@ -70,7 +70,37 @@ def _direction_label(direction: str) -> str:
     return "Check-In" if direction == AttendancePunchDirection.IN else "Check-Out"
 
 
-def _accepted_reason(direction: str) -> str:
+def _leave_breakdown_for_date(employee, attendance_date: Optional[date]) -> Optional[str]:
+    if not employee or not attendance_date:
+        return None
+    try:
+        from leave.models import LeaveRequest
+    except Exception:
+        return None
+
+    leave_qs = LeaveRequest.objects.filter(
+        employee_id=employee,
+        status="approved",
+        start_date__lte=attendance_date,
+        end_date__gte=attendance_date,
+    ).order_by("-id")
+    leave_request = leave_qs.first()
+    if not leave_request:
+        return None
+    if leave_request.start_date == leave_request.end_date:
+        return leave_request.start_date_breakdown or leave_request.end_date_breakdown or "full_day"
+    if attendance_date == leave_request.start_date:
+        return leave_request.start_date_breakdown or "full_day"
+    if attendance_date == leave_request.end_date:
+        return leave_request.end_date_breakdown or "full_day"
+    return "full_day"
+
+
+def _accepted_reason(direction: str, *, leave_breakdown: Optional[str] = None) -> str:
+    if leave_breakdown == "first_half":
+        return "Accepted for First Half Leave attendance"
+    if leave_breakdown == "second_half":
+        return "Accepted for Second Half Leave attendance"
     return f"Used as final {_direction_label(direction)}"
 
 
@@ -721,6 +751,7 @@ def reconcile_attendance_punches(*, employee, attendance_date: date):
 
     in_reject_reason = _attendance_reject_reason(attendance, direction=AttendancePunchDirection.IN)
     out_reject_reason = _attendance_reject_reason(attendance, direction=AttendancePunchDirection.OUT)
+    leave_breakdown = _leave_breakdown_for_date(employee, attendance_date)
 
     for log in logs:
         accepted = False
@@ -729,7 +760,7 @@ def reconcile_attendance_punches(*, employee, attendance_date: date):
         if log.punch_direction == AttendancePunchDirection.IN:
             if in_match and log.id == in_match:
                 accepted = True
-                reason = _accepted_reason(AttendancePunchDirection.IN)
+                reason = _accepted_reason(AttendancePunchDirection.IN, leave_breakdown=leave_breakdown)
             elif should_preserve_reason(reason):
                 reason = _clean_reason_text(reason)
             elif in_reject_reason:
@@ -744,7 +775,7 @@ def reconcile_attendance_punches(*, employee, attendance_date: date):
         elif log.punch_direction == AttendancePunchDirection.OUT:
             if out_match and log.id == out_match:
                 accepted = True
-                reason = _accepted_reason(AttendancePunchDirection.OUT)
+                reason = _accepted_reason(AttendancePunchDirection.OUT, leave_breakdown=leave_breakdown)
             elif should_preserve_reason(reason):
                 reason = _clean_reason_text(reason)
             elif out_reject_reason:
