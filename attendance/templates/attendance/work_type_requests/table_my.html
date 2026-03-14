@@ -31,6 +31,7 @@
             {% if sort_my == 'status' %}{% if dir_my == 'asc' %} ▲{% else %} ▼{% endif %}{% endif %}
           </a>
         </div>
+        <div class="oh-sticky-table__th">{% trans "Document Status" %}</div>
         <div class="oh-sticky-table__th">{% trans "Attachments" %}</div>
         <div class="oh-sticky-table__th">{% trans "Reason / Note" %}</div>
         <div class="oh-sticky-table__th oh-sticky-table__right">{% trans "Actions" %}</div>
@@ -57,6 +58,11 @@
               {% else %}
                 {{ r.start_date }}
               {% endif %}
+              {% if r.mode == 'on_duty' and r.duty_destination_location %}
+                <div class="text-muted" style="font-size: 12px; margin-top: 4px;">
+                  {{ r.duty_destination_location }}
+                </div>
+              {% endif %}
             </div>
             <div class="oh-sticky-table__td">
               {% if r.status == 'approved' %}
@@ -65,32 +71,33 @@
                 <span class="oh-badge oh-badge--info oh-badge--small oh-badge--round">WAITING</span>
               {% elif r.status == 'rejected' %}
                 <span class="oh-badge oh-badge--danger oh-badge--small oh-badge--round">{{ r.status|upper }}</span>
-                {% if r.reason_code %}<div class="text-muted" style="font-size: 12px;">{{ r.reason_code }}</div>{% endif %}
+              {% elif r.status == 'revoked' %}
+                <span class="oh-badge oh-badge--danger oh-badge--small oh-badge--round">{{ r.status|upper }}</span>
               {% elif r.status == 'canceled' %}
                 <span class="oh-badge oh-badge--secondary oh-badge--small oh-badge--round">{{ r.status|upper }}</span>
               {% else %}
                 <span class="oh-badge oh-badge--secondary oh-badge--small oh-badge--round">PENDING</span>
               {% endif %}
-            
 
-              {% if r.status == 'approved' or r.status == 'rejected' or r.status == 'canceled' %}
-                {% if r.action_by %}
-                  <div class="text-muted" style="font-size: 12px; margin-top: 4px;">
-                    {% if r.action_type == 'APPROVED' or r.status == 'approved' %}
-                      {% trans "Approved by" %}
-                    {% elif r.action_type == 'REJECTED' or r.status == 'rejected' %}
-                      {% trans "Rejected by" %}
-                    {% elif r.action_type == 'CANCELED' or r.status == 'canceled' %}
-                      {% trans "Canceled by" %}
-                    {% else %}
-                      {% trans "Action by" %}
-                    {% endif %}:
-                    {{ r.action_by.employee_first_name }} {{ r.action_by.employee_last_name }}
-                    {% if r.action_at %} • {{ r.action_at|date:"Y-m-d H:i" }}{% endif %}
-                  </div>
-                {% endif %}
+              {% if r.action_by %}
+                <div class="text-muted" style="font-size: 12px; margin-top: 4px;">
+                  {% trans "Action by" %}: {{ r.action_by.employee_first_name }} {{ r.action_by.employee_last_name }}
+                  {% if r.action_at %} • {{ r.action_at|date:"Y-m-d H:i" }}{% endif %}
+                </div>
               {% endif %}
-</div>
+            </div>
+            <div class="oh-sticky-table__td">
+              {% if r.mode == 'on_duty' %}
+                <span class="oh-badge oh-badge--secondary oh-badge--small oh-badge--round">{{ r.get_document_status_display }}</span>
+                {% if r.status == 'approved' and r.document_status != 'verified' %}
+                  <div class="text-muted" style="font-size: 11px; margin-top: 4px;">{% trans "On Duty benefit is not final yet." %}</div>
+                {% elif r.document_status == 'verified' %}
+                  <div class="text-muted" style="font-size: 11px; margin-top: 4px;">{% trans "On Duty Final" %}</div>
+                {% endif %}
+              {% else %}
+                <span class="text-muted">-</span>
+              {% endif %}
+            </div>
             <div class="oh-sticky-table__td">
               {% with c=r.files.count %}
                 {% if c %}
@@ -121,12 +128,14 @@
             </div>
             <div class="oh-sticky-table__td oh-sticky-table__right">
               <div class="d-flex gap-2 justify-content-end">
-                {% if r.status == 'pending' or r.status == 'waiting_for_approval' %}
+                {% if r.status == 'pending' or r.status == 'waiting_for_approval' or r.status == 'approved' and r.mode == 'on_duty' and r.document_status != 'verified' %}
                   <button class="oh-btn oh-btn--light-bkg" data-toggle="oh-modal-toggle" data-target="#objectUpdateModal"
                     hx-get="{% url 'attendance-work-type-request-update' r.id %}" hx-target="#objectUpdateModalTarget" onclick="event.preventDefault()">
                     <ion-icon name="attach-outline"></ion-icon>
                   </button>
+                {% endif %}
 
+                {% if r.status == 'pending' or r.status == 'waiting_for_approval' %}
                   <button class="oh-btn oh-btn--danger" hx-post="{% url 'attendance-work-type-request-cancel' r.id %}" hx-target="#ohMessages" hx-swap="innerHTML" onclick="event.preventDefault()">
                     <ion-icon name="close-circle-outline"></ion-icon>
                   </button>
