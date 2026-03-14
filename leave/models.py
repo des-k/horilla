@@ -29,6 +29,7 @@ from horilla import horilla_middlewares
 from horilla.models import HorillaModel, upload_path
 from horilla_audit.methods import get_diff
 from horilla_audit.models import HorillaAuditInfo, HorillaAuditLog
+from leave.half_day_rules import validate_second_half_leave_submission
 from leave.methods import (
     calculate_requested_days,
     company_leave_dates_list,
@@ -956,6 +957,14 @@ class LeaveRequest(HorillaModel):
             restrict = EmployeePastLeaveRestrict.objects.first()
             if restrict and self.start_date < date.today():
                 raise ValidationError(_("Requests cannot be made for past dates."))
+
+        validate_second_half_leave_submission(
+            employee=self.employee_id,
+            start_date=self.start_date,
+            end_date=self.end_date,
+            start_date_breakdown=self.start_date_breakdown,
+            end_date_breakdown=self.end_date_breakdown,
+        )
 
         # Avaialable leave days and requested leave days checking
         available_leave = AvailableLeave.objects.get(
