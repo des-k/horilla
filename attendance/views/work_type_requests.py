@@ -37,6 +37,7 @@ from attendance.models import (
 )
 from attendance.services.work_type_request_rules import apply_rejection_to_attendance, has_attachments
 from attendance.services.request_audit import log_request_action
+from attendance.services.reconciliation import recompute_attendance_range
 from attendance.methods.utils import paginator_qry
 from base.methods import filtersubordinates, get_subordinate_employee_ids
 from horilla.decorators import hx_request_required, login_required
@@ -433,6 +434,7 @@ def work_type_request_revoke(request, obj_id: int):
     req.action_type = "REVOKED"
     req.save(update_fields=["status", "action_by", "action_at", "action_type"])
     _log_request_action(req, employee, action_type="REVOKED", old_status=old_status, new_status=req.status)
+    recompute_attendance_range(req.employee_id, req.start_date, req.end_date)
     messages.success(request, _("Request revoked."))
     return HttpResponse("<script>location.reload();</script>")
 
@@ -475,6 +477,7 @@ def work_type_request_document_action(request, obj_id: int, action: str):
         req.document_remark = remark
         req.save(update_fields=["document_status", "document_verified_by", "document_verified_at", "action_by", "action_at", "action_type", "document_remark"])
         _log_request_action(req, employee, action_type="VERIFIED", old_status=f"document:{previous}", new_status=f"document:{req.document_status}", remark=remark)
+        recompute_attendance_range(req.employee_id, req.start_date, req.end_date)
         messages.success(request, _("Document verified."))
     elif action == "reject":
         if req.document_status not in (WorkModeRequestDocumentStatus.SUBMITTED, WorkModeRequestDocumentStatus.PENDING_VERIFICATION):
@@ -488,6 +491,7 @@ def work_type_request_document_action(request, obj_id: int, action: str):
         req.document_remark = remark
         req.save(update_fields=["document_status", "action_by", "action_at", "action_type", "document_remark"])
         _log_request_action(req, employee, action_type="REJECTED", old_status=f"document:{previous}", new_status=f"document:{req.document_status}", remark=remark)
+        recompute_attendance_range(req.employee_id, req.start_date, req.end_date)
         messages.success(request, _("Document rejected."))
     elif action == "reopen":
         if req.document_status not in (WorkModeRequestDocumentStatus.VERIFIED, WorkModeRequestDocumentStatus.REJECTED):
@@ -503,6 +507,7 @@ def work_type_request_document_action(request, obj_id: int, action: str):
         req.document_remark = remark
         req.save(update_fields=["document_status", "document_verified_by", "document_verified_at", "action_by", "action_at", "action_type", "document_remark"])
         _log_request_action(req, employee, action_type="REOPENED", old_status=f"document:{previous}", new_status=f"document:{req.document_status}", remark=remark)
+        recompute_attendance_range(req.employee_id, req.start_date, req.end_date)
         messages.success(request, _("Document review reopened."))
     else:
         return HttpResponseForbidden("Unsupported action")
@@ -663,6 +668,7 @@ def work_type_request_cancel(request, obj_id: int):
     req.action_type = "CANCELED"
     req.save(update_fields=["status", "action_by", "action_at", "action_type"])
     _log_request_action(req, employee, action_type="CANCELED", old_status=old_status, new_status=req.status)
+    recompute_attendance_range(req.employee_id, req.start_date, req.end_date)
     messages.success(request, _("Request canceled."))
     return HttpResponse("<script>location.reload();</script>")
 
@@ -705,6 +711,7 @@ def work_type_request_approve(request, obj_id: int):
     else:
         req.save(update_fields=["status", "approved_by", "approved_at", "action_by", "action_at", "action_type"])
     _log_request_action(req, employee, action_type="APPROVED", old_status=old_status, new_status=req.status)
+    recompute_attendance_range(req.employee_id, req.start_date, req.end_date)
 
     messages.success(request, _("Request approved."))
     return HttpResponse("<script>location.reload();</script>")
@@ -757,11 +764,10 @@ def work_type_request_reject(request, obj_id: int):
             req.save(update_fields=["status", "reason_code", "reason", "approved_by", "approved_at", "action_by", "action_at", "action_type"])
             _log_request_action(req, employee, action_type="REJECTED", old_status=old_status, new_status=req.status, remark=req.reason)
 
-            # Option B audit marking
             try:
                 apply_rejection_to_attendance(req)
             except Exception:
-                pass
+                recompute_attendance_range(req.employee_id, req.start_date, req.end_date)
 
             messages.success(request, _("Request rejected."))
             response = render(
