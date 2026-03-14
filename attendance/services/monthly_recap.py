@@ -114,15 +114,24 @@ def _localize_leave_session_label(kind: str, language: str) -> str:
     return labels[kind]
 
 
-def _approved_leave_coverage(leave_qs, first_day: date, last_day: date) -> Dict[date, Dict[str, bool]]:
-    coverage: Dict[date, Dict[str, bool]] = {}
+def _approved_leave_coverage(leave_qs, first_day: date, last_day: date) -> Dict[date, Dict[str, object]]:
+    coverage: Dict[date, Dict[str, object]] = {}
     for lr in leave_qs:
         sd = lr.start_date
         ed = lr.end_date or lr.start_date
         cur = sd
         while cur <= ed:
             if first_day <= cur <= last_day:
-                info = coverage.setdefault(cur, {"full_day": False, "in_excused": False, "out_excused": False})
+                info = coverage.setdefault(
+                    cur,
+                    {
+                        "full_day": False,
+                        "first_half": False,
+                        "second_half": False,
+                        "breakdown": None,
+                        "leave_request": None,
+                    },
+                )
                 if sd == ed:
                     breakdown = lr.start_date_breakdown or lr.end_date_breakdown or "full_day"
                 elif cur == sd:
@@ -133,15 +142,67 @@ def _approved_leave_coverage(leave_qs, first_day: date, last_day: date) -> Dict[
                     breakdown = "full_day"
 
                 if breakdown == "full_day":
-                    info["full_day"] = True
-                    info["in_excused"] = True
-                    info["out_excused"] = True
-                elif breakdown == "first_half":
-                    info["in_excused"] = True
-                elif breakdown == "second_half":
-                    info["out_excused"] = True
+                    info.update(
+                        {
+                            "full_day": True,
+                            "first_half": False,
+                            "second_half": False,
+                            "breakdown": "full_day",
+                            "leave_request": lr,
+                        }
+                    )
+                elif not info.get("full_day") and breakdown == "first_half":
+                    info.update(
+                        {
+                            "first_half": True,
+                            "second_half": False,
+                            "breakdown": "first_half",
+                            "leave_request": lr,
+                        }
+                    )
+                elif not info.get("full_day") and breakdown == "second_half":
+                    info.update(
+                        {
+                            "first_half": False,
+                            "second_half": True,
+                            "breakdown": "second_half",
+                            "leave_request": lr,
+                        }
+                    )
             cur = cur + timedelta(days=1)
     return coverage
+
+
+def _localize_half_day_leave_note(kind: Optional[str], language: str) -> str:
+    lang = (language or "en").lower()
+    if kind == "first_half":
+        return "Approved First Half Leave" if not lang.startswith("id") else "Cuti Setengah Hari Pagi Disetujui"
+    if kind == "second_half":
+        return "Approved Second Half Leave" if not lang.startswith("id") else "Cuti Setengah Hari Siang Disetujui"
+    return "Approved Leave" if not lang.startswith("id") else "Cuti Disetujui"
+
+
+def _time_to_shift_instance_dt(
+    threshold_time: Optional[time],
+    *,
+    shift_start_dt: Optional[datetime],
+    shift_end_dt: Optional[datetime],
+    tzinfo=None,
+) -> Optional[datetime]:
+    if not (threshold_time and shift_start_dt and shift_end_dt):
+        return None
+
+    candidate = datetime.combine(shift_start_dt.date(), threshold_time)
+    candidate = _normalize_dt(candidate, tzinfo)
+    if not candidate:
+        return None
+
+    if candidate < shift_start_dt and shift_end_dt.date() > shift_start_dt.date():
+        candidate = candidate + timedelta(days=1)
+
+    if candidate < shift_start_dt or candidate > shift_end_dt:
+        return None
+    return candidate
 
 
 def _localize_shift_information(text: str, language: str) -> str:
@@ -1095,8 +1156,18 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
     i = 1
     for d in _iter_month_dates(first_day, last_day):
         holiday_obj = is_holiday(d)
-        leave_info = leave_coverage.get(d, {"full_day": False, "in_excused": False, "out_excused": False})
-        is_leave = leave_info["full_day"]
+        leave_info = leave_coverage.get(
+            d,
+            {
+                "full_day": False,
+                "first_half": False,
+                "second_half": False,
+                "breakdown": None,
+                "leave_request": None,
+            },
+        )
+        is_leave = bool(leave_info.get("full_day"))
+        half_day_kind = leave_info.get("breakdown") if not is_leave else None
 
         att_list = att_by_date.get(d, [])
         act_list = act_by_date.get(d, [])
@@ -1364,33 +1435,87 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
         late_sec = 0.0
         early_sec = 0.0
         leave_note_suffixes: List[str] = []
+        half_day_cfg = None
+        if schedule_obj and half_day_kind in {"first_half", "second_half"}:
+            if half_day_kind == "first_half":
+                half_day_cfg = {
+                    "enabled": bool(getattr(schedule_obj, "enable_first_half_leave_rule", False)),
+                    "threshold_time": getattr(schedule_obj, "first_half_leave_latest_check_in_time", None),
+                }
+            elif half_day_kind == "second_half":
+                half_day_cfg = {
+                    "enabled": bool(getattr(schedule_obj, "enable_second_half_leave_rule", False)),
+                    "threshold_time": getattr(schedule_obj, "second_half_leave_earliest_check_out_time", None),
+                }
+        first_half_threshold_dt = None
+        second_half_threshold_dt = None
+        if half_day_cfg and half_day_cfg.get("enabled"):
+            threshold_time = half_day_cfg.get("threshold_time")
+            if half_day_kind == "first_half":
+                first_half_threshold_dt = _time_to_shift_instance_dt(
+                    threshold_time,
+                    shift_start_dt=shift_start_dt,
+                    shift_end_dt=shift_end_dt,
+                    tzinfo=tzinfo,
+                )
+            elif half_day_kind == "second_half":
+                second_half_threshold_dt = _time_to_shift_instance_dt(
+                    threshold_time,
+                    shift_start_dt=shift_start_dt,
+                    shift_end_dt=shift_end_dt,
+                    tzinfo=tzinfo,
+                )
 
         if shift_start_dt and cutoff_in_dt:
-            if final_in_dt:
-                if eff_in_mode == AttendanceWorkMode.ON_DUTY:
-                    late_sec = 0.0
+            if half_day_kind == "first_half":
+                if final_in_dt:
+                    if eff_in_mode == AttendanceWorkMode.ON_DUTY:
+                        late_sec = 0.0
+                    else:
+                        ref = first_half_threshold_dt or (shift_start_dt + timedelta(seconds=grace_in_sec))
+                        late_sec = max(0.0, (final_in_dt - ref).total_seconds())
                 else:
-                    ref = shift_start_dt + timedelta(seconds=grace_in_sec)
-                    late_sec = max(0.0, (final_in_dt - ref).total_seconds())
+                    late_sec = 0.0
+                leave_note_suffixes.append(_localize_half_day_leave_note("first_half", language))
             else:
-                late_sec = max(0.0, (cutoff_in_dt - shift_start_dt).total_seconds())
+                if final_in_dt:
+                    if eff_in_mode == AttendanceWorkMode.ON_DUTY:
+                        late_sec = 0.0
+                    else:
+                        ref = shift_start_dt + timedelta(seconds=grace_in_sec)
+                        late_sec = max(0.0, (final_in_dt - ref).total_seconds())
+                else:
+                    late_sec = max(0.0, (cutoff_in_dt - shift_start_dt).total_seconds())
 
         if shift_end_dt and cutoff_in_dt:
-            if final_out_dt:
-                if eff_out_mode == AttendanceWorkMode.ON_DUTY:
-                    early_sec = 0.0
+            if half_day_kind == "second_half":
+                if final_out_dt:
+                    if eff_out_mode == AttendanceWorkMode.ON_DUTY:
+                        early_sec = 0.0
+                    else:
+                        ref = second_half_threshold_dt or (shift_end_dt - timedelta(seconds=grace_out_sec))
+                        early_sec = max(0.0, (ref - final_out_dt).total_seconds())
                 else:
-                    ref = shift_end_dt - timedelta(seconds=grace_out_sec)
-                    early_sec = max(0.0, (ref - final_out_dt).total_seconds())
+                    early_sec = 0.0
+                leave_note_suffixes.append(_localize_half_day_leave_note("second_half", language))
+            elif half_day_kind == "first_half":
+                if final_out_dt:
+                    if eff_out_mode == AttendanceWorkMode.ON_DUTY:
+                        early_sec = 0.0
+                    else:
+                        ref = shift_end_dt - timedelta(seconds=grace_out_sec)
+                        early_sec = max(0.0, (ref - final_out_dt).total_seconds())
+                else:
+                    early_sec = 0.0
             else:
-                early_sec = max(0.0, (shift_end_dt - cutoff_in_dt).total_seconds())
-
-        if leave_info["in_excused"]:
-            late_sec = 0.0
-            leave_note_suffixes.append(_localize_leave_session_label("in", language))
-        if leave_info["out_excused"]:
-            early_sec = 0.0
-            leave_note_suffixes.append(_localize_leave_session_label("out", language))
+                if final_out_dt:
+                    if eff_out_mode == AttendanceWorkMode.ON_DUTY:
+                        early_sec = 0.0
+                    else:
+                        ref = shift_end_dt - timedelta(seconds=grace_out_sec)
+                        early_sec = max(0.0, (ref - final_out_dt).total_seconds())
+                else:
+                    early_sec = max(0.0, (shift_end_dt - cutoff_in_dt).total_seconds())
 
         late_minutes = _seconds_to_minutes(late_sec)
         early_minutes = _seconds_to_minutes(early_sec)
@@ -1424,8 +1549,8 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
         note = derive_note(
             NoteInputs(
                 is_off=False,
-                has_check_in=final_in_dt is not None or leave_info["in_excused"],
-                has_check_out=final_out_dt is not None or leave_info["out_excused"],
+                has_check_in=final_in_dt is not None,
+                has_check_out=final_out_dt is not None,
                 late_seconds=late_sec,
                 early_out_seconds=early_sec,
                 pending_suffixes=note_suffixes,
@@ -1442,8 +1567,8 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
                 no=i,
                 attendance_date=d,
                 shift_information=shift_info,
-                check_in=final_in_dt is not None and _format_punch(final_in_dt, d) or (leave_info["in_excused"] and _localize_leave_session_label("in", language) or "-"),
-                check_out=final_out_dt is not None and _format_punch(final_out_dt, d) or (leave_info["out_excused"] and _localize_leave_session_label("out", language) or "-"),
+                check_in=final_in_dt is not None and _format_punch(final_in_dt, d) or "-",
+                check_out=final_out_dt is not None and _format_punch(final_out_dt, d) or "-",
                 work_type=work_type_disp,
                 late=late_txt,
                 early_out=early_txt,
