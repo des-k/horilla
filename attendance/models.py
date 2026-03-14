@@ -811,7 +811,8 @@ class Attendance(HorillaModel):
         null=True, blank=True, verbose_name=_("Check-Out Location")
     )
 
-    # On Duty punches are presence-only; they should not affect worked hours / overtime.
+    # Final verified On Duty attendances are presence-only; provisional/request-only
+    # On Duty still follows normal attendance calculation until document verification.
     is_presensi_only = models.BooleanField(
         default=False,
         verbose_name=_("Presence Only"),
@@ -1016,7 +1017,8 @@ class Attendance(HorillaModel):
         compress_model_image_field(self, "attendance_clock_in_image")
         compress_model_image_field(self, "attendance_clock_out_image")
         if self.is_presensi_only:
-            # Presence-only attendances (e.g., On Duty) must not affect hour calculations.
+            # Presence-only attendances (for example, final verified On Duty) must
+            # not affect hour calculations.
             self.attendance_worked_hour = "00:00"
             self.minimum_hour = "00:00"
 
