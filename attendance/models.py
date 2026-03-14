@@ -1006,6 +1006,13 @@ class Attendance(HorillaModel):
                 self.attendance_overtime_approve = True
 
     def save(self, *args, **kwargs):
+        update_fields = kwargs.get("update_fields")
+        if update_fields is not None and set(update_fields) == {"request_restore_snapshot"}:
+            # Snapshot-only updates are lightweight metadata writes used to restore
+            # attendance request overrides later. They must not trigger overtime/
+            # worked-hour recalculation because core attendance facts did not change.
+            return super().save(*args, **kwargs)
+
         compress_model_image_field(self, "attendance_clock_in_image")
         compress_model_image_field(self, "attendance_clock_out_image")
         if self.is_presensi_only:
