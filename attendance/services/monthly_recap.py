@@ -487,6 +487,72 @@ def _pick_best_attendance(att_list: List[Attendance]) -> Optional[Attendance]:
     return sorted(att_list, key=lambda x: x.id)[-1]
 
 
+def _canonical_row_from_attendance(
+    *,
+    best_att: Optional[Attendance],
+    attendance_date: date,
+    row_no: int,
+    shift_information: str,
+    language: str,
+    is_off: bool,
+) -> Optional[MonthlyRecapRow]:
+    if not best_att:
+        return None
+
+    if _is_pending_create_request_source(best_att):
+        return None
+
+    note = (getattr(best_att, "reconciliation_note", None) or "").strip()
+    source = (getattr(best_att, "reconciliation_source", None) or "").strip()
+
+    final_in_dt = _combine_dt(
+        getattr(best_att, "attendance_clock_in_date", None),
+        getattr(best_att, "attendance_clock_in", None),
+        attendance_date,
+    )
+    final_out_dt = _combine_dt(
+        getattr(best_att, "attendance_clock_out_date", None),
+        getattr(best_att, "attendance_clock_out", None),
+        attendance_date,
+    )
+
+    display_in_mode = _session_mode(best_att, "IN") or _attendance_level_mode(best_att) or AttendanceWorkMode.WFO
+    display_out_mode = _session_mode(best_att, "OUT") or display_in_mode
+
+    if display_in_mode == AttendanceWorkMode.ON_DUTY and display_out_mode == AttendanceWorkMode.ON_DUTY:
+        work_type_disp = "On Duty FULL"
+    elif display_in_mode == AttendanceWorkMode.ON_DUTY and display_out_mode != AttendanceWorkMode.ON_DUTY:
+        work_type_disp = "On Duty IN"
+    elif display_out_mode == AttendanceWorkMode.ON_DUTY and display_in_mode != AttendanceWorkMode.ON_DUTY:
+        work_type_disp = "On Duty OUT"
+    elif display_in_mode == display_out_mode:
+        work_type_disp = _work_mode_label(display_in_mode)
+    else:
+        work_type_disp = f"IN: {_work_mode_label(display_in_mode)}<br>OUT: {_work_mode_label(display_out_mode)}"
+
+    late_minutes = int(getattr(best_att, "late_minutes", 0) or 0)
+    early_out_minutes = int(getattr(best_att, "early_out_minutes", 0) or 0)
+
+    return MonthlyRecapRow(
+        no=row_no,
+        attendance_date=attendance_date,
+        shift_information=_localize_shift_information(shift_information, language),
+        check_in=final_in_dt is not None and _format_punch(final_in_dt, attendance_date) or "-",
+        check_out=final_out_dt is not None and _format_punch(final_out_dt, attendance_date) or "-",
+        work_type=_localize_work_type(work_type_disp, language),
+        late=seconds_to_hhmm(late_minutes * 60),
+        early_out=seconds_to_hhmm(early_out_minutes * 60),
+        note=note or source or "-",
+        is_off=is_off,
+        late_minutes=late_minutes,
+        early_out_minutes=early_out_minutes,
+        final_in_datetime=final_in_dt,
+        final_out_datetime=final_out_dt,
+        display_in_mode=display_in_mode or "",
+        display_out_mode=display_out_mode or "",
+    )
+
+
 def _resolve_effective_mode_approved(
     *,
     requests: List[WorkModeRequest],
@@ -1193,6 +1259,35 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
             or not rules.get("end_time")
         )
         is_off = bool(holiday_obj) or is_leave or no_schedule_off
+
+        if is_leave:
+            canonical_shift_info = _localize_leave_session_label("full", language)
+        elif holiday_obj:
+            canonical_shift_info = "Holiday"
+        else:
+            canonical_shift_info = "—"
+            try:
+                st = rules.get("start_time")
+                et = rules.get("end_time")
+                if st and et:
+                    canonical_shift_info = f"{st.strftime('%H:%M')} - {et.strftime('%H:%M')}"
+                    flexi_min = int((int(rules.get("grace_seconds") or 0)) // 60)
+                    canonical_shift_info += f" • Flexi In: {flexi_min}m"
+            except Exception:
+                canonical_shift_info = "—"
+
+        canonical_row = _canonical_row_from_attendance(
+            best_att=best_att,
+            attendance_date=d,
+            row_no=i,
+            shift_information=canonical_shift_info,
+            language=language,
+            is_off=is_off,
+        )
+        if canonical_row is not None:
+            rows.append(canonical_row)
+            i += 1
+            continue
 
         if is_off:
             if is_leave:
