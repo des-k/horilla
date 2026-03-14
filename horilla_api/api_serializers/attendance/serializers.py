@@ -461,8 +461,21 @@ class WorkModeRequestSerializer(serializers.ModelSerializer):
         # If rejected, reason_code must exist (spec)
         status_val = attrs.get("status") or getattr(self.instance, "status", None)
         reason_code = attrs.get("reason_code") or getattr(self.instance, "reason_code", None)
-        if status_val == WorkModeRequestStatus.REJECTED and not reason_code:
-            raise serializers.ValidationError({"reason_code": "reason_code is required when status is REJECTED"})
+        if attrs.get("employee_id") is not None and self.instance is None:
+            request = self.context.get("request")
+            try:
+                actor = request.user.employee_get if request else None
+            except Exception:
+                actor = None
+            if actor and attrs.get("employee_id") != actor:
+                raise serializers.ValidationError({"employee_id": "Requests can only be created for yourself."})
+
+        doc_status = attrs.get("document_status") or getattr(self.instance, "document_status", None)
+        if mode == AttendanceWorkMode.ON_DUTY and doc_status == "verified" and getattr(self.instance, "document_status", None) == "verified":
+            immutable = {"reason", "start_date", "end_date", "scope", "mode", "duty_destination_location", "duty_destination_detail"}
+            changed = [field for field in immutable if field in attrs]
+            if changed:
+                raise serializers.ValidationError({"document_status": "Verified On Duty documents are locked. Reopen verification first."})
 
         return attrs
 
@@ -563,6 +576,9 @@ class AttendancePunchingHistorySerializer(serializers.ModelSerializer):
             "location_display",
             "google_maps_url",
             "accepted_to_attendance",
+            "decision_status",
+            "decision_source",
+            "work_mode",
             "reason",
             "raw_timestamp",
         ]
