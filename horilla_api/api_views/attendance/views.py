@@ -1,105 +1,149 @@
-"""attendance/views/work_type_requests.py
+from datetime import date, datetime, timedelta, timezone
+import calendar
+import io
+import json
 
-Web UI (Django templates) for Attendance **Work Type Requests**.
+from django import template
+from django.conf import settings
+from django.core.mail import EmailMessage
+from django.core.exceptions import ValidationError
+from django.db import transaction
+from django.db.models import Case, CharField, F, Value, When, Q
+from django.http import HttpResponse, QueryDict
+from django.shortcuts import get_object_or_404
+from django.template.loader import render_to_string
+from django.utils import timezone as dj_timezone
+from django.utils.decorators import method_decorator
+from rest_framework import status
+from rest_framework.pagination import PageNumberPagination
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
+from rest_framework.renderers import JSONRenderer, BaseRenderer
+from xhtml2pdf import pisa
 
-- UI name: Work Type Requests
-- DB model: attendance.WorkModeRequest (kept for backwards compatibility)
+import logging
 
-Spec:
-- Allowed request depends on schedule (employee.employee_work_info.work_type_id) for the attendance_date.
-- Scopes: IN/OUT single day, FULL date range.
-- ON_DUTY requires attachment but may be submitted PENDING and later updated with attachment.
-- Approvals list includes:
-  - WAITING_FOR_APPROVAL (approvable)
-  - ON_DUTY PENDING (not yet approvable; usually waiting for letter upload)
-"""
+logger = logging.getLogger(__name__)
 
-from __future__ import annotations
-
-from django.contrib import messages
-from django.http import HttpResponse, HttpResponseForbidden
-from django.shortcuts import get_object_or_404, render
-from django.utils import timezone
-from django.utils.translation import gettext_lazy as _
-
-from attendance.forms_work_type_request import (
-    WorkTypeRequestCreateForm,
-    WorkTypeRequestRejectForm,
-    WorkTypeRequestUpdateForm,
-)
 from attendance.models import (
-    AttendanceRequestFile,
-    AttendanceWorkMode,
+    Attendance,
+    AttendanceActivity,
+    AttendanceLateComeEarlyOut,
+    AttendancePunchSource,
+    AttendancePunchingHistory,
+    EmployeeShiftDay,
     WorkModeRequest,
+    AttendanceWorkMode,
+    WorkModeRequestScope,
+    WorkModeRequestStatus,
+    WorkModeRequestActionType,
     WorkModeRequestDocumentStatus,
     WorkModeRequestRejectReasonCode,
-    WorkModeRequestStatus,
 )
-from attendance.services.work_type_request_rules import apply_rejection_to_attendance, has_attachments
+from attendance.views.clock_in_out import *
+from attendance.views.clock_in_out import clock_out
+import attendance.views.clock_in_out as cio  # Access underscore helpers excluded by import *
+
+from attendance.services.attachment_validation import validate_uploaded_files
+from attendance.services.image_compression import _extract_error_message
+from attendance.services.work_type_request_rules import (
+    effective_work_type,
+    punch_allowed,
+    auto_reject_wfa_waiting_for_date,
+    apply_rejection_to_attendance,
+    has_attachments,
+)
+from attendance.services.activity_sync import (
+    get_requested_sessions,
+    mark_approved_request_channels,
+    sync_single_session_activity,
+    validate_requested_data_with_windows,
+)
+from attendance.services.punching_history import (
+    capture_request_restore_snapshot,
+    clear_raw_links_for_request_override,
+    create_mobile_punch_history,
+    humanize_mobile_error,
+    reconcile_attendance_punches,
+    restore_raw_state_after_request,
+    update_punch_history,
+)
 from attendance.services.request_audit import log_request_action
-from attendance.services.reconciliation import recompute_attendance_range
-from attendance.methods.utils import paginator_qry
-from base.methods import filtersubordinates, get_subordinate_employee_ids
-from horilla.decorators import hx_request_required, login_required
+from attendance.services.reconciliation import recompute_attendance, recompute_attendance_range
+
+from attendance.views.dashboard import (
+    find_expected_attendances,
+    find_late_come,
+    find_on_time,
+)
+from attendance.views.views import *
+from base.backends import ConfiguredEmailBackend
+from base.methods import generate_pdf, is_reportingmanager, filtersubordinates, filtersubordinatesemployeemodel, get_subordinate_employee_ids
+from base.models import HorillaMailTemplate
+from employee.filters import EmployeeFilter
+from employee.models import Employee, EmployeeWorkInformation
+
+from ...api_decorators.base.decorators import (
+    manager_permission_required,
+    permission_required,
+)
+from ...api_methods.base.methods import groupby_queryset, permission_based_queryset
+from ...api_serializers.attendance.serializers import (
+    AttendanceActivitySerializer,
+    AttendanceLateComeEarlyOutSerializer,
+    AttendanceOverTimeSerializer,
+    AttendancePunchingHistorySerializer,
+    AttendanceRequestSerializer,
+    AttendanceSerializer,
+    MailTemplateSerializer,
+    UserAttendanceDetailedSerializer,
+    UserAttendanceListSerializer,
+    WorkModeRequestSerializer,
+)
 
 
-def _is_global_work_type_approver(user) -> bool:
-    """Treat these users as global approvers for Work Type Requests.
+# Create your views here.
 
-    Many deployments already grant admins `attendance.change_attendance` but may
-    not yet grant `attendance.change_workmoderequest` (newer model). We accept
-    either permission so existing admin roles keep working on web.
-    """
 
+def query_dict(data):
+    query_dict = QueryDict("", mutable=True)
+    for key, value in data.items():
+        if isinstance(value, list):
+            for item in value:
+                query_dict.appendlist(key, item)
+        else:
+            query_dict.update({key: value})
+    return query_dict
+
+
+
+
+def _request_actor_employee(request):
     try:
-        if getattr(user, "is_superuser", False):
-            return True
-        return bool(
-            user.has_perm("attendance.change_workmoderequest")
-            or user.has_perm("attendance.change_attendance")
-        )
+        return request.user.employee_get
     except Exception:
-        return False
+        return None
 
 
-def _subordinate_ids(request) -> list[int]:
-    """Best-effort list of subordinate Employee IDs for current user."""
-    try:
-        return get_subordinate_employee_ids(request) or []
-    except Exception:
-        return []
-
-
-def _can_act_on_request(request, req: WorkModeRequest) -> bool:
-    """Permission guard for approve/reject/view-attachments on a specific request."""
-
-    # Admin / global approver
-    if _is_global_work_type_approver(request.user):
-        return True
-
-    # Reporting manager: only their (direct/nested) subordinates.
-    try:
-        return int(req.employee_id_id) in set(_subordinate_ids(request))
-    except Exception:
-        return False
-
-
-
-
-def _set_on_duty_document_state(req: WorkModeRequest, *, has_files: bool, approved: bool = False):
-    if req.mode != AttendanceWorkMode.ON_DUTY:
+def _set_on_duty_document_state(obj: WorkModeRequest, *, has_files: bool, approved: bool = False):
+    if obj.mode != AttendanceWorkMode.ON_DUTY:
         return
     if not has_files:
-        req.document_status = WorkModeRequestDocumentStatus.NOT_UPLOADED
+        obj.document_status = WorkModeRequestDocumentStatus.NOT_UPLOADED
         return
-    req.document_status = WorkModeRequestDocumentStatus.PENDING_VERIFICATION if approved else WorkModeRequestDocumentStatus.SUBMITTED
+    obj.document_status = (
+        WorkModeRequestDocumentStatus.PENDING_VERIFICATION
+        if approved else WorkModeRequestDocumentStatus.SUBMITTED
+    )
 
 
-def _log_request_action(req: WorkModeRequest, actor, *, action_type: str, old_status: str = None, new_status: str = None, remark: str = None):
+def _log_work_mode_status_change(obj: WorkModeRequest, request, *, action_type: str, old_status: str = None, new_status: str = None, remark: str = None):
     try:
         log_request_action(
-            work_mode_request=req,
-            actor=actor,
+            work_mode_request=obj,
+            actor=_request_actor_employee(request),
             action_type=action_type,
             old_status=old_status,
             new_status=new_status,
@@ -108,179 +152,1978 @@ def _log_request_action(req: WorkModeRequest, actor, *, action_type: str, old_st
     except Exception:
         pass
 
-def _mode_label(mode: str) -> str:
-    if mode == AttendanceWorkMode.ON_DUTY:
-        return "ON DUTY"
-    return (mode or "").upper()
 
-
-def _qs_without(request, drop_keys: list[str]) -> str:
-    """Return current querystring without certain keys (used for pagination links)."""
+def _log_attendance_request_status_change(attendance: Attendance, request, *, action_type: str, old_status: str = None, new_status: str = None, remark: str = None):
     try:
-        qd = request.GET.copy()
-        for k in drop_keys:
-            qd.pop(k, None)
-        return qd.urlencode()
+        log_request_action(
+            attendance=attendance,
+            actor=_request_actor_employee(request),
+            action_type=action_type,
+            old_status=old_status,
+            new_status=new_status,
+            remark=remark,
+        )
     except Exception:
-        return ""
+        pass
 
+def _is_attendance_exempt_manager(employee) -> bool:
+    """Return True if employee should be excluded from IN/OUT attendance.
 
-def _qs_update(request, **changes) -> str:
-    """Return current querystring with selected keys updated/removed.
-
-    - pass value=None to remove the key
-    """
-    try:
-        qd = request.GET.copy()
-        for k, v in changes.items():
-            if v is None:
-                qd.pop(k, None)
-            else:
-                qd[k] = v
-        return qd.urlencode()
-    except Exception:
-        return ""
-
-
-def _apply_sort(qs, *, sort_field: str, direction: str, secondary: str = "-id"):
-    """Safe order_by helper."""
-    prefix = "" if (direction or "").lower() == "asc" else "-"
-    try:
-        return qs.order_by(f"{prefix}{sort_field}", secondary)
-    except Exception:
-        return qs
-
-
-@login_required
-def work_type_request_view(request):
-    """Main page: My Requests + Approvals.
-
-    Some deployments have admin/superuser accounts that are not linked to an
-    Employee profile (employee_get=None). For those users, we still want the
-    page (especially Approvals) to work when they have global permission or are
-    a Django superuser.
+    Custom rule requested: if an employee is a reporting manager of at least one
+    other employee, they act as "approver-only" and use an external attendance
+    system. They can still approve, but must not punch or be counted as missing.
     """
 
-    employee = getattr(request.user, "employee_get", None)
-    is_super = bool(getattr(request.user, "is_superuser", False))
-    has_global_perm = _is_global_work_type_approver(request.user)
+    try:
+        return (
+            EmployeeWorkInformation.objects.filter(reporting_manager_id=employee)
+            .only("id")
+            .exists()
+        )
+    except Exception:
+        return False
 
-    # Only forbid when the user is not a superuser/global approver AND has no employee.
-    if employee is None and not (is_super or has_global_perm):
-        return HttpResponseForbidden("Employee profile required")
 
-    search = (request.GET.get("search") or "").strip()
+# -----------------------------------------------------------------------------
+# Mobile single-session helpers# -----------------------------------------------------------------------------
+# Work-mode helpers (WFO/WFA/ON_DUTY)
+# -----------------------------------------------------------------------------
+def _pick_work_mode_request(employee, target_date: date, want: str):
+    """Return the *effective* WorkModeRequest for the given date.
 
-    # Shared quick filters (apply to both My Requests & Approvals)
-    mode_filter = (request.GET.get("mode_filter") or "").strip().lower()
-    scope_filter = (request.GET.get("scope_filter") or "").strip().lower()
+    Kept for backward compatibility; core resolution is delegated to
+    ``attendance.services.work_type_request_rules``.
+    """
+    return effective_work_type(employee, target_date, want).request
 
-    allowed_mode_filter = {
-        "": None,
-        "all": None,
-        "wfa": AttendanceWorkMode.WFA,
-        "on_duty": AttendanceWorkMode.ON_DUTY,
-    }
-    allowed_scope_filter = {
-        "": None,
-        "all": None,
-        "in": "in",
-        "out": "out",
-        "full": "full",
-    }
 
-    if mode_filter not in allowed_mode_filter:
-        mode_filter = ""
-    if scope_filter not in allowed_scope_filter:
-        scope_filter = ""
+def _resolve_effective_work_type(employee, target_date: date, want: str):
+    """Return tuple (mode, source, request)."""
+    eff = effective_work_type(employee, target_date, want)
+    return eff.mode, eff.source, eff.request
 
-    # Quick filters (My Requests only)
-    status_my = (request.GET.get("status_my") or "").strip().lower()
-    allowed_status_my = {
-        "": None,
-        "all": None,
-        "pending": WorkModeRequestStatus.PENDING,
-        "waiting": WorkModeRequestStatus.WAITING_FOR_APPROVAL,
-        "waiting_for_approval": WorkModeRequestStatus.WAITING_FOR_APPROVAL,
-        "approved": WorkModeRequestStatus.APPROVED,
-        "rejected": WorkModeRequestStatus.REJECTED,
-        "revoked": WorkModeRequestStatus.REVOKED,
-        "canceled": WorkModeRequestStatus.CANCELED,
-    }
-    if status_my not in allowed_status_my:
-        status_my = ""
 
-    # Sorting (independent per table)
-    allowed_sort_my = {
-        "mode": "mode",
-        "scope": "scope",
-        "start_date": "start_date",
-        "end_date": "end_date",
-        "status": "status",
-    }
-    allowed_sort_app = {
-        "employee": "employee_id__employee_first_name",
-        "mode": "mode",
-        "scope": "scope",
-        "start_date": "start_date",
-        "end_date": "end_date",
-    }
+def _mode_from_request(req) -> str:
+    # Compatibility helper
+    return req.mode if req else AttendanceWorkMode.WFO
 
-    sort_my = (request.GET.get("sort_my") or "start_date").strip()
-    dir_my = (request.GET.get("dir_my") or "desc").strip().lower()
-    if sort_my not in allowed_sort_my:
-        sort_my = "start_date"
-    if dir_my not in ("asc", "desc"):
-        dir_my = "desc"
 
-    sort_app = (request.GET.get("sort_app") or "start_date").strip()
-    dir_app = (request.GET.get("dir_app") or "desc").strip().lower()
-    if sort_app not in allowed_sort_app:
-        sort_app = "start_date"
-    if dir_app not in ("asc", "desc"):
-        dir_app = "desc"
+def _is_punch_allowed(mode: str, req, source: str):
+    from attendance.services.work_type_request_rules import EffectiveWorkType
+    return punch_allowed(EffectiveWorkType(mode=mode, source=source, request=req))
 
-    # My Requests table requires an employee profile.
-    my_qs = WorkModeRequest.objects.none() if employee is None else WorkModeRequest.objects.filter(employee_id=employee)
+def _requires_proof(mode: str) -> bool:
+    return mode in (AttendanceWorkMode.WFA, AttendanceWorkMode.ON_DUTY)
 
-    # Apply shared quick filters
-    mode_value = allowed_mode_filter.get(mode_filter)
-    if mode_value:
-        my_qs = my_qs.filter(mode=mode_value)
-    scope_value = allowed_scope_filter.get(scope_filter)
-    if scope_value:
-        my_qs = my_qs.filter(scope=scope_value)
+def _parse_location_payload(request) -> dict | None:
+    """Parse location payload from request.data (multipart or JSON).
+    Accepts:
+      - location: dict or JSON string
+      - lat/lng/accuracy/provider/captured_at
+      - latitude/longitude
+    """
+    data = getattr(request, "data", {}) or {}
+    loc = data.get("location", None)
+    if loc:
+        if isinstance(loc, str):
+            try:
+                loc = json.loads(loc)
+            except Exception:
+                loc = None
+        if isinstance(loc, dict):
+            return loc
 
-    # Apply quick filter
-    status_value = allowed_status_my.get(status_my)
-    if status_value:
-        my_qs = my_qs.filter(status=status_value)
-    if search:
+    # Flat keys
+    lat = data.get("lat", None) or data.get("latitude", None)
+    lng = data.get("lng", None) or data.get("longitude", None)
+    if lat is None or lng is None:
+        return None
+
+    def _to_float(v):
         try:
-            from django.db.models import Q
+            return float(v)
+        except Exception:
+            return None
 
-            my_qs = my_qs.filter(
-                Q(mode__icontains=search)
-                | Q(scope__icontains=search)
-                | Q(status__icontains=search)
+    lat_f = _to_float(lat)
+    lng_f = _to_float(lng)
+    if lat_f is None or lng_f is None:
+        return None
+
+    payload = {"lat": lat_f, "lng": lng_f}
+
+    acc = data.get("accuracy", None)
+    if acc is not None:
+        try:
+            payload["accuracy"] = float(acc)
+        except Exception:
+            payload["accuracy"] = acc
+
+    provider = data.get("provider", None) or data.get("source", None)
+    if provider:
+        payload["provider"] = str(provider)
+
+    captured_at = data.get("captured_at", None) or data.get("timestamp", None)
+    if captured_at:
+        payload["captured_at"] = str(captured_at)
+
+    return payload
+
+
+def _is_admin_with_perm(request, perm_codename: str) -> bool:
+    """Admin permission helper.
+
+    Backward compatibility:
+    - Superuser is always treated as allowed.
+    - Treat `attendance.change_attendance` as an admin approval permission for
+      work-type requests too (many installs grant this to admins).
+    """
+    try:
+        user = getattr(request, "user", None)
+        if not user:
+            return False
+        if getattr(user, "is_superuser", False):
+            return True
+        if user.has_perm(perm_codename):
+            return True
+        if perm_codename == "attendance.change_workmoderequest" and user.has_perm(
+            "attendance.change_attendance"
+        ):
+            return True
+        return False
+    except Exception:
+        return False
+
+
+def _is_supervisor_of(request, employee_id: int) -> bool:
+    """True if request.user is in the reporting chain above `employee_id`."""
+    try:
+        sub_ids = get_subordinate_employee_ids(request, nested=True)
+        return int(employee_id) in set(map(int, sub_ids or []))
+    except Exception:
+        return False
+
+
+def _can_act_on_employee(request, employee_id: int, perm_codename: str, allow_owner: bool = False) -> bool:
+    """Admin (has perm) OR supervisor of employee. Optionally allow owner.
+
+    IMPORTANT: Even if user is admin with perm, disallow acting on their own request unless allow_owner=True.
+    """
+    my_emp_id = None
+    try:
+        my_emp = request.user.employee_get
+        my_emp_id = int(getattr(my_emp, "id", 0) or 0)
+    except Exception:
+        my_emp_id = None
+
+    is_owner = my_emp_id is not None and int(my_emp_id) == int(employee_id)
+
+    # Block self-action unless explicitly allowed
+    if is_owner and not allow_owner:
+        return False
+
+    if _is_admin_with_perm(request, perm_codename):
+        return True
+
+    if allow_owner and is_owner:
+        return True
+
+    return _is_supervisor_of(request, employee_id)
+
+
+# -----------------------------------------------------------------------------
+def _api_now(request) -> datetime:
+    """
+    Resolve a request datetime.
+
+    Priority:
+    1) request.datetime (if injected by a wrapper)
+    2) timezone-aware now() if USE_TZ
+    3) naive datetime.now()
+    """
+    dt_attr = getattr(request, "datetime", None)
+    if dt_attr:
+        return dt_attr
+    if getattr(settings, "USE_TZ", False):
+        return dj_timezone.localtime(dj_timezone.now())
+    return datetime.now()
+
+
+def _api_today(request, dt_now: datetime) -> date:
+    """Resolve a request date if provided, otherwise use dt_now.date()."""
+    d_attr = getattr(request, "date", None)
+    return d_attr if isinstance(d_attr, date) else dt_now.date()
+
+
+def _coerce_datetime_like(dt_value: datetime | None, ref_dt: datetime) -> datetime | None:
+    """Ensure dt_value has the same timezone-awareness as ref_dt.
+
+    - If USE_TZ=True and dt_value is naive, make it aware using ref_dt.tzinfo (or current timezone).
+    - If USE_TZ=True and dt_value is aware, convert to ref_dt's timezone for safe comparison.
+    - If USE_TZ=False and dt_value is aware, make it naive.
+    """
+    if dt_value is None:
+        return None
+
+    use_tz = getattr(settings, "USE_TZ", False)
+
+    if use_tz:
+        # ref tzinfo: prefer ref_dt, fallback to Django current timezone.
+        ref_tz = ref_dt.tzinfo if dj_timezone.is_aware(ref_dt) and ref_dt.tzinfo else dj_timezone.get_current_timezone()
+
+        if dj_timezone.is_naive(dt_value):
+            return dj_timezone.make_aware(dt_value, ref_tz)
+
+        # dt_value aware: normalize to ref_tz for consistent comparisons
+        try:
+            return dj_timezone.localtime(dt_value, ref_tz)
+        except Exception:
+            return dt_value
+
+    # USE_TZ=False
+    if dj_timezone.is_aware(dt_value):
+        try:
+            return dj_timezone.make_naive(dt_value)
+        except Exception:
+            return dt_value
+    return dt_value
+
+
+def _normalize_none(value):
+    """Normalize common empty string values to Python None."""
+    if value is None:
+        return None
+    if isinstance(value, str) and value.strip() in ("", "None", "null", "NULL"):
+        return None
+    return value
+
+
+def _format_minimum_hour(value):
+    """Return minimum working hour in HH:MM (string) or None."""
+    if value is None:
+        return None
+    # Already HH:MM / HH:MM:SS string
+    if isinstance(value, str):
+        s = value.strip()
+        if not s or s.lower() in ("none", "null"):
+            return None
+        # Keep only HH:MM if seconds present
+        if len(s) >= 5 and s[2] == ":":
+            return s[:5]
+        return s
+    # datetime.time
+    try:
+        return value.strftime("%H:%M")
+    except Exception:
+        pass
+    # timedelta (best effort)
+    try:
+        total_seconds = int(value.total_seconds())
+        if total_seconds < 0:
+            return None
+        h = (total_seconds // 3600) % 24
+        m = (total_seconds % 3600) // 60
+        return f"{h:02d}:{m:02d}"
+    except Exception:
+        return str(value)
+
+
+
+def _normalize_requested_data(requested_data: dict) -> dict:
+    """Normalize JSON-requested_data so it can be used safely in queryset.update().
+
+    Note: requested_data may contain non-model keys (e.g., "__meta").
+    We *must* filter to model fields only before using queryset.update().
+    """
+    if not requested_data:
+        return requested_data
+
+    allowed = (
+        "attendance_date",
+        "attendance_clock_in_date",
+        "attendance_clock_out_date",
+        "attendance_clock_in",
+        "attendance_clock_out",
+        "attendance_worked_hour",
+        "minimum_hour",
+        "batch_attendance_id",
+        "shift_id",
+        "work_type_id",
+    )
+    cleaned = {k: requested_data.get(k) for k in allowed if k in requested_data}
+
+    for key in allowed:
+        if key in cleaned:
+            cleaned[key] = _normalize_none(cleaned[key])
+
+    return cleaned
+
+
+def _api_resolve_attendance_date_and_day(shift, dt_now: datetime):
+    """
+    Apply Horilla night-shift noon-to-noon rule to resolve attendance_date and day.
+
+    Strategy:
+    - Prefer resolving the day via EmployeeShiftSchedule for the employee's shift.
+    - Fall back to any EmployeeShiftDay row if no schedule row exists.
+
+    Returns:
+        attendance_date, day_obj, minimum_hour, start_time_sec, end_time_sec, now_hhmm, now_sec
+    """
+    date_today = dt_now.date()
+    now_hhmm = dt_now.strftime("%H:%M")
+    now_sec = strtime_seconds(now_hhmm)
+    mid_day_sec = strtime_seconds("12:00")
+
+    def _resolve_for_date(d: date):
+        weekday = d.strftime("%A").lower()
+
+        schedule = None
+        try:
+            schedule = cio.EmployeeShiftSchedule.objects.filter(
+                shift_id=shift, day__day=weekday
+            ).select_related("day").first()
+        except Exception:
+            schedule = None
+
+        if schedule:
+            day_obj = schedule.day
+            minimum_hour = schedule.minimum_working_hour or "00:00"
+            try:
+                start_time_sec = strtime_seconds(schedule.start_time.strftime("%H:%M")) if schedule.start_time else 0
+                end_time_sec = strtime_seconds(schedule.end_time.strftime("%H:%M")) if schedule.end_time else 0
+            except Exception:
+                start_time_sec, end_time_sec = 0, 0
+            return day_obj, minimum_hour, start_time_sec, end_time_sec
+
+        # Fallback (best-effort)
+        day_obj = EmployeeShiftDay.objects.filter(day=weekday).first()
+        if not day_obj:
+            return None, "00:00", 0, 0
+        minimum_hour, start_time_sec, end_time_sec = shift_schedule_today(day=day_obj, shift=shift)
+        return day_obj, minimum_hour, start_time_sec, end_time_sec
+
+    attendance_date = date_today
+    day, minimum_hour, start_time_sec, end_time_sec = _resolve_for_date(date_today)
+
+    is_night_shift = start_time_sec > end_time_sec and start_time_sec != end_time_sec
+
+    if is_night_shift and mid_day_sec > now_sec:
+        date_yesterday = date_today - timedelta(days=1)
+        attendance_date = date_yesterday
+        day, minimum_hour, start_time_sec, end_time_sec = _resolve_for_date(date_yesterday)
+
+    return attendance_date, day, minimum_hour, start_time_sec, end_time_sec, now_hhmm, now_sec
+
+def _ensure_single_session_activity(attendance: Attendance, prev_attendance_date: date | None = None) -> AttendanceActivity:
+    """Delegate single-session activity sync to the centralized null-safe helper."""
+
+    return sync_single_session_activity(
+        attendance,
+        prev_attendance_date=prev_attendance_date,
+    )
+
+
+def _mark_approved_request_channels(attendance: Attendance) -> Attendance:
+    """Persist approved/correction request channels on final attendance."""
+
+    return mark_approved_request_channels(attendance)
+
+
+def _apply_request_override_snapshot(attendance: Attendance, *, include_in: bool, include_out: bool):
+    capture_request_restore_snapshot(attendance, include_in=include_in, include_out=include_out)
+
+
+def _detach_request_overridden_raw_links(attendance: Attendance, *, include_in: bool, include_out: bool):
+    clear_raw_links_for_request_override(attendance, include_in=include_in, include_out=include_out)
+    fields = []
+    if include_in:
+        fields.extend([
+            "attendance_clock_in_punch",
+            "attendance_clock_in_image",
+            "attendance_clock_in_location",
+        ])
+    if include_out:
+        fields.extend([
+            "attendance_clock_out_punch",
+            "attendance_clock_out_image",
+            "attendance_clock_out_location",
+        ])
+    if fields:
+        attendance.save(update_fields=fields)
+
+
+def _restore_request_back_to_raw(attendance: Attendance, *, include_in: bool, include_out: bool, prev_attendance_date: date | None = None):
+    restore_raw_state_after_request(attendance, include_in=include_in, include_out=include_out)
+    attendance.attendance_validated = cio.attendance_validate(attendance)
+    attendance.save()
+    result = recompute_attendance(attendance.employee_id, attendance.attendance_date)
+    return result.attendance if result is not None else attendance
+
+
+def _rebuild_late_early(attendance: Attendance):
+    """
+    Recompute late come / early out records after an approval or time edit.
+    """
+    shift = attendance.shift_id
+    if not shift:
+        return
+
+    day = EmployeeShiftDay.objects.get(day=attendance.attendance_date.strftime("%A").lower())
+
+    AttendanceLateComeEarlyOut.objects.filter(
+        attendance_id=attendance, type__in=["late_come", "early_out"]
+    ).delete()
+
+    _, start_time_sec, end_time_sec = shift_schedule_today(day=day, shift=shift)
+
+    schedule = None
+    if hasattr(cio, "_get_schedule"):
+        try:
+            schedule = cio._get_schedule(shift, day)
+        except Exception:
+            schedule = None
+
+    if attendance.attendance_clock_in:
+        late_come(
+            attendance=attendance,
+            start_time=start_time_sec,
+            end_time=end_time_sec,
+            shift=shift,
+            schedule=schedule,
+        )
+
+    if attendance.attendance_clock_out:
+        early_out(
+            attendance=attendance,
+            start_time=start_time_sec,
+            end_time=end_time_sec,
+            shift=shift,
+            schedule=schedule,
+        )
+
+
+class ClockInAPIView(APIView):
+    """Mobile Clock-In (single-session + hybrid mode)."""
+
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
+
+    def post(self, request):
+        dt_now = _api_now(request)
+        image = request.FILES.get("image")
+        location = _parse_location_payload(request)
+        employee, work_info = employee_exists(request)
+        punch_log = None
+
+        def _reject(message, http_status):
+            if punch_log is not None:
+                update_punch_history(punch_log, accepted=False, reason=humanize_mobile_error(message, direction="in"))
+            return Response({"error": message}, status=http_status)
+
+        try:
+            punch_log = create_mobile_punch_history(
+                request=request,
+                employee=employee,
+                attendance_date=None,
+                punch_timestamp=dt_now,
+                direction="in",
+                image=image,
+                location=location,
+                reason=None,
             )
+        except ValidationError as error:
+            return Response({"error": _extract_error_message(error)}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not employee or work_info is None:
+            return _reject("Missing work information or employee details.", status.HTTP_400_BAD_REQUEST)
+
+        if _is_attendance_exempt_manager(employee):
+            update_punch_history(punch_log, attendance_date=dt_now.date())
+            return _reject("Attendance is disabled for reporting managers (approver-only).", status.HTTP_403_FORBIDDEN)
+
+        shift = work_info.shift_id
+        date_today = _api_today(request, dt_now)
+        attendance_date, day, minimum_hour, start_time_sec, end_time_sec, now_hhmm, _ = _api_resolve_attendance_date_and_day(shift, dt_now)
+        update_punch_history(punch_log, attendance_date=attendance_date)
+
+        in_mode, in_source, in_req = _resolve_effective_work_type(employee, attendance_date, "in")
+        if in_mode == AttendanceWorkMode.WFO:
+            return _reject("WFO attendance must be recorded via biometric device.", status.HTTP_403_FORBIDDEN)
+
+        if not _is_punch_allowed(in_mode, in_req, in_source):
+            msg = "Request is required." if not in_req else "Request is not approved yet."
+            if in_mode == AttendanceWorkMode.ON_DUTY and in_req:
+                msg = "On Duty request is not active."
+            if in_mode == AttendanceWorkMode.WFA and in_req and in_req.status != WorkModeRequestStatus.APPROVED:
+                msg = "WFA requires an approved request before clock-in."
+            return _reject(msg, status.HTTP_403_FORBIDDEN)
+
+        existing = Attendance.objects.filter(employee_id=employee, attendance_date=attendance_date).first()
+        if existing and getattr(existing, "attendance_clock_in", None):
+            update_punch_history(punch_log, attendance=existing)
+            return _reject("Already clocked-in", status.HTTP_400_BAD_REQUEST)
+
+        try:
+            rules = cio.get_shift_rules(
+                attendance_date,
+                shift,
+                day,
+                start_time_sec=start_time_sec,
+                end_time_sec=end_time_sec,
+            )
+        except Exception:
+            rules = {"cutoff_in_dt": None}
+
+        cutoff_in_dt = rules.get("cutoff_in_dt")
+        cutoff_in_dt = _coerce_datetime_like(cutoff_in_dt, dt_now) if cutoff_in_dt else None
+        check_in_window_start_dt = rules.get("check_in_window_start_dt")
+        check_in_window_end_dt = rules.get("check_in_window_end_dt") or cutoff_in_dt
+        check_in_window_start_dt = _coerce_datetime_like(check_in_window_start_dt, dt_now) if check_in_window_start_dt else None
+        check_in_window_end_dt = _coerce_datetime_like(check_in_window_end_dt, dt_now) if check_in_window_end_dt else None
+
+        try:
+            auto_reject_wfa_waiting_for_date(employee=employee, target_date=attendance_date, now_dt=dt_now, cutoff_in_dt=cutoff_in_dt, cutoff_out_dt=None)
+            in_mode, in_source, in_req = _resolve_effective_work_type(employee, attendance_date, "in")
         except Exception:
             pass
 
-    # Apply sorting
-    my_qs = _apply_sort(my_qs, sort_field=allowed_sort_my[sort_my], direction=dir_my)
+        if check_in_window_start_dt and dt_now < check_in_window_start_dt:
+            return _reject("Check-in window has not started yet.", status.HTTP_400_BAD_REQUEST)
+        if check_in_window_end_dt and dt_now > check_in_window_end_dt:
+            return _reject("Check-in cut-off has passed.", status.HTTP_400_BAD_REQUEST)
 
-    # Approvals:
-    # - Global approver/superuser => see all.
-    # - Reporting manager => see subordinates.
-    sub_ids = _subordinate_ids(request)
-    can_approve = bool(is_super or has_global_perm or bool(sub_ids))
+        if _requires_proof(in_mode):
+            if not image:
+                return _reject("Photo is required.", status.HTTP_400_BAD_REQUEST)
+            if not location:
+                return _reject("Location is required.", status.HTTP_400_BAD_REQUEST)
 
-    # Include pending ON_DUTY so web matches mobile approvals list.
-    try:
+        try:
+            clock_in_attendance_and_activity(
+                employee=employee,
+                date_today=date_today,
+                attendance_date=attendance_date,
+                day=day,
+                now_hhmm=now_hhmm,
+                shift=shift,
+                minimum_hour=minimum_hour,
+                start_time_sec=start_time_sec,
+                end_time_sec=end_time_sec,
+                in_datetime=dt_now,
+                clock_in_image=image,
+                clock_in_mode=in_mode,
+                clock_in_location=location,
+                work_mode_request=in_req,
+                is_presensi_only=(in_mode == AttendanceWorkMode.ON_DUTY),
+                clock_in_channel="mobile",
+                raw_punch_history=punch_log,
+            )
+        except ValidationError as error:
+            return _reject(_extract_error_message(error), status.HTTP_400_BAD_REQUEST)
+
+        out_mode, out_source, out_req = _resolve_effective_work_type(employee, attendance_date, "out")
+        attendance = Attendance.objects.filter(employee_id=employee, attendance_date=attendance_date).first()
+        update_punch_history(punch_log, attendance=attendance, attendance_date=attendance_date, work_mode=out_mode, related_work_mode_request=out_req, decision_source=getattr(attendance, "reconciliation_source", None) if attendance else None)
+        reconcile_attendance_punches(employee=employee, attendance_date=attendance_date)
+
+        return Response(
+            {
+                "message": "Clocked-In",
+                "attendance_date": str(attendance_date),
+                "in_mode": in_mode,
+                "out_mode": out_mode,
+                "work_mode_request_id": getattr(in_req, "id", None),
+                "in_work_type": in_mode,
+                "out_work_type": out_mode,
+                "in_work_type_source": in_source,
+                "out_work_type_source": out_source,
+                "in_work_type_request_id": getattr(in_req, "id", None),
+                "out_work_type_request_id": getattr(out_req, "id", None),
+                "in_work_type_request_status": getattr(in_req, "status", None),
+                "out_work_type_request_status": getattr(out_req, "status", None),
+                "in_attendance_status": getattr(attendance, "in_attendance_status", None) if attendance else None,
+                "out_attendance_status": getattr(attendance, "out_attendance_status", None) if attendance else None,
+                "in_attendance_reject_reason_code": getattr(attendance, "in_attendance_reject_reason_code", None) if attendance else None,
+                "out_attendance_reject_reason_code": getattr(attendance, "out_attendance_reject_reason_code", None) if attendance else None,
+                "in_related_work_type_request_id": getattr(attendance, "in_related_work_type_request_id", None) if attendance else None,
+                "out_related_work_type_request_id": getattr(attendance, "out_related_work_type_request_id", None) if attendance else None,
+                "minimum_working_hour": _format_minimum_hour(minimum_hour),
+                "server_now": dt_now.isoformat(),
+                "server_time": dt_now.strftime("%H:%M"),
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class ClockOutAPIView(APIView):
+    """Mobile Clock-Out (single-session + hybrid mode)."""
+
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
+
+    def post(self, request):
+        dt_now = _api_now(request)
+        image = request.FILES.get("image")
+        location = _parse_location_payload(request)
+        employee, work_info = employee_exists(request)
+        punch_log = None
+
+        def _reject(message, http_status, attendance=None, attendance_date=None):
+            if punch_log is not None:
+                update_punch_history(
+                    punch_log,
+                    accepted=False,
+                    reason=humanize_mobile_error(message, direction="out"),
+                    attendance=attendance,
+                    attendance_date=attendance_date,
+                )
+            return Response({"error": message}, status=http_status)
+
+        try:
+            punch_log = create_mobile_punch_history(
+                request=request,
+                employee=employee,
+                attendance_date=None,
+                punch_timestamp=dt_now,
+                direction="out",
+                image=image,
+                location=location,
+                reason=None,
+            )
+        except ValidationError as error:
+            return Response({"error": _extract_error_message(error)}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not employee or work_info is None:
+            return _reject("Missing work information or employee details.", status.HTTP_400_BAD_REQUEST)
+
+        shift = work_info.shift_id
+        attendance_date, day, minimum_hour, start_time_sec, end_time_sec, _, now_sec = _api_resolve_attendance_date_and_day(shift, dt_now)
+        update_punch_history(punch_log, attendance_date=attendance_date)
+        out_mode, out_source, out_req = _resolve_effective_work_type(employee, attendance_date, "out")
+
+        if out_mode == AttendanceWorkMode.WFO:
+            return _reject("WFO attendance must be recorded via biometric device.", status.HTTP_403_FORBIDDEN)
+        if not _is_punch_allowed(out_mode, out_req, out_source):
+            msg = "Request is required." if not out_req else "Request is not approved yet."
+            if out_mode == AttendanceWorkMode.ON_DUTY and out_req:
+                msg = "On Duty request is not active."
+            if out_mode == AttendanceWorkMode.WFA and out_req and out_req.status != WorkModeRequestStatus.APPROVED:
+                msg = "WFA requires an approved request before clock-out."
+            return _reject(msg, status.HTTP_403_FORBIDDEN)
+
+        try:
+            rules = cio.get_shift_rules(
+                attendance_date,
+                shift,
+                day,
+                start_time_sec=start_time_sec,
+                end_time_sec=end_time_sec,
+            )
+        except Exception:
+            rules = {"cutoff_in_dt": None, "cutoff_out_dt": None}
+
+        window_end_dt = rules.get("check_out_window_end_dt") or rules.get("cutoff_out_dt")
+        window_end_dt = _coerce_datetime_like(window_end_dt, dt_now) if window_end_dt else None
+
+        try:
+            _cutoff_in_tmp = rules.get("cutoff_in_dt")
+            _cutoff_in_tmp = _coerce_datetime_like(_cutoff_in_tmp, dt_now) if _cutoff_in_tmp else None
+            auto_reject_wfa_waiting_for_date(employee=employee, target_date=attendance_date, now_dt=dt_now, cutoff_in_dt=_cutoff_in_tmp, cutoff_out_dt=window_end_dt)
+            out_mode, out_source, out_req = _resolve_effective_work_type(employee, attendance_date, "out")
+        except Exception:
+            pass
+
+        if window_end_dt and dt_now > window_end_dt:
+            return _reject("Check-out window has ended. Please submit an attendance request.", status.HTTP_400_BAD_REQUEST, attendance_date=attendance_date)
+
+        if _requires_proof(out_mode):
+            if not image:
+                return _reject("Photo is required.", status.HTTP_400_BAD_REQUEST, attendance_date=attendance_date)
+            if not location:
+                return _reject("Location is required.", status.HTTP_400_BAD_REQUEST, attendance_date=attendance_date)
+
+        existing_att = Attendance.objects.filter(employee_id=employee, attendance_date=attendance_date).first()
+        existing_out_rejected = bool(existing_att and getattr(existing_att, "out_attendance_status", None) == "REJECTED")
+        allow_update = (out_mode in {AttendanceWorkMode.WFA, AttendanceWorkMode.ON_DUTY}) or existing_out_rejected
+
+        try:
+            attendance, missing_check_in = cio.clock_out_attendance_and_activity(
+                employee=employee,
+                attendance_date=attendance_date,
+                shift=shift,
+                minimum_hour=minimum_hour,
+                out_datetime=dt_now,
+                day=day,
+                clock_out_image=image,
+                clock_out_mode=out_mode,
+                clock_out_location=location,
+                work_mode_request=out_req,
+                is_presensi_only=(out_mode == AttendanceWorkMode.ON_DUTY),
+                allow_update_clock_out=allow_update,
+                raise_if_already_clocked_out=(not allow_update),
+                clock_out_channel="mobile",
+                raw_punch_history=punch_log,
+            )
+        except ValidationError as error:
+            return _reject(_extract_error_message(error), status.HTTP_400_BAD_REQUEST, attendance=existing_att, attendance_date=attendance_date)
+        except Exception as error:
+            logger.exception("clock_out_attendance_and_activity failed")
+            return _reject(str(error), status.HTTP_400_BAD_REQUEST, attendance=existing_att, attendance_date=attendance_date)
+
+        if (
+            attendance
+            and not getattr(attendance, "is_presensi_only", False)
+            and not missing_check_in
+            and getattr(attendance, "out_attendance_status", None) != "REJECTED"
+        ):
+            try:
+                attendance.late_come_early_out.filter(type="early_out").delete()
+            except Exception:
+                AttendanceLateComeEarlyOut.objects.filter(attendance_id=attendance, type="early_out").delete()
+            schedule = None
+            if hasattr(cio, "_get_schedule"):
+                try:
+                    schedule = cio._get_schedule(shift, day)
+                except Exception:
+                    schedule = None
+            is_night_shift = False
+            try:
+                is_night_shift = attendance.is_night_shift()
+            except Exception:
+                pass
+            date_today = dt_now.date()
+            next_date = attendance.attendance_date + timedelta(days=1)
+            if is_night_shift:
+                if (attendance.attendance_date == date_today) or (strtime_seconds("12:00") >= now_sec and date_today == next_date):
+                    early_out(attendance=attendance, start_time=start_time_sec, end_time=end_time_sec, shift=shift, schedule=schedule)
+            else:
+                if attendance.attendance_date == date_today:
+                    early_out(attendance=attendance, start_time=start_time_sec, end_time=end_time_sec, shift=shift, schedule=schedule)
+
+        in_mode, in_source, in_req = _resolve_effective_work_type(employee, attendance_date, "in")
+        update_punch_history(punch_log, attendance=attendance, attendance_date=attendance_date, work_mode=out_mode, related_work_mode_request=out_req, decision_source=getattr(attendance, "reconciliation_source", None) if attendance else None)
+        reconcile_attendance_punches(employee=employee, attendance_date=attendance_date)
+
+        return Response(
+            {
+                "message": "Clocked-Out",
+                "attendance_date": str(attendance_date),
+                "in_mode": in_mode,
+                "out_mode": out_mode,
+                "work_mode_request_id": getattr(out_req, "id", None),
+                "in_work_type": in_mode,
+                "out_work_type": out_mode,
+                "in_work_type_source": in_source,
+                "out_work_type_source": out_source,
+                "in_work_type_request_id": getattr(in_req, "id", None),
+                "out_work_type_request_id": getattr(out_req, "id", None),
+                "in_work_type_request_status": getattr(in_req, "status", None),
+                "out_work_type_request_status": getattr(out_req, "status", None),
+                "in_attendance_status": getattr(attendance, "in_attendance_status", None) if attendance else None,
+                "out_attendance_status": getattr(attendance, "out_attendance_status", None) if attendance else None,
+                "in_attendance_reject_reason_code": getattr(attendance, "in_attendance_reject_reason_code", None) if attendance else None,
+                "out_attendance_reject_reason_code": getattr(attendance, "out_attendance_reject_reason_code", None) if attendance else None,
+                "in_related_work_type_request_id": getattr(attendance, "in_related_work_type_request_id", None) if attendance else None,
+                "out_related_work_type_request_id": getattr(attendance, "out_related_work_type_request_id", None) if attendance else None,
+                "missing_check_in": bool(missing_check_in),
+                "updated": bool(allow_update),
+                "minimum_working_hour": _format_minimum_hour(minimum_hour),
+                "server_now": dt_now.isoformat(),
+                "server_time": dt_now.strftime("%H:%M"),
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class AttendanceView(APIView):
+    """
+    Handles CRUD operations for attendance records.
+
+    Methods:
+        get_queryset(request, type): Returns filtered attendance records.
+        get(request, pk=None, type=None): Retrieves a specific record or a list of records.
+        post(request): Creates a new attendance record.
+        put(request, pk): Updates an existing attendance record.
+        delete(request, pk): Deletes an attendance record and adjusts related overtime if needed.
+    """
+
+    permission_classes = [IsAuthenticated]
+    filterset_class = AttendanceFilters
+
+    def get_queryset(self, request=None, type=None):
+        # Handle schema generation for DRF-YASG
+        if getattr(self, "swagger_fake_view", False) or request is None:
+            return Attendance.objects.none()
+        if type == "ot":
+
+            condition = AttendanceValidationCondition.objects.first()
+            minot = strtime_seconds("00:30")
+            if condition is not None:
+                minot = strtime_seconds(condition.minimum_overtime_to_approve)
+                queryset = Attendance.objects.filter(
+                    overtime_second__gte=minot,
+                    attendance_validated=True,
+                )
+
+        elif type == "validated":
+            queryset = Attendance.objects.filter(attendance_validated=True)
+        elif type == "non-validated":
+            queryset = Attendance.objects.filter(attendance_validated=False)
+        else:
+            queryset = Attendance.objects.all()
+        user = request.user
+        # checking user level permissions
+        perm = "attendance.view_attendance"
+        queryset = permission_based_queryset(user, perm, queryset, user_obj=True)
+        return queryset
+
+    def get(self, request, pk=None, type=None):
+        # individual object workflow
+        if pk:
+            attendance = get_object_or_404(Attendance, pk=pk)
+            serializer = AttendanceSerializer(instance=attendance)
+            return Response(serializer.data, status=200)
+        # permission based querysete
+        attendances = self.get_queryset(request, type)
+        # filtering queryset
+        attendances_filter_queryset = self.filterset_class(
+            request.GET, queryset=attendances
+        ).qs
+        field_name = request.GET.get("groupby_field", None)
+        if field_name:
+            url = request.build_absolute_uri()
+            return groupby_queryset(
+                request, url, field_name, attendances_filter_queryset
+            )
+        # pagination workflow
+        paginater = PageNumberPagination()
+        page = paginater.paginate_queryset(attendances_filter_queryset, request)
+        serializer = AttendanceSerializer(page, many=True)
+        return paginater.get_paginated_response(serializer.data)
+
+    @manager_permission_required("attendance.add_attendance")
+    def post(self, request):
+        serializer = AttendanceSerializer(data=request.data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=200)
+        employee_id = request.data.get("employee_id")
+        attendance_date = request.data.get("attendance_date", date.today())
+        if Attendance.objects.filter(
+            employee_id=employee_id, attendance_date=attendance_date
+        ).exists():
+            return Response(
+                {
+                    "error": [
+                        "Attendance for this employee on the current date already exists."
+                    ]
+                },
+                status=400,
+            )
+        return Response(serializer.errors, status=400)
+
+    @method_decorator(permission_required("attendance.change_attendance"))
+    def put(self, request, pk):
+        try:
+            attendance = Attendance.objects.get(id=pk)
+        except Attendance.DoesNotExist:
+            return Response({"detail": "Attendance record not found."}, status=404)
+
+        serializer = AttendanceSerializer(instance=attendance, data=request.data)
+
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=200)
+
+        # Customize error message for unique constraint
+        serializer_errors = serializer.errors
+        if "non_field_errors" in serializer.errors:
+            unique_error_msg = (
+                "The fields employee_id, attendance_date must make a unique set."
+            )
+            if unique_error_msg in serializer.errors["non_field_errors"]:
+                serializer_errors = {
+                    "non_field_errors": [
+                        "The employee already has attendance on this date."
+                    ]
+                }
+        return Response(serializer_errors, status=400)
+
+    @method_decorator(permission_required("attendance.delete_attendance"))
+    def delete(self, request, pk):
+        attendance = Attendance.objects.get(id=pk)
+        month = attendance.attendance_date
+        month = month.strftime("%B").lower()
+        overtime = attendance.employee_id.employee_overtime.filter(month=month).last()
+        if overtime is not None:
+            if attendance.attendance_overtime_approve:
+                # Subtract overtime of this attendance
+                total_overtime = strtime_seconds(overtime.overtime)
+                attendance_overtime_seconds = strtime_seconds(
+                    attendance.attendance_overtime
+                )
+                if total_overtime > attendance_overtime_seconds:
+                    total_overtime = total_overtime - attendance_overtime_seconds
+                else:
+                    total_overtime = attendance_overtime_seconds - total_overtime
+                overtime.overtime = format_time(total_overtime)
+                overtime.save()
+            try:
+                attendance.delete()
+                return Response({"status", "deleted"}, status=200)
+            except Exception as error:
+                return Response({"error:", f"{error}"}, status=400)
+        else:
+            try:
+                attendance.delete()
+                return Response({"status", "deleted"}, status=200)
+            except Exception as error:
+                return Response({"error:", f"{error}"}, status=400)
+
+
+class ValidateAttendanceView(APIView):
+    """
+    Validates an attendance record and sends a notification to the employee.
+
+    Method:
+        put(request, pk): Marks the attendance as validated and notifies the employee.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def put(self, request, pk):
+        attendance = Attendance.objects.filter(id=pk).update(attendance_validated=True)
+        attendance = Attendance.objects.filter(id=pk).first()
+        try:
+            notify.send(
+                request.user.employee_get,
+                recipient=attendance.employee_id.employee_user_id,
+                verb=f"Your attendance for the date {attendance.attendance_date} is validated",
+                verb_ar=f"تم تحقيق حضورك في تاريخ {attendance.attendance_date}",
+                verb_de=f"Deine Anwesenheit für das Datum {attendance.attendance_date} ist bestätigt.",
+                verb_es=f"Se valida tu asistencia para la fecha {attendance.attendance_date}.",
+                verb_fr=f"Votre présence pour la date {attendance.attendance_date} est validée.",
+                redirect="/attendance/view-my-attendance",
+                icon="checkmark",
+                api_redirect=f"/api/attendance/attendance?employee_id{attendance.employee_id}",
+            )
+        except:
+            pass
+        return Response(status=200)
+
+
+class OvertimeApproveView(APIView):
+    """
+    Approves overtime for an attendance record and sends a notification to the employee.
+
+    Method:
+        put(request, pk): Marks the overtime as approved and notifies the employee.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def put(self, request, pk):
+        try:
+            attendance = Attendance.objects.filter(id=pk).update(
+                attendance_overtime_approve=True
+            )
+        except Exception as E:
+            return Response({"error": str(E)}, status=400)
+
+        attendance = Attendance.objects.filter(id=pk).first()
+        try:
+            notify.send(
+                request.user.employee_get,
+                recipient=attendance.employee_id.employee_user_id,
+                verb=f"Your {attendance.attendance_date}'s attendance overtime approved.",
+                verb_ar=f"تمت الموافقة على إضافة ساعات العمل الإضافية لتاريخ {attendance.attendance_date}.",
+                verb_de=f"Die Überstunden für den {attendance.attendance_date} wurden genehmigt.",
+                verb_es=f"Se ha aprobado el tiempo extra de asistencia para el {attendance.attendance_date}.",
+                verb_fr=f"Les heures supplémentaires pour la date {attendance.attendance_date} ont été approuvées.",
+                redirect="/attendance/attendance-overtime-view",
+                icon="checkmark",
+                api_redirect="/api/attendance/attendance-hour-account/",
+            )
+        except:
+            pass
+        return Response(status=200)
+
+
+class AttendanceRequestView(APIView):
+    """
+    Handles requests for creating, updating, and viewing attendance records.
+
+    Methods:
+        get(request, pk=None): Retrieves a specific attendance request by `pk` or a filtered list of requests.
+        post(request): Creates a new attendance request.
+        put(request, pk): Updates an existing attendance request.
+    """
+
+    serializer_class = AttendanceRequestSerializer
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
+    def get(self, request, pk=None):
+        # Detail
+        if pk:
+            attendance = get_object_or_404(Attendance, id=pk)
+            emp_id = getattr(attendance, "employee_id_id", None) or attendance.employee_id.id
+
+            # Allow: owner OR admin/supervisor with view/change attendance perms (similar to Work Type Request).
+            if not _can_act_on_employee(
+                request,
+                emp_id,
+                "attendance.view_attendance",
+                allow_owner=True,
+            ) and not _can_act_on_employee(
+                request,
+                emp_id,
+                "attendance.change_attendance",
+                allow_owner=True,
+            ):
+                return Response(
+                    {"error": "You do not have permission to view this request."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+            serializer = AttendanceRequestSerializer(
+                instance=attendance,
+                context={"request": request},
+            )
+            return Response(serializer.data, status=200)
+
+        # List
+        # 1) Approvals: pending requests that the current user can act on (admin/supervisor/manager)
+        approvals_qs = Attendance.objects.filter(is_validate_request=True)
+        approvals_qs = filtersubordinates(
+            request=request,
+            perm="attendance.change_attendance",
+            queryset=approvals_qs,
+        )
+
+        # Never include own requests in approvals list (cannot self-approve)
+        approvals_qs = approvals_qs.exclude(employee_id__employee_user_id=request.user)
+
+        # 2) My requests: history (pending/approved/rejected/canceled) but not all attendance rows
+        my_qs = Attendance.objects.filter(employee_id__employee_user_id=request.user).filter(
+            Q(is_validate_request=True)
+            | Q(is_validate_request_approved=True)
+            | Q(request_type__in=[
+                "create_request",
+                "update_request",
+                "revalidate_request",
+                "cancel_request",
+                "reject_request",
+            ])
+            | Q(request_description__isnull=False)
+            | Q(requested_data__isnull=False)
+        )
+
+        requests = (approvals_qs | my_qs).distinct()
+
+        request_filtered_queryset = AttendanceFilters(request.GET, requests).qs
+        field_name = request.GET.get("groupby_field", None)
+        if field_name:
+            url = request.build_absolute_uri()
+            return groupby_queryset(request, url, field_name, request_filtered_queryset)
+
+        pagenation = PageNumberPagination()
+        page = pagenation.paginate_queryset(request_filtered_queryset.order_by("-id"), request)
+        serializer = self.serializer_class(page, many=True, context={"request": request})
+        return pagenation.get_paginated_response(serializer.data)
+
+
+    def post(self, request):
+        from attendance.forms import NewRequestForm
+
+        # Self-only: force employee_id to the logged-in employee.
+        data = request.data.copy() if hasattr(request, 'data') else getattr(request, 'POST', {}).copy()
+        try:
+            data['employee_id'] = request.user.employee_get.id
+        except Exception:
+            pass
+
+        form = NewRequestForm(data=data, files=getattr(request, "FILES", None))
+        if form.is_valid():
+            work_type = form.cleaned_data.get("work_type_id")
+
+            if not WorkType.objects.filter(pk=getattr(work_type, "pk", None)).exists():
+                form.cleaned_data["work_type_id"] = None
+
+            if form.new_instance is not None:
+                form.new_instance.save()
+
+            # Attach proof files (e.g., CCTV screenshots) via AttendanceRequestComment
+            try:
+                from attendance.models import AttendanceRequestFile, AttendanceRequestComment
+                from attendance.services.attachment_validation import validate_uploaded_files
+
+                attendance_obj = form.new_instance
+
+                # If this was an update_request (attendance already exists), attach to the existing record.
+                if attendance_obj is None:
+                    try:
+                        emp = data.get("employee_id") if hasattr(request, "data") else None
+                        if not emp:
+                            try:
+                                emp = request.user.employee_get.id
+                            except Exception:
+                                emp = None
+                        att_date = data.get("attendance_date") if hasattr(request, "data") else None
+                        if not att_date:
+                            from datetime import date as _date
+                            att_date = _date.today()
+                        attendance_obj = Attendance.objects.filter(employee_id=emp, attendance_date=att_date).first()
+                    except Exception:
+                        attendance_obj = None
+
+                uploaded = []
+                if hasattr(request, "FILES"):
+                    uploaded = request.FILES.getlist("files") or request.FILES.getlist("files[]") or []
+                    if not uploaded:
+                        f_single = request.FILES.get("file")
+                        if f_single:
+                            uploaded = [f_single]
+
+                if attendance_obj and uploaded:
+                    validate_uploaded_files(uploaded)
+                    try:
+                        actor_emp = request.user.employee_get
+                    except Exception:
+                        actor_emp = getattr(attendance_obj, "employee_id", None)
+
+                    comment_text = (data.get("request_description") if hasattr(request, "data") else None) or (data.get("reason") if hasattr(request, "data") else None) or None
+                    c = AttendanceRequestComment.objects.create(
+                        request_id=attendance_obj,
+                        employee_id=actor_emp,
+                        comment=(str(comment_text)[:255] if comment_text else None),
+                    )
+                    for up in uploaded:
+                        arf = AttendanceRequestFile.objects.create(file=up)
+                        c.files.add(arf)
+            except ValidationError as ve:
+                return Response({"files": getattr(ve, "messages", [str(ve)])}, status=400)
+            except Exception:
+                pass
+
+            # IMPORTANT: do NOT return form.data because for multipart uploads it may contain
+            # UploadedFile objects / bytes which are not JSON serializable.
+            attendance_obj = getattr(form, "new_instance", None)
+            if attendance_obj is None:
+                # Fallback for update_request-style forms
+                emp = data.get("employee_id") if hasattr(request, "data") else None
+                if not emp:
+                    try:
+                        emp = request.user.employee_get.id
+                    except Exception:
+                        emp = None
+                att_date = data.get("attendance_date") if hasattr(request, "data") else None
+                attendance_obj = Attendance.objects.filter(employee_id=emp, attendance_date=att_date).first()
+            serializer = AttendanceRequestSerializer(
+                instance=attendance_obj,
+                context={"request": request},
+            )
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        employee_id = data.get("employee_id")
+        attendance_date = data.get("attendance_date", date.today())
+        if Attendance.objects.filter(
+            employee_id=employee_id, attendance_date=attendance_date
+        ).exists():
+            return Response(
+                {error: list(message) for error, message in form.errors.items()},
+                status=400,
+            )
+        return Response(form.errors, status=400)
+
+    def put(self, request, pk):
+        from attendance.forms import AttendanceRequestForm
+
+        attendance = Attendance.objects.get(id=pk)
+        form = AttendanceRequestForm(
+            data=request.data,
+            files=getattr(request, "FILES", None),
+            instance=attendance,
+        )
+        if form.is_valid():
+            attendance = Attendance.objects.get(id=form.instance.pk)
+            instance = form.save()
+            instance.employee_id = attendance.employee_id
+            instance.id = attendance.id
+            work_type = form.cleaned_data.get("work_type_id")
+
+            if not WorkType.objects.filter(pk=getattr(work_type, "pk", None)).exists():
+                form.cleaned_data["work_type_id"] = None
+            if attendance.request_type != "create_request":
+                # Preserve approved-scope meta and validate against already-approved scopes.
+                try:
+                    from attendance.services.attendance_correction_scope_rules import (
+                        infer_scope_from_values,
+                        get_approved_scopes,
+                        build_requested_data_for_save,
+                        validate_new_request_scope,
+                    )
+
+                    serialized = instance.serialize()
+                    incoming_scope = infer_scope_from_values(
+                        serialized.get("attendance_clock_in"),
+                        serialized.get("attendance_clock_out"),
+                    )
+                    approved_scopes = get_approved_scopes(getattr(attendance, "requested_data", None))
+
+                    # Editing an existing request is allowed; we only block overlaps with approved scopes.
+                    validate_new_request_scope(
+                        existing_waiting_scope="",
+                        approved_scopes=approved_scopes,
+                        incoming_scope=incoming_scope,
+                    )
+
+                    wrapped = build_requested_data_for_save(
+                        new_payload=serialized,
+                        existing_requested_data=getattr(attendance, "requested_data", None),
+                        incoming_scope=incoming_scope,
+                        keep_existing_fields=True,
+                    )
+                    attendance.requested_data = json.dumps(wrapped)
+                except ValidationError as ve:
+                    return Response(ve.message_dict, status=400)
+                except Exception:
+                    attendance.requested_data = json.dumps(instance.serialize())
+                attendance.request_description = instance.request_description
+                # set the user level validation here
+                attendance.is_validate_request = True
+                attendance.save()
+            else:
+                instance.is_validate_request_approved = False
+                instance.is_validate_request = True
+                instance.save()
+            # Attach proof files (optional) via AttendanceRequestComment
+            try:
+                from attendance.models import AttendanceRequestFile, AttendanceRequestComment
+                from attendance.services.attachment_validation import validate_uploaded_files
+                uploaded = []
+                if hasattr(request, "FILES"):
+                    uploaded = request.FILES.getlist("files") or request.FILES.getlist("files[]") or []
+                    if not uploaded:
+                        f_single = request.FILES.get("file")
+                        if f_single:
+                            uploaded = [f_single]
+                if uploaded:
+                    validate_uploaded_files(uploaded)
+                    try:
+                        actor_emp = request.user.employee_get
+                    except Exception:
+                        actor_emp = attendance.employee_id
+                    comment_text = (request.data.get("request_description") if hasattr(request, "data") else None) or (request.data.get("reason") if hasattr(request, "data") else None)
+                    c = AttendanceRequestComment.objects.create(
+                        request_id=attendance,
+                        employee_id=actor_emp,
+                        comment=(str(comment_text)[:255] if comment_text else None),
+                    )
+                    for up in uploaded:
+                        arf = AttendanceRequestFile.objects.create(file=up)
+                        c.files.add(arf)
+            except ValidationError as ve:
+                return Response({"files": getattr(ve, "messages", [str(ve)])}, status=400)
+            except Exception:
+                pass
+
+            # IMPORTANT: do NOT return form.data because for multipart uploads it may contain
+            # UploadedFile objects (bytes) which are not JSON serializable.
+            serializer = AttendanceRequestSerializer(
+                instance=attendance,
+                context={"request": request},
+            )
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        return Response(form.errors, status=400)
+
+
+class AttendanceRequestApproveView(APIView):
+    """
+    Approves and updates an attendance request.
+
+    Single-session behavior:
+    - Apply requested_data to Attendance
+    - Ensure exactly one AttendanceActivity per (employee, attendance_date)
+    - Rebuild late/early markers after approval
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    @manager_permission_required("attendance.change_attendance")
+    @transaction.atomic
+    def put(self, request, pk):
+        try:
+            attendance = Attendance.objects.select_for_update().get(id=pk)
+
+            # Disallow approving your own request (even if admin)
+            try:
+                if attendance.employee_id.employee_user_id == request.user:
+                    return Response(
+                        {"error": "You cannot approve your own request."},
+                        status=status.HTTP_403_FORBIDDEN,
+                    )
+            except Exception:
+                pass
+
+
+            # Admin (permission) OR supervisor in reporting chain can approve.
+            if not _can_act_on_employee(
+                request,
+                getattr(attendance, "employee_id_id", None) or attendance.employee_id.id,
+                "attendance.change_attendance",
+                allow_owner=False,
+            ):
+                return Response(
+                    {"error": "You do not have permission to perform this action."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+
+            if not getattr(attendance, "is_validate_request", False):
+                return Response({"error": "Request is not waiting for approval."}, status=400)
+
+            prev_attendance_date = attendance.attendance_date
+            old_status = attendance.request_type or "waiting_request"
+            wants_in, wants_out = get_requested_sessions(attendance)
+            _apply_request_override_snapshot(attendance, include_in=wants_in, include_out=wants_out)
+
+            is_valid_request, validation_error = validate_requested_data_with_windows(attendance)
+            if not is_valid_request:
+                return Response(
+                    {"error": validation_error or "Requested attendance is outside the allowed attendance window."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            attendance.attendance_validated = True
+            attendance.is_validate_request_approved = True
+            attendance.is_validate_request = False
+            attendance.request_description = None
+            try:
+                attendance.action_by = request.user.employee_get
+            except Exception:
+                attendance.action_by = None
+            attendance.action_type = AttendanceRequestActionType.APPROVED
+            attendance.action_at = dj_timezone.now()
+            attendance.save()
+            _log_attendance_request_status_change(
+                attendance,
+                request,
+                action_type=AttendanceRequestActionType.APPROVED,
+                old_status=old_status,
+                new_status="approved",
+            )
+
+            if attendance.requested_data is not None:
+                # Record approved scope in requested_data.__meta so future requests can enforce
+                # one-approval-per-scope per day.
+                try:
+                    from attendance.services.attendance_correction_scope_rules import (
+                        record_approved_scope_on_requested_data,
+                    )
+                    new_req_data = record_approved_scope_on_requested_data(attendance.requested_data)
+                    if new_req_data and new_req_data != attendance.requested_data:
+                        attendance.requested_data = new_req_data
+                        Attendance.objects.filter(id=pk).update(requested_data=new_req_data)
+                except Exception:
+                    pass
+
+                requested_data = _normalize_requested_data(json.loads(attendance.requested_data))
+                Attendance.objects.filter(id=pk).update(**requested_data)
+                attendance.refresh_from_db()
+                attendance.action_by = attendance.action_by or getattr(request.user, "employee_get", None)
+                attendance.action_type = attendance.action_type or AttendanceRequestActionType.APPROVED
+                attendance.action_at = attendance.action_at or dj_timezone.now()
+                attendance.save()
+
+            _mark_approved_request_channels(attendance)
+            _detach_request_overridden_raw_links(attendance, include_in=wants_in, include_out=wants_out)
+            attendance.refresh_from_db()
+            result = recompute_attendance(attendance.employee_id, attendance.attendance_date)
+            if result is not None:
+                attendance = result.attendance
+
+        except Exception as E:
+            return Response({"error": str(E)}, status=400)
+        return Response(AttendanceRequestSerializer(attendance, context={"request": request}).data, status=200)
+
+
+
+class AttendanceRequestRevokeView(APIView):
+    """Revoke an already approved attendance request and recompute back to raw state."""
+
+    permission_classes = [IsAuthenticated]
+
+    @manager_permission_required("attendance.change_attendance")
+    @transaction.atomic
+    def put(self, request, pk):
+        try:
+            attendance = Attendance.objects.select_for_update().get(id=pk, is_validate_request_approved=True)
+
+            try:
+                if attendance.employee_id.employee_user_id == request.user:
+                    return Response(
+                        {"error": "You cannot revoke your own approved request."},
+                        status=status.HTTP_403_FORBIDDEN,
+                    )
+            except Exception:
+                pass
+
+            if not _can_act_on_employee(
+                request,
+                getattr(attendance, "employee_id_id", None) or attendance.employee_id.id,
+                "attendance.change_attendance",
+                allow_owner=False,
+            ):
+                return Response(
+                    {"error": "You do not have permission to perform this action."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+            prev_attendance_date = attendance.attendance_date
+            old_status = attendance.request_type or "approved"
+            wants_in, wants_out = get_requested_sessions(attendance)
+            _restore_request_back_to_raw(attendance, include_in=wants_in, include_out=wants_out, prev_attendance_date=prev_attendance_date)
+            attendance.refresh_from_db()
+            attendance.is_validate_request_approved = False
+            attendance.is_validate_request = False
+            attendance.request_type = "revoke_request"
+            attendance.action_type = AttendanceRequestActionType.REVOKED
+            attendance.action_at = dj_timezone.now()
+            attendance.action_by = _request_actor_employee(request)
+            attendance.attendance_validated = cio.attendance_validate(attendance)
+            attendance.save()
+            _log_attendance_request_status_change(
+                attendance,
+                request,
+                action_type=AttendanceRequestActionType.REVOKED,
+                old_status=old_status,
+                new_status="revoke_request",
+            )
+
+            result = recompute_attendance(attendance.employee_id, attendance.attendance_date)
+            if result is not None:
+                attendance = result.attendance
+        except Attendance.DoesNotExist:
+            return Response({"error": "Attendance request not found."}, status=404)
+        except Exception as E:
+            return Response({"error": str(E)}, status=400)
+
+        return Response(AttendanceRequestSerializer(attendance, context={"request": request}).data, status=200)
+
+
+
+class AttendanceRequestCancelView(APIView):
+    """Cancels an attendance request (owner action).
+
+    Behavior aligned with Work Type Request:
+    - Request stays in history list (status=CANCEL)
+    - Only pending requests can be canceled
+    - For create_request, remove derived daily artifacts, but keep the Attendance row for history.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    @transaction.atomic
+    def put(self, request, pk):
+        try:
+            attendance = Attendance.objects.select_for_update().get(id=pk)
+
+            # Cancel is an owner-only action (align with Work Type Request)
+
+
+            try:
+
+
+                if attendance.employee_id.employee_user_id != request.user:
+
+
+                    return Response(
+
+
+                        {"error": "Only the requester can cancel this request."},
+
+
+                        status=status.HTTP_403_FORBIDDEN,
+
+
+                    )
+
+
+            except Exception:
+
+
+                return Response(
+
+
+                    {"error": "You do not have permission to perform this action."},
+
+
+                    status=status.HTTP_403_FORBIDDEN,
+
+
+                )
+
+            is_pending_request = bool(getattr(attendance, "is_validate_request", False))
+            is_approved_request = bool(getattr(attendance, "is_validate_request_approved", False))
+            if not (is_pending_request or is_approved_request):
+                return Response({"error": "Only waiting or approved requests can be canceled."}, status=400)
+
+            req_type = attendance.request_type
+            old_status = attendance.request_type or ("approved" if is_approved_request else "waiting_request")
+            req_date = attendance.attendance_date
+            req_employee = attendance.employee_id
+            wants_in, wants_out = get_requested_sessions(attendance)
+
+            if is_approved_request:
+                _restore_request_back_to_raw(attendance, include_in=wants_in, include_out=wants_out, prev_attendance_date=req_date)
+                attendance.refresh_from_db()
+
+            attendance.is_validate_request_approved = False
+            attendance.is_validate_request = False
+            if is_pending_request:
+                # Keep request_description for history, but discard pending payload
+                attendance.requested_data = None
+            attendance.request_type = "cancel_request"
+            try:
+                attendance.action_by = request.user.employee_get
+            except Exception:
+                attendance.action_by = None
+            attendance.action_type = AttendanceRequestActionType.CANCELED
+            attendance.action_at = dj_timezone.now()
+            attendance.save()
+
+            # For create_request, remove created daily artifacts so it won't affect reporting.
+            if req_type == "create_request":
+                AttendanceActivity.objects.filter(
+                    employee_id=req_employee,
+                    attendance_date=req_date,
+                ).delete()
+                AttendanceLateComeEarlyOut.objects.filter(attendance_id=attendance).delete()
+
+            if is_approved_request:
+                result = recompute_attendance(req_employee, req_date)
+                if result is not None:
+                    attendance = result.attendance
+
+        except Exception as E:
+            return Response({"error": str(E)}, status=400)
+
+        return Response(AttendanceRequestSerializer(attendance, context={"request": request}).data, status=200)
+
+
+class AttendanceRequestRejectView(APIView):
+    """Reject an attendance request (admin/supervisor action).
+
+    Behavior aligned with Work Type Request:
+    - Owner cannot reject own request (use cancel)
+    - Request stays in history list (status=REJECTED)
+    - Only pending requests can be rejected
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    @transaction.atomic
+    def put(self, request, pk):
+        try:
+            attendance = Attendance.objects.select_for_update().get(id=pk)
+            employee_id = getattr(attendance, "employee_id_id", None) or attendance.employee_id.id
+
+            # Owner cannot reject their own request (use cancel), even if admin.
+            try:
+                if attendance.employee_id.employee_user_id == request.user:
+                    return Response(
+                        {"error": "Use cancel for your own request."},
+                        status=status.HTTP_403_FORBIDDEN,
+                    )
+            except Exception:
+                pass
+
+            if not _can_act_on_employee(
+                request,
+                employee_id,
+                "attendance.change_attendance",
+                allow_owner=False,
+            ):
+                return Response(
+                    {"error": "You do not have permission to perform this action."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+            if not getattr(attendance, "is_validate_request", False):
+                return Response({"error": "Request is not waiting for approval."}, status=400)
+
+            # Optional rejection comment (saved as AttendanceRequestComment)
+            comment_text = (
+                (request.data.get("comment") if hasattr(request, "data") else None)
+                or (request.data.get("reason") if hasattr(request, "data") else None)
+                or None
+            )
+            if comment_text:
+                try:
+                    from attendance.models import AttendanceRequestComment
+
+                    AttendanceRequestComment.objects.create(
+                        request_id=attendance,
+                        employee_id=request.user.employee_get,
+                        comment=str(comment_text)[:255],
+                    )
+                except Exception:
+                    pass
+
+            req_type = attendance.request_type
+            old_status = attendance.request_type or "waiting_request"
+            req_date = attendance.attendance_date
+            req_employee = attendance.employee_id
+
+            attendance.is_validate_request_approved = False
+            attendance.is_validate_request = False
+            # Keep request_description for history, but discard pending payload
+            attendance.requested_data = None
+            attendance.request_type = "reject_request"
+            try:
+                attendance.action_by = request.user.employee_get
+            except Exception:
+                attendance.action_by = None
+            attendance.action_type = AttendanceRequestActionType.REJECTED
+            attendance.action_at = dj_timezone.now()
+            attendance.save()
+            _log_attendance_request_status_change(
+                attendance,
+                request,
+                action_type=AttendanceRequestActionType.REJECTED,
+                old_status=old_status,
+                new_status="reject_request",
+                remark=comment_text,
+            )
+
+            if req_type == "create_request":
+                AttendanceActivity.objects.filter(
+                    employee_id=req_employee,
+                    attendance_date=req_date,
+                ).delete()
+                AttendanceLateComeEarlyOut.objects.filter(attendance_id=attendance).delete()
+
+        except Exception as E:
+            return Response({"error": str(E)}, status=400)
+
+        return Response(AttendanceRequestSerializer(attendance, context={"request": request}).data, status=200)
+
+class WorkModeRequestView(APIView):
+    """CRUD for WorkModeRequest (WFA / ON_DUTY).
+
+    Notes:
+    - Endpoint aliases expose this as work-type-request.
+    - DB model stays WorkModeRequest.
+    - Status rules (FINAL spec):
+        * WFA: WAITING_FOR_APPROVAL
+        * ON_DUTY: PENDING if no attachment; WAITING_FOR_APPROVAL if attachment exists
+    - Edit (PATCH/PUT) is restricted: only add attachments and/or update note (reason).
+    """
+
+    permission_classes = [IsAuthenticated]
+    serializer_class = WorkModeRequestSerializer
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
+
+    def get(self, request, pk=None):
+        if pk:
+            obj = get_object_or_404(WorkModeRequest, pk=pk)
+            emp_id = getattr(obj, "employee_id_id", None) or obj.employee_id.id
+            if not _can_act_on_employee(
+                request,
+                emp_id,
+                "attendance.view_workmoderequest",
+                allow_owner=True,
+            ) and not _can_act_on_employee(
+                request,
+                emp_id,
+                "attendance.change_workmoderequest",
+                allow_owner=True,
+            ):
+                return Response(
+                    {"error": "You do not have permission to view this request."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+            return Response(self.serializer_class(obj).data, status=200)
+
+        qs = WorkModeRequest.objects.all()
+        qs = filtersubordinates(request, qs, perm="attendance.view_workmoderequest")
+
+        # mine=1 => only my requests
+        if request.GET.get("mine") in ("1", "true", "True"):
+            try:
+                qs = qs.filter(employee_id=request.user.employee_get)
+            except Exception:
+                qs = qs.none()
+
+        # Filters
+        status_q = request.GET.get("status")
+        if status_q:
+            qs = qs.filter(status=status_q)
+
+        mode_q = request.GET.get("mode") or request.GET.get("work_type")
+        if mode_q:
+            qs = qs.filter(mode=mode_q)
+
+        scope_q = request.GET.get("scope")
+        if scope_q:
+            qs = qs.filter(scope=scope_q)
+
+        pagenation = PageNumberPagination()
+        page = pagenation.paginate_queryset(qs.order_by("-id"), request)
+        serializer = self.serializer_class(page, many=True)
+        return pagenation.get_paginated_response(serializer.data)
+
+    def _collect_uploaded_files(self, request):
+        uploaded = []
+        if hasattr(request, "FILES"):
+            uploaded = request.FILES.getlist("files") or request.FILES.getlist("files[]") or []
+            if not uploaded:
+                f_single = request.FILES.get("file")
+                if f_single:
+                    uploaded = [f_single]
+        validate_uploaded_files(uploaded)
+        return uploaded
+
+    def _attach_files(self, obj: WorkModeRequest, uploaded_files):
+        from attendance.models import AttendanceRequestFile
+
+        for up in uploaded_files:
+            arf = AttendanceRequestFile.objects.create(file=up)
+            obj.files.add(arf)
+
+    @transaction.atomic
+    def post(self, request):
+        data = request.data.copy() if hasattr(request.data, "copy") else dict(request.data)
+
+        # Backward compatible aliases
+        if not data.get("mode") and data.get("work_mode"):
+            data["mode"] = data.get("work_mode")
+        if not data.get("mode") and data.get("work_type"):
+            data["mode"] = data.get("work_type")
+        if not data.get("reason") and data.get("description"):
+            data["reason"] = data.get("description")
+        if not data.get("start_date") and data.get("date"):
+            data["start_date"] = data.get("date")
+        if not data.get("end_date") and data.get("start_date"):
+            data["end_date"] = data.get("start_date")
+
+        # Default employee_id to current user
+        try:
+            my_emp = request.user.employee_get
+        except Exception:
+            my_emp = None
+        if not data.get("employee_id") and my_emp:
+            data["employee_id"] = my_emp.id
+
+        # Requests are strictly self-service only.
+        if my_emp and str(data.get("employee_id")) != str(my_emp.id):
+            return Response(
+                {"error": "Requests can only be created for yourself."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        # Disallow WFO
+        if str(data.get("mode")) == AttendanceWorkMode.WFO:
+            return Response(
+                {"error": "WFO should not be requested. Use WFA or ON DUTY."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # IMPORTANT: For multipart/form-data, DRF includes uploaded files inside request.data.
+        # Our serializer expects `files` to be a list of PKs (M2M), not raw uploaded files.
+        # Attachments are handled separately from request.FILES (see _collect_uploaded_files).
+        for _k in ("files", "file", "files[]"):
+            try:
+                if hasattr(data, "pop"):
+                    data.pop(_k, None)
+            except Exception:
+                pass
+
+
+        serializer = self.serializer_class(data=data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=400)
+
+        # Create with provisional status; finalized after file attach
+        obj: WorkModeRequest = serializer.save(status=WorkModeRequestStatus.PENDING)
+
+        uploaded = self._collect_uploaded_files(request)
+        if uploaded:
+            try:
+                self._attach_files(obj, uploaded)
+            except Exception as e:
+                transaction.set_rollback(True)
+                return Response(
+                    {"error": "Attachment upload failed.", "detail": str(e)},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
+
+        # FINAL status rules
+        has_files = has_attachments(obj)
+        update_fields = []
+        if obj.mode == AttendanceWorkMode.WFA:
+            obj.status = WorkModeRequestStatus.WAITING_FOR_APPROVAL
+            update_fields.append("status")
+        elif obj.mode == AttendanceWorkMode.ON_DUTY:
+            obj.status = (
+                WorkModeRequestStatus.WAITING_FOR_APPROVAL
+                if has_files
+                else WorkModeRequestStatus.PENDING
+            )
+            _set_on_duty_document_state(obj, has_files=has_files, approved=False)
+            update_fields.extend(["status", "document_status"])
+        if update_fields:
+            obj.save(update_fields=update_fields)
+
+        return Response(self.serializer_class(obj, context={"request": request}).data, status=200)
+
+    @transaction.atomic
+    def patch(self, request, pk):
+        return self._patch_or_put(request, pk)
+
+    @transaction.atomic
+    def put(self, request, pk):
+        # Backward compatibility: treat PUT as PATCH
+        return self._patch_or_put(request, pk)
+
+    def _patch_or_put(self, request, pk):
+        obj = get_object_or_404(WorkModeRequest.objects.select_for_update(), pk=pk)
+
+        is_admin = _is_admin_with_perm(request, "attendance.change_workmoderequest")
+        is_owner = False
+        try:
+            is_owner = obj.employee_id.employee_user_id == request.user
+        except Exception:
+            is_owner = False
+
+        if not (is_admin or is_owner):
+            return Response(
+                {"error": "You do not have permission to update this request."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        allowed_statuses = {
+            WorkModeRequestStatus.PENDING,
+            WorkModeRequestStatus.WAITING_FOR_APPROVAL,
+        }
+        if obj.mode == AttendanceWorkMode.ON_DUTY:
+            allowed_statuses.add(WorkModeRequestStatus.APPROVED)
+        if obj.status not in allowed_statuses:
+            return Response({"error": "This request cannot be updated in its current status."}, status=400)
+        if obj.mode == AttendanceWorkMode.ON_DUTY and obj.document_status == WorkModeRequestDocumentStatus.VERIFIED:
+            return Response({"error": "Verified On Duty documents are locked. Reopen verification first."}, status=400)
+
+        # Spec: edit only for adding attachment + note; do not allow changing type/scope/dates
+        data = request.data.copy() if hasattr(request.data, "copy") else dict(request.data)
+        forbidden = {"mode", "work_type", "work_mode", "scope", "start_date", "end_date", "employee_id"}
+        if any(k in data for k in forbidden):
+            return Response(
+                {"error": "You can only add attachments and/or update note. work_type/scope/dates cannot be changed."},
+                status=400,
+            )
+
+        # Update reason/note
+        note = data.get("reason") or data.get("note") or data.get("description")
+        if note is not None:
+            obj.reason = str(note)
+            obj.save(update_fields=["reason"])
+
+        # Attach / replace documents
+        uploaded = self._collect_uploaded_files(request)
+        if uploaded:
+            try:
+                if obj.mode == AttendanceWorkMode.ON_DUTY:
+                    obj.files.clear()
+                self._attach_files(obj, uploaded)
+            except Exception as e:
+                try:
+                    transaction.set_rollback(True)
+                except Exception:
+                    pass
+                return Response(
+                    {"error": "Attachment upload failed.", "detail": str(e)},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
+
+        has_files = has_attachments(obj)
+        update_fields = []
+        if obj.mode == AttendanceWorkMode.ON_DUTY:
+            _set_on_duty_document_state(obj, has_files=has_files, approved=(obj.status == WorkModeRequestStatus.APPROVED))
+            update_fields.append("document_status")
+            if obj.status == WorkModeRequestStatus.PENDING and has_files:
+                obj.status = WorkModeRequestStatus.WAITING_FOR_APPROVAL
+                update_fields.append("status")
+        if update_fields:
+            obj.save(update_fields=update_fields)
+
+        return Response(self.serializer_class(obj, context={"request": request}).data, status=200)
+
+
+class WorkModeRequestApprovalsView(APIView):
+    """List requests for managers/admins.
+
+    Includes:
+    - WAITING_FOR_APPROVAL (approvable)
+    - ON_DUTY PENDING (not yet approvable, usually waiting for letter upload)
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        # Ensure stale WFA WAITING are auto-rejected for *today* to keep approvals clean.
+        now_dt = _api_now(request)
+        today = now_dt.date()
+        try:
+            # auto reject for current user and subordinates (lightweight per employee)
+            emp_ids = []
+            if _is_admin_with_perm(request, "attendance.change_workmoderequest"):
+                emp_ids = list(WorkModeRequest.objects.filter(
+                    mode=AttendanceWorkMode.WFA,
+                    status=WorkModeRequestStatus.WAITING_FOR_APPROVAL,
+                    start_date__lte=today,
+                    end_date__gte=today,
+                ).values_list("employee_id", flat=True).distinct())
+            else:
+                emp_ids = get_subordinate_employee_ids(request, nested=True) or []
+
+            from employee.models import Employee
+            for eid in emp_ids:
+                emp = Employee.objects.filter(id=eid).first()
+                if not emp:
+                    continue
+                shift = None
+                try:
+                    shift = emp.employee_work_info.shift_id
+                except Exception:
+                    shift = None
+                if not shift:
+                    continue
+                day = EmployeeShiftDay.objects.filter(day=today.strftime("%A").lower()).first()
+                if not day:
+                    continue
+                try:
+                    _min_hour, start_sec, end_sec = shift_schedule_today(day=day, shift=shift)
+                except Exception:
+                    start_sec, end_sec = 0, 0
+
+                rules = {}
+                try:
+                    rules = cio.get_shift_rules(today, shift, day, start_time_sec=start_sec, end_time_sec=end_sec)
+                except Exception:
+                    rules = {"cutoff_in_dt": None, "cutoff_out_dt": None}
+
+                auto_reject_wfa_waiting_for_date(
+                    employee=emp,
+                    target_date=today,
+                    now_dt=now_dt,
+                    cutoff_in_dt=rules.get("cutoff_in_dt"),
+                    cutoff_out_dt=rules.get("cutoff_out_dt"),
+                )
+        except Exception:
+            pass
+
         from django.db.models import Q
-
-        approvals_qs = WorkModeRequest.objects.filter(
+        qs = WorkModeRequest.objects.filter(
             Q(status=WorkModeRequestStatus.WAITING_FOR_APPROVAL)
             | Q(status=WorkModeRequestStatus.PENDING, mode=AttendanceWorkMode.ON_DUTY)
             | Q(
@@ -290,495 +2133,1778 @@ def work_type_request_view(request):
                     WorkModeRequestDocumentStatus.SUBMITTED,
                     WorkModeRequestDocumentStatus.PENDING_VERIFICATION,
                     WorkModeRequestDocumentStatus.REJECTED,
-                    WorkModeRequestDocumentStatus.VERIFIED,
                 ],
             )
         )
-    except Exception:
-        approvals_qs = WorkModeRequest.objects.filter(status=WorkModeRequestStatus.WAITING_FOR_APPROVAL)
-    if not (is_super or has_global_perm):
-        approvals_qs = filtersubordinates(
-            request=request,
-            queryset=approvals_qs,
-            perm="attendance.change_workmoderequest",
-            field="employee_id",
+
+        # Never show own requests in approvals list (admin can still view them in My Requests).
+        qs = qs.exclude(employee_id__employee_user_id=request.user)
+
+        if _is_admin_with_perm(request, "attendance.change_workmoderequest"):
+            pass
+        else:
+            sub_ids = get_subordinate_employee_ids(request, nested=True)
+            if not sub_ids:
+                qs = qs.none()
+            else:
+                qs = qs.filter(employee_id__id__in=sub_ids)
+
+        pagenation = PageNumberPagination()
+        page = pagenation.paginate_queryset(qs.order_by("-id"), request)
+        serializer = WorkModeRequestSerializer(page, many=True)
+        return pagenation.get_paginated_response(serializer.data)
+
+
+class WorkModeRequestApproveView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @transaction.atomic
+    def put(self, request, pk):
+        obj = get_object_or_404(WorkModeRequest.objects.select_for_update(), pk=pk)
+        emp_id = getattr(obj, "employee_id_id", None) or obj.employee_id.id
+
+        # Owner cannot approve their own request (even if admin).
+        try:
+            if obj.employee_id.employee_user_id == request.user:
+                return Response(
+                    {
+                        "error": "You cannot approve your own request. Ask another approver or use cancel."
+                    },
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+        except Exception:
+            pass
+
+
+        if not _can_act_on_employee(request, emp_id, "attendance.change_workmoderequest", allow_owner=False):
+            return Response(
+                {"error": "You do not have permission to perform this action."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        if obj.status != WorkModeRequestStatus.WAITING_FOR_APPROVAL:
+            return Response({"error": "Request is not waiting for approval."}, status=400)
+
+        old_status = obj.status
+        obj.status = WorkModeRequestStatus.APPROVED
+        obj.reason_code = None
+        try:
+            obj.approved_by = request.user.employee_get
+        except Exception:
+            obj.approved_by = None
+        obj.approved_at = dj_timezone.now()
+        obj.action_by = obj.approved_by
+        obj.action_at = obj.approved_at
+        obj.action_type = WorkModeRequestActionType.APPROVED
+        update_fields = ["status", "reason_code", "approved_by", "approved_at", "action_by", "action_at", "action_type"]
+        if obj.mode == AttendanceWorkMode.ON_DUTY:
+            _set_on_duty_document_state(obj, has_files=has_attachments(obj), approved=True)
+            update_fields.append("document_status")
+        obj.save(update_fields=update_fields)
+        _log_work_mode_status_change(obj, request, action_type=WorkModeRequestActionType.APPROVED, old_status=old_status, new_status=obj.status)
+        recompute_attendance_range(obj.employee_id, obj.start_date, obj.end_date)
+        return Response(self.serializer_class(obj, context={"request": request}).data, status=200)
+
+
+class WorkModeRequestRejectView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @transaction.atomic
+    def put(self, request, pk):
+        obj = get_object_or_404(WorkModeRequest.objects.select_for_update(), pk=pk)
+        emp_id = getattr(obj, "employee_id_id", None) or obj.employee_id.id
+
+        # Owner cannot reject their own request (use cancel), even if admin.
+        try:
+            if obj.employee_id.employee_user_id == request.user:
+                return Response(
+                    {"error": "Use cancel for your own request."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+        except Exception:
+            pass
+
+
+        if not _can_act_on_employee(request, emp_id, "attendance.change_workmoderequest", allow_owner=False):
+            return Response(
+                {"error": "You do not have permission to perform this action."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        is_admin = _is_admin_with_perm(request, "attendance.change_workmoderequest")
+        if obj.status not in (WorkModeRequestStatus.WAITING_FOR_APPROVAL, WorkModeRequestStatus.PENDING):
+            return Response({"error": "Request cannot be rejected in this status."}, status=400)
+        if obj.status == WorkModeRequestStatus.PENDING and not is_admin:
+            return Response({"error": "Pending ON DUTY requests are not in approvals."}, status=400)
+
+        comment_text = (
+            (request.data.get("comment") if hasattr(request, "data") else None)
+            or (request.data.get("reason") if hasattr(request, "data") else None)
+            or None
+        )
+        if comment_text:
+            obj.action_reason = str(comment_text)
+
+        old_status = obj.status
+        obj.status = WorkModeRequestStatus.REJECTED
+        obj.reason_code = WorkModeRequestRejectReasonCode.MANUAL_REJECT
+        try:
+            obj.approved_by = request.user.employee_get
+        except Exception:
+            obj.approved_by = None
+        obj.approved_at = dj_timezone.now()
+        obj.action_by = obj.approved_by
+        obj.action_at = obj.approved_at
+        obj.action_type = WorkModeRequestActionType.REJECTED
+        obj.save(update_fields=["status", "reason_code", "action_reason", "approved_by", "approved_at", "action_by", "action_at", "action_type"])
+        _log_work_mode_status_change(obj, request, action_type=WorkModeRequestActionType.REJECTED, old_status=old_status, new_status=obj.status, remark=obj.action_reason)
+
+        try:
+            apply_rejection_to_attendance(obj)
+        except Exception:
+            recompute_attendance_range(obj.employee_id, obj.start_date, obj.end_date)
+
+        return Response(self.serializer_class(obj, context={"request": request}).data, status=200)
+
+
+class WorkModeRequestCancelView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @transaction.atomic
+    def put(self, request, pk):
+        obj = get_object_or_404(WorkModeRequest.objects.select_for_update(), pk=pk)
+
+        is_admin = _is_admin_with_perm(request, "attendance.change_workmoderequest")
+        is_owner = False
+        try:
+            is_owner = obj.employee_id.employee_user_id == request.user
+        except Exception:
+            is_owner = False
+
+        if not (is_admin or is_owner):
+            return Response(
+                {"error": "You do not have permission to cancel this request."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        if obj.status not in (WorkModeRequestStatus.PENDING, WorkModeRequestStatus.WAITING_FOR_APPROVAL):
+            return Response({"error": "Only PENDING/WAITING requests can be canceled."}, status=400)
+
+        old_status = obj.status
+        obj.status = WorkModeRequestStatus.CANCELED
+        try:
+            obj.action_by = request.user.employee_get
+        except Exception:
+            obj.action_by = None
+        obj.action_at = dj_timezone.now()
+        obj.action_type = WorkModeRequestActionType.CANCELED
+        obj.save(update_fields=["status", "action_by", "action_at", "action_type"])
+        _log_work_mode_status_change(obj, request, action_type=WorkModeRequestActionType.CANCELED, old_status=old_status, new_status=obj.status)
+        recompute_attendance_range(obj.employee_id, obj.start_date, obj.end_date)
+        return Response(self.serializer_class(obj, context={"request": request}).data, status=200)
+
+
+class WorkModeRequestDocumentActionView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @transaction.atomic
+    def put(self, request, pk, action):
+        obj = get_object_or_404(WorkModeRequest.objects.select_for_update(), pk=pk)
+        emp_id = getattr(obj, "employee_id_id", None) or obj.employee_id.id
+
+        try:
+            if obj.employee_id.employee_user_id == request.user:
+                return Response({"error": "You cannot perform this action on your own request."}, status=status.HTTP_403_FORBIDDEN)
+        except Exception:
+            pass
+
+        if not _can_act_on_employee(request, emp_id, "attendance.change_workmoderequest", allow_owner=False):
+            return Response({"error": "You do not have permission to perform this action."}, status=status.HTTP_403_FORBIDDEN)
+
+        if action == "revoke":
+            if obj.status != WorkModeRequestStatus.APPROVED:
+                return Response({"error": "Only approved requests can be revoked."}, status=400)
+            old_status = obj.status
+            obj.status = WorkModeRequestStatus.REVOKED
+            obj.action_reason = (request.data.get("reason") or request.data.get("comment") or obj.action_reason)
+            obj.action_by = _request_actor_employee(request)
+            obj.action_at = dj_timezone.now()
+            obj.action_type = WorkModeRequestActionType.REVOKED
+            obj.save(update_fields=["status", "action_reason", "action_by", "action_at", "action_type"])
+            _log_work_mode_status_change(obj, request, action_type=WorkModeRequestActionType.REVOKED, old_status=old_status, new_status=obj.status, remark=obj.action_reason)
+            recompute_attendance_range(obj.employee_id, obj.start_date, obj.end_date)
+            return Response(WorkModeRequestSerializer(obj, context={"request": request}).data, status=200)
+
+        if obj.mode != AttendanceWorkMode.ON_DUTY:
+            return Response({"error": "Document actions are only available for On Duty requests."}, status=400)
+
+        if obj.status != WorkModeRequestStatus.APPROVED:
+            return Response({"error": "Document actions require an approved On Duty request."}, status=400)
+
+        remark = (request.data.get("reason") or request.data.get("comment") or request.data.get("remark") or "").strip() or None
+
+        if action == "verify":
+            if obj.document_status not in {WorkModeRequestDocumentStatus.SUBMITTED, WorkModeRequestDocumentStatus.PENDING_VERIFICATION}:
+                return Response({"error": "Document is not ready for verification."}, status=400)
+            obj.document_status = WorkModeRequestDocumentStatus.VERIFIED
+            obj.document_verified_by = _request_actor_employee(request)
+            obj.document_verified_at = dj_timezone.now()
+            obj.action_by = obj.document_verified_by
+            obj.action_at = obj.document_verified_at
+            obj.action_type = WorkModeRequestActionType.VERIFIED
+            obj.document_remark = remark
+            obj.save(update_fields=["document_status", "document_verified_by", "document_verified_at", "action_by", "action_at", "action_type", "document_remark"])
+            _log_work_mode_status_change(obj, request, action_type=WorkModeRequestActionType.VERIFIED, old_status="document:%s" % (WorkModeRequestDocumentStatus.PENDING_VERIFICATION), new_status="document:%s" % obj.document_status, remark=remark)
+            recompute_attendance_range(obj.employee_id, obj.start_date, obj.end_date)
+            return Response(WorkModeRequestSerializer(obj, context={"request": request}).data, status=200)
+
+        if action == "reject-document":
+            if obj.document_status not in {WorkModeRequestDocumentStatus.SUBMITTED, WorkModeRequestDocumentStatus.PENDING_VERIFICATION}:
+                return Response({"error": "Document is not ready for rejection."}, status=400)
+            previous = obj.document_status
+            obj.document_status = WorkModeRequestDocumentStatus.REJECTED
+            obj.action_by = _request_actor_employee(request)
+            obj.action_at = dj_timezone.now()
+            obj.action_type = WorkModeRequestActionType.REJECTED
+            obj.document_remark = remark
+            obj.save(update_fields=["document_status", "action_by", "action_at", "action_type", "document_remark"])
+            _log_work_mode_status_change(obj, request, action_type=WorkModeRequestActionType.REJECTED, old_status="document:%s" % previous, new_status="document:%s" % obj.document_status, remark=remark)
+            recompute_attendance_range(obj.employee_id, obj.start_date, obj.end_date)
+            return Response(WorkModeRequestSerializer(obj, context={"request": request}).data, status=200)
+
+        if action == "reopen-document":
+            if obj.document_status not in {WorkModeRequestDocumentStatus.VERIFIED, WorkModeRequestDocumentStatus.REJECTED}:
+                return Response({"error": "Only verified or rejected documents can be reopened."}, status=400)
+            previous = obj.document_status
+            obj.document_status = WorkModeRequestDocumentStatus.PENDING_VERIFICATION if has_attachments(obj) else WorkModeRequestDocumentStatus.NOT_UPLOADED
+            obj.document_verified_by = None
+            obj.document_verified_at = None
+            obj.action_by = _request_actor_employee(request)
+            obj.action_at = dj_timezone.now()
+            obj.action_type = WorkModeRequestActionType.REOPENED
+            obj.document_remark = remark
+            obj.save(update_fields=["document_status", "document_verified_by", "document_verified_at", "action_by", "action_at", "action_type", "document_remark"])
+            _log_work_mode_status_change(obj, request, action_type=WorkModeRequestActionType.REOPENED, old_status="document:%s" % previous, new_status="document:%s" % obj.document_status, remark=remark)
+            recompute_attendance_range(obj.employee_id, obj.start_date, obj.end_date)
+            return Response(WorkModeRequestSerializer(obj, context={"request": request}).data, status=200)
+
+        return Response({"error": "Unsupported action."}, status=400)
+
+
+class AttendanceOverTimeView(APIView):
+    """
+    Manages CRUD operations for attendance overtime records.
+
+    Methods:
+        get(request, pk=None): Retrieves a specific overtime record by `pk` or a list of records with filtering and pagination.
+        post(request): Creates a new overtime record.
+        put(request, pk): Updates an existing overtime record.
+        delete(request, pk): Deletes an overtime record.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk=None):
+        if pk:
+            attendance_ot = get_object_or_404(AttendanceOverTime, pk=pk)
+            serializer = AttendanceOverTimeSerializer(attendance_ot)
+            return Response(serializer.data, status=200)
+
+        filterset_class = AttendanceOverTimeFilter(request.GET)
+        queryset = filterset_class.qs
+        self_account = queryset.filter(employee_id__employee_user_id=request.user)
+        permission_based_queryset = filtersubordinates(
+            request, queryset, "attendance.view_attendanceovertime"
+        )
+        queryset = permission_based_queryset | self_account
+        field_name = request.GET.get("groupby_field", None)
+        if field_name:
+            # groupby workflow
+            url = request.build_absolute_uri()
+            return groupby_queryset(request, url, field_name, queryset)
+
+        pagenation = PageNumberPagination()
+        page = pagenation.paginate_queryset(queryset, request)
+        serializer = AttendanceOverTimeSerializer(page, many=True)
+        return pagenation.get_paginated_response(serializer.data)
+
+    @manager_permission_required("attendance.add_attendanceovertime")
+    def post(self, request):
+        serializer = AttendanceOverTimeSerializer(data=request.data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=200)
+        return Response(serializer.errors, status=400)
+
+    @manager_permission_required("attendance.change_attendanceovertime")
+    def put(self, request, pk):
+        attendance_ot = get_object_or_404(AttendanceOverTime, pk=pk)
+        serializer = AttendanceOverTimeSerializer(
+            instance=attendance_ot, data=request.data
+        )
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=200)
+        return Response(serializer.errors, status=400)
+
+    @method_decorator(permission_required("attendance.delete_attendanceovertime"))
+    def delete(self, request, pk):
+        attendance = get_object_or_404(AttendanceOverTime, pk=pk)
+        attendance.delete()
+
+        return Response({"message": "Overtime deleted successfully"}, status=204)
+
+
+class LateComeEarlyOutView(APIView):
+    """
+    Handles retrieval and deletion of late come and early out records.
+
+    Methods:
+        get(request, pk=None): Retrieves a list of late come and early out records with filtering.
+        delete(request, pk=None): Deletes a specific late come or early out record by `pk`.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk=None):
+        data = LateComeEarlyOutFilter(request.GET)
+        serializer = AttendanceLateComeEarlyOutSerializer(data.qs, many=True)
+        return Response(serializer.data, status=200)
+
+    def delete(self, request, pk=None):
+        attendance = get_object_or_404(AttendanceLateComeEarlyOut, pk=pk)
+        attendance.delete()
+        return Response({"message": "Attendance deleted successfully"}, status=204)
+
+
+class AttendanceActivityView(APIView):
+    """Retrieve permission-scoped attendance activity records."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self, request):
+        queryset = AttendanceActivity.objects.select_related("employee_id").all()
+        perm = "attendance.view_attendanceactivity"
+        try:
+            return permission_based_queryset(request.user, perm, queryset, user_obj=True)
+        except Exception:
+            employee = getattr(request.user, "employee_get", None)
+            if not employee:
+                return AttendanceActivity.objects.none()
+            return queryset.filter(employee_id=employee)
+
+    def get(self, request, pk=None):
+        queryset = self.get_queryset(request)
+        if pk is not None:
+            activity = get_object_or_404(queryset, pk=pk)
+            serializer = AttendanceActivitySerializer(activity)
+            return Response(serializer.data, status=200)
+
+        serializer = AttendanceActivitySerializer(queryset.order_by("-attendance_date", "-id"), many=True)
+        return Response(serializer.data, status=200)
+
+
+class TodayAttendance(APIView):
+    """
+    Provides the ratio of marked attendances to expected attendances for the current day.
+
+    Method:
+        get(request): Calculates and returns the attendance ratio for today.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+
+        today = datetime.today()
+        week_day = today.strftime("%A").lower()
+
+        on_time = find_on_time(request, today=today, week_day=week_day)
+        late_come = find_late_come(start_date=today)
+        late_come_obj = len(late_come)
+
+        marked_attendances = late_come_obj + on_time
+
+        expected_attendances = find_expected_attendances(week_day=week_day)
+        marked_attendances_ratio = 0
+        if expected_attendances != 0:
+            marked_attendances_ratio = (
+                f"{(marked_attendances / expected_attendances) * 100:.2f}"
+            )
+
+        return Response(
+            {"marked_attendances_ratio": marked_attendances_ratio}, status=200
         )
 
-    # Exclude own requests from Approvals tab (admin can still view them in My Requests).
-    # Self-approve is also blocked in the action endpoints for safety.
-    if employee is not None:
-        approvals_qs = approvals_qs.exclude(employee_id=employee)
 
-    # Apply shared quick filters
-    if mode_value:
-        approvals_qs = approvals_qs.filter(mode=mode_value)
-    if scope_value:
-        approvals_qs = approvals_qs.filter(scope=scope_value)
+class OfflineEmployeesCountView(APIView):
+    """
+    Retrieves the count of active employees who have not clocked in today.
 
-    if search:
+    Method:
+        get(request): Returns the number of active employees who are not yet clocked in.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        is_manager = (
+            EmployeeWorkInformation.objects.filter(
+                reporting_manager_id=request.user.employee_get
+            )
+            .only("id")
+            .exists()
+        )
+
+        if request.user.has_perm("employee.view_enployee") or is_manager:
+            count = (
+                EmployeeFilter({"not_in_yet": date.today()})
+                .qs.exclude(employee_work_info__isnull=True)
+                .filter(is_active=True)
+                .count()
+            )
+            return Response({"count": count}, status=200)
+        return Response(
+            {"error": "Permission denied"}, status=status.HTTP_403_FORBIDDEN
+        )
+
+
+class OfflineEmployeesListView(APIView):
+    """
+    Lists active employees who have not clocked in today, including their leave status.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        employee = getattr(user, "employee_get", None)
+        today = date.today()
+
+        # Manager access: get employees reporting to current user
+        managed_employee_ids = EmployeeWorkInformation.objects.filter(
+            reporting_manager_id=employee
+        ).values_list("employee_id", flat=True)
+
+        # Superusers or users with view permission see all employees
+        if user.has_perm("employee.view_employee"):
+            base_queryset = Employee.objects.all()
+        elif managed_employee_ids.exists():
+            base_queryset = Employee.objects.filter(id__in=managed_employee_ids)
+        else:
+            return Response(
+                {"error": "Permission denied"}, status=status.HTTP_403_FORBIDDEN
+            )
+
+        # Apply filtering for offline employees
+        filtered_qs = (
+            EmployeeFilter({"not_in_yet": today}, queryset=base_queryset)
+            .qs.exclude(employee_work_info__isnull=True)
+            .filter(is_active=True)
+            .select_related("employee_work_info")  # optimize joins
+        )
+
+        # Get leave status for the filtered employees
+        leave_status = self.get_leave_status(filtered_qs)
+
+        pagenation = PageNumberPagination()
+        page = pagenation.paginate_queryset(leave_status, request)
+        return pagenation.get_paginated_response(page)
+
+    def get_leave_status(self, queryset):
+
+        today = date.today()
+        queryset = queryset.distinct()
+        # Annotate each employee with their leave status
+        employees_with_leave_status = queryset.annotate(
+            leave_status=Case(
+                # Define different cases based on leave requests and attendance
+                When(
+                    leaverequest__start_date__lte=today,
+                    leaverequest__end_date__gte=today,
+                    leaverequest__status="approved",
+                    then=Value("On Leave"),
+                ),
+                When(
+                    leaverequest__start_date__lte=today,
+                    leaverequest__end_date__gte=today,
+                    leaverequest__status="requested",
+                    then=Value("Waiting Approval"),
+                ),
+                When(
+                    leaverequest__start_date__lte=today,
+                    leaverequest__end_date__gte=today,
+                    then=Value("Canceled / Rejected"),
+                ),
+                When(
+                    employee_attendances__attendance_date=today, then=Value("Working")
+                ),
+                default=Value("Expected working"),  # Default status
+                output_field=CharField(),
+            ),
+            job_position_id=F("employee_work_info__job_position_id"),
+        ).values(
+            "employee_first_name",
+            "employee_last_name",
+            "leave_status",
+            "employee_profile",
+            "id",
+            "job_position_id",
+        )
+
+        for employee in employees_with_leave_status:
+
+            if employee["employee_profile"]:
+                employee["employee_profile"] = (
+                    settings.MEDIA_URL + employee["employee_profile"]
+                )
+        return employees_with_leave_status
+
+
+
+class CheckingStatus(APIView):
+    """Mobile-friendly daily attendance status (single-session + hybrid mode)."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        employee = request.user.employee_get
+        dt_now = _api_now(request)
+        server_now_iso = dt_now.isoformat()
+        server_time_hhmm = dt_now.strftime("%H:%M")
+
+        # If client provides a target date (e.g., Attendance Correction form), compute shift rules for that date
+        # while keeping server_now/server_time based on real current time.
+        target_date_str = (request.GET.get('attendance_date') or request.GET.get('date') or '').strip()
+        if target_date_str:
+            try:
+                from datetime import datetime as _dt
+                # Use 12:01 to avoid night-shift noon-to-noon adjustment for historical/future dates
+                d = _dt.strptime(target_date_str, '%Y-%m-%d').date()
+                dt_now = dt_now.replace(year=d.year, month=d.month, day=d.day, hour=12, minute=1, second=0, microsecond=0)
+            except Exception:
+                pass
+
+        # Approver-only managers (reporting managers) are excluded from attendance.
+        # They can still approve requests, but must not clock-in/out in Horilla.
+        if _is_attendance_exempt_manager(employee):
+            attendance_date = dt_now.date()
+            return Response(
+                {
+                    "status": True,
+                    "attendance_enabled": False,
+                    "attendance_exempt_reason": "REPORTING_MANAGER",
+                    "message": "Attendance is disabled for reporting managers (approver-only).",
+
+                    "has_attendance": False,
+                    "attendance_date": attendance_date.strftime("%Y-%m-%d"),
+                    "first_check_in": None,
+                    "last_check_out": None,
+                    "late_by": None,
+                    "planned_check_out": None,
+                    "work_hours_below_minimum": False,
+                    "work_hours_shortfall": None,
+                    "checked_out_early": False,
+                    "worked_hours": "00:00",
+                    "worked_seconds": 0,
+                    "is_working": False,
+                    "missing_check_in": False,
+                    "check_in_cutoff_has_passed": False,
+                    "check_out_cutoff_has_passed": False,
+                    "can_clock_in": False,
+                    "can_clock_out": False,
+                    "can_update_clock_out": False,
+
+                    "can_check_in": False,
+                    "can_check_out": False,
+                    "check_in_window_start": None,
+                    "check_in_window_end": None,
+                    "check_out_window_start": None,
+                    "check_out_window_end": None,
+                    "check_in_block_reason": "ATTENDANCE_DISABLED",
+                    "check_out_block_reason": "ATTENDANCE_DISABLED",
+
+                    # Legacy work-mode
+                    "in_mode": AttendanceWorkMode.WFO,
+                    "out_mode": AttendanceWorkMode.WFO,
+
+                    # Work Type Request (Attendance) fields
+                    "in_work_type": AttendanceWorkMode.WFO,
+                    "out_work_type": AttendanceWorkMode.WFO,
+                    "in_work_type_source": "schedule",
+                    "out_work_type_source": "schedule",
+                    "in_work_type_request_id": None,
+                    "out_work_type_request_id": None,
+                    "in_work_type_request_status": None,
+                    "out_work_type_request_status": None,
+
+                    # Legacy request keys
+                    "in_request_status": None,
+                    "out_request_status": None,
+                    "in_request_scope": None,
+                    "out_request_scope": None,
+                    "in_work_mode_request_id": None,
+                    "out_work_mode_request_id": None,
+
+                    # Option B (audit fields)
+                    "in_attendance_status": None,
+                    "out_attendance_status": None,
+                    "in_attendance_reject_reason_code": None,
+                    "out_attendance_reject_reason_code": None,
+                    "in_related_work_type_request_id": None,
+                    "out_related_work_type_request_id": None,
+
+                    "shift_start": None,
+                    "shift_end": None,
+                    "grace_time": 0,
+                    "minimum_working_hour": None,
+                    "check_in_cutoff_time": None,
+                    "check_out_cutoff_time": None,
+                    "requires_photo_in": False,
+                    "requires_location_in": False,
+                    "requires_photo_out": False,
+                    "requires_location_out": False,
+                    "is_presensi_only": False,
+                    "server_now": server_now_iso,
+                    "server_time": server_time_hhmm,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        # Resolve shift
+        shift = None
         try:
-            from django.db.models import Q
+            shift = employee.employee_work_info.shift_id
+        except Exception:
+            shift = None
 
-            approvals_qs = approvals_qs.filter(
-                Q(employee_id__employee_first_name__icontains=search)
-                | Q(employee_id__employee_last_name__icontains=search)
-                | Q(mode__icontains=search)
-                | Q(scope__icontains=search)
+        # If shift missing, return minimal safe response (no mobile punch)
+        # Keep response shape stable for mobile UI (include work type & audit fields).
+        if not shift:
+            attendance_date = dt_now.date()
+
+            try:
+                in_mode, in_source, in_req = _resolve_effective_work_type(employee, attendance_date, "in")
+                out_mode, out_source, out_req = _resolve_effective_work_type(employee, attendance_date, "out")
+            except Exception:
+                in_mode, in_source, in_req = (AttendanceWorkMode.WFO, "schedule", None)
+                out_mode, out_source, out_req = (AttendanceWorkMode.WFO, "schedule", None)
+
+            return Response(
+                {
+                    "status": False,
+                    "attendance_enabled": True,
+                    "attendance_exempt_reason": None,
+                    "has_attendance": False,
+                    "attendance_date": attendance_date.strftime("%Y-%m-%d"),
+                    "first_check_in": None,
+                    "last_check_out": None,
+                    "late_by": None,
+                    "planned_check_out": None,
+                    "work_hours_below_minimum": False,
+                    "work_hours_shortfall": None,
+                    "checked_out_early": False,
+                    "worked_hours": "00:00",
+                    "worked_seconds": 0,
+                    "is_working": False,
+                    "missing_check_in": False,
+                    "check_in_cutoff_has_passed": False,
+                    "check_out_cutoff_has_passed": False,
+                    "can_clock_in": False,
+                    "can_clock_out": False,
+                    "can_update_clock_out": False,
+
+                    "can_check_in": False,
+                    "can_check_out": False,
+                    "check_in_window_start": None,
+                    "check_in_window_end": None,
+                    "check_out_window_start": None,
+                    "check_out_window_end": None,
+                    "check_in_block_reason": "SHIFT_NOT_ASSIGNED",
+                    "check_out_block_reason": "SHIFT_NOT_ASSIGNED",
+
+                    # Legacy work-mode
+                    "in_mode": in_mode,
+                    "out_mode": out_mode,
+
+                    # Work Type Request (Attendance) fields
+                    "in_work_type": in_mode,
+                    "out_work_type": out_mode,
+                    "in_work_type_source": in_source,
+                    "out_work_type_source": out_source,
+                    "in_work_type_request_id": getattr(in_req, "id", None),
+                    "out_work_type_request_id": getattr(out_req, "id", None),
+                    "in_work_type_request_status": getattr(in_req, "status", None),
+                    "out_work_type_request_status": getattr(out_req, "status", None),
+
+                    # Legacy request keys (still used by some clients)
+                    "in_request_status": getattr(in_req, "status", None),
+                    "out_request_status": getattr(out_req, "status", None),
+                    "in_request_scope": getattr(in_req, "scope", None),
+                    "out_request_scope": getattr(out_req, "scope", None),
+                    "in_work_mode_request_id": getattr(in_req, "id", None),
+                    "out_work_mode_request_id": getattr(out_req, "id", None),
+
+                    # Option B (audit fields)
+                    "in_attendance_status": None,
+                    "out_attendance_status": None,
+                    "in_attendance_reject_reason_code": None,
+                    "out_attendance_reject_reason_code": None,
+                    "in_related_work_type_request_id": None,
+                    "out_related_work_type_request_id": None,
+
+                    "shift_start": None,
+                    "shift_end": None,
+                    "grace_time": 0,
+                    "minimum_working_hour": None,
+                    "check_in_cutoff_time": None,
+                    "check_out_cutoff_time": None,
+                    "requires_photo_in": False,
+                    "requires_location_in": False,
+                    "requires_photo_out": False,
+                    "requires_location_out": False,
+                    "is_presensi_only": False,
+                    "server_now": server_now_iso,
+                    "server_time": server_time_hhmm,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        # Resolve attendance_date + day (night shift aware)
+        (
+            attendance_date,
+            day,
+            min_hour,
+            start_time_sec,
+            end_time_sec,
+            now_hhmm,
+            now_sec,
+        ) = _api_resolve_attendance_date_and_day(shift, dt_now)
+
+        # Schedule & cutoffs
+
+
+
+        rules = {}
+
+
+        try:
+
+
+            rules = cio.get_shift_rules(
+
+
+                attendance_date,
+
+
+                shift,
+
+
+                day,
+
+
+                start_time_sec=start_time_sec,
+
+
+                end_time_sec=end_time_sec,
+
+
+            )
+
+
+        except Exception:
+
+
+            rules = {
+
+
+                "schedule": None,
+
+
+                "grace_seconds": 0,
+
+
+                "cutoff_in_dt": None,
+
+
+                "cutoff_out_dt": None,
+
+
+            }
+
+
+
+        schedule = rules.get("schedule")
+
+
+        grace_seconds = int(rules.get("grace_seconds") or 0)
+
+
+        cutoff_in_dt = rules.get("cutoff_in_dt")
+        cutoff_out_dt = rules.get("cutoff_out_dt")
+
+        # Windows (FINAL spec)
+        shift_start_dt = rules.get("shift_start_dt")
+        shift_end_dt = rules.get("shift_end_dt")
+        check_in_window_start_dt = rules.get("check_in_window_start_dt")
+        check_in_window_end_dt = rules.get("check_in_window_end_dt")
+        check_out_window_start_dt = rules.get("check_out_window_start_dt")
+        check_out_window_end_dt = rules.get("check_out_window_end_dt")
+
+        cutoff_in_dt = _coerce_datetime_like(cutoff_in_dt, dt_now) if cutoff_in_dt else None
+        cutoff_out_dt = _coerce_datetime_like(cutoff_out_dt, dt_now) if cutoff_out_dt else None
+        shift_start_dt = _coerce_datetime_like(shift_start_dt, dt_now) if shift_start_dt else None
+        shift_end_dt = _coerce_datetime_like(shift_end_dt, dt_now) if shift_end_dt else None
+        check_in_window_start_dt = _coerce_datetime_like(check_in_window_start_dt, dt_now) if check_in_window_start_dt else None
+        check_in_window_end_dt = _coerce_datetime_like(check_in_window_end_dt, dt_now) if check_in_window_end_dt else None
+        check_out_window_start_dt = _coerce_datetime_like(check_out_window_start_dt, dt_now) if check_out_window_start_dt else None
+        check_out_window_end_dt = _coerce_datetime_like(check_out_window_end_dt, dt_now) if check_out_window_end_dt else None
+
+        # Ensure window fields are ALWAYS present (even if shift rule helper
+        # couldn't compute them). This keeps the mobile UI free from hardcoded
+        # window math and supports fresh installs.
+        DEFAULT_EARLY_CHECKIN_MIN = 120
+        DEFAULT_LATE_CHECKIN_MIN = 120
+        DEFAULT_EARLY_CHECKOUT_GRACE_MIN = 0
+        DEFAULT_MAX_LATE_CHECKOUT_HOURS = 12
+
+        try:
+            if (check_in_window_start_dt is None) and shift_start_dt:
+                check_in_window_start_dt = shift_start_dt - timedelta(minutes=DEFAULT_EARLY_CHECKIN_MIN)
+            if (check_in_window_end_dt is None) and shift_start_dt:
+                check_in_window_end_dt = cutoff_in_dt or (shift_start_dt + timedelta(minutes=DEFAULT_LATE_CHECKIN_MIN))
+
+            if (check_out_window_start_dt is None) and shift_end_dt:
+                check_out_window_start_dt = shift_end_dt - timedelta(minutes=DEFAULT_EARLY_CHECKOUT_GRACE_MIN)
+            if (check_out_window_end_dt is None) and shift_end_dt:
+                check_out_window_end_dt = cutoff_out_dt or (shift_end_dt + timedelta(hours=DEFAULT_MAX_LATE_CHECKOUT_HOURS))
+        except Exception:
+            pass
+
+        # Legacy cutoff flags (kept for backwards compatibility)
+        check_in_cutoff_has_passed = bool(cutoff_in_dt and dt_now > cutoff_in_dt)
+        check_out_cutoff_has_passed = bool(cutoff_out_dt and dt_now > cutoff_out_dt)
+
+        # Auto reject WFA waiting requests after cutoff (FINAL spec)
+        try:
+            auto_reject_wfa_waiting_for_date(
+                employee=employee,
+                target_date=attendance_date,
+                now_dt=dt_now,
+                cutoff_in_dt=cutoff_in_dt,
+                cutoff_out_dt=cutoff_out_dt,
             )
         except Exception:
             pass
 
-    approvals_qs = _apply_sort(approvals_qs, sort_field=allowed_sort_app[sort_app], direction=dir_app)
+# Resolve effective work type (request overrides schedule; IN/OUT can differ)
+        in_mode, in_source, in_req = _resolve_effective_work_type(employee, attendance_date, "in")
+        out_mode, out_source, out_req = _resolve_effective_work_type(employee, attendance_date, "out")
 
-    def _sort_url(which: str, field: str) -> str:
-        """Build sort link for a table.
+        # Attendance row
+        attendance = Attendance.objects.filter(employee_id=employee, attendance_date=attendance_date).first()
+        clock_in_t = getattr(attendance, "attendance_clock_in", None) if attendance else None
+        clock_out_t = getattr(attendance, "attendance_clock_out", None) if attendance else None
 
-        which: 'my'|'app'
-        """
-        if which == "my":
-            current_sort, current_dir = sort_my, dir_my
-            sort_key, dir_key, page_key = "sort_my", "dir_my", "page_my"
-        else:
-            current_sort, current_dir = sort_app, dir_app
-            sort_key, dir_key, page_key = "sort_app", "dir_app", "page_app"
+        # If this attendance is presence-only (On Duty), force worked hours to 00:00
+        is_presensi_only = bool(attendance and getattr(attendance, "is_presensi_only", False))
 
-        # Toggle direction if clicking active field
-        if field == current_sort:
-            new_dir = "asc" if current_dir == "desc" else "desc"
-        else:
-            new_dir = "asc"
+        out_punch_status = getattr(attendance, "out_attendance_status", None) if attendance else None
+        out_rejected = bool(out_punch_status == "REJECTED")
 
-        return _qs_update(request, **{sort_key: field, dir_key: new_dir, page_key: None})
+        # Worked hours calculation
+        worked_seconds = 0
+        is_working = False
+        in_dt = None
+        if attendance and not is_presensi_only:
+            if clock_in_t:
+                in_date = getattr(attendance, "attendance_clock_in_date", None) or attendance_date
+                in_dt = _coerce_datetime_like(datetime.combine(in_date, clock_in_t), dt_now)
 
-    context = {
-        "my_requests": paginator_qry(my_qs, request.GET.get("page_my")),
-        "approvals": paginator_qry(approvals_qs, request.GET.get("page_app")),
-        "can_approve": bool(can_approve),
-        "current_user_id": getattr(request.user, "id", None),
-        "search": search,
-        "status_my": status_my,
-        "mode_filter": mode_filter,
-        "scope_filter": scope_filter,
-        "mode_filter_options": [
-            ("", _("All")),
-            ("wfa", _("WFA")),
-            ("on_duty", _("ON DUTY")),
-        ],
-        "scope_filter_options": [
-            ("", _("All")),
-            ("in", _("IN")),
-            ("out", _("OUT")),
-            ("full", _("FULL")),
-        ],
-        "status_my_options": [
-            ("", _("All")),
-            ("pending", _("Pending")),
-            ("waiting", _("Waiting for approval")),
-            ("approved", _("Approved")),
-            ("rejected", _("Rejected")),
-            ("revoked", _("Revoked")),
-            ("canceled", _("Canceled")),
-        ],
-        "mode_label": _mode_label,
-        "pd_my": _qs_without(request, ["page_my"]),
-        "pd_app": _qs_without(request, ["page_app"]),
+                # FINAL spec: if checked-in earlier than shift_start, start counting at shift_start.
+                worked_start_dt = in_dt
+                try:
+                    if shift_start_dt and in_dt:
+                        worked_start_dt = max(in_dt, shift_start_dt)
+                except Exception:
+                    worked_start_dt = in_dt
 
-        "sort_my": sort_my,
-        "dir_my": dir_my,
-        "sort_app": sort_app,
-        "dir_app": dir_app,
-        "sort_my_urls": {
-            "mode": _sort_url("my", "mode"),
-            "scope": _sort_url("my", "scope"),
-            "start_date": _sort_url("my", "start_date"),
-            "end_date": _sort_url("my", "end_date"),
-            "status": _sort_url("my", "status"),
-        },
-        "sort_app_urls": {
-            "employee": _sort_url("app", "employee"),
-            "mode": _sort_url("app", "mode"),
-            "scope": _sort_url("app", "scope"),
-            "start_date": _sort_url("app", "start_date"),
-            "end_date": _sort_url("app", "end_date"),
-        },
-    }
+                # If OUT punch exists but was REJECTED, treat as not checked-out yet.
+                has_valid_out = bool(clock_out_t and not out_rejected)
 
-    return render(request, "attendance/work_type_requests/view.html", context)
+                if not has_valid_out:
+                    is_working = True
+                    try:
+                        worked_seconds = max(0, int((dt_now - worked_start_dt).total_seconds()))
+                    except Exception:
+                        worked_seconds = 0
+                else:
+                    out_date = getattr(attendance, "attendance_clock_out_date", None) or attendance_date
+                    out_dt = _coerce_datetime_like(datetime.combine(out_date, clock_out_t), dt_now)
+                    try:
+                        worked_seconds = max(0, int((out_dt - worked_start_dt).total_seconds()))
+                    except Exception:
+                        worked_seconds = 0
+            elif clock_out_t:
+                # missing check-in computation uses AttendanceActivity placeholder if available
+                activity = AttendanceActivity.objects.filter(employee_id=employee, attendance_date=attendance_date).first()
+                if activity and getattr(activity, "clock_in_date", None) and getattr(activity, "clock_in", None) and getattr(activity, "clock_out_date", None) and getattr(activity, "clock_out", None):
+                    in_dt = _coerce_datetime_like(datetime.combine(activity.clock_in_date, activity.clock_in), dt_now)
+                    out_dt = _coerce_datetime_like(datetime.combine(activity.clock_out_date, activity.clock_out), dt_now)
+                    try:
+                        worked_start_dt = in_dt
+                        if shift_start_dt and in_dt:
+                            worked_start_dt = max(in_dt, shift_start_dt)
+                        worked_seconds = max(0, int((out_dt - worked_start_dt).total_seconds()))
+                    except Exception:
+                        worked_seconds = 0
+                else:
+                    worked_seconds = 0
 
+        worked_minutes = max(0, int(worked_seconds // 60))
+        worked_hours = f"{worked_minutes//60:02d}:{worked_minutes%60:02d}"
 
-@login_required
-@hx_request_required
-def work_type_request_revoke(request, obj_id: int):
-    employee = getattr(request.user, "employee_get", None)
-    is_super = bool(getattr(request.user, "is_superuser", False))
-    has_global_perm = _is_global_work_type_approver(request.user)
-    if employee is None and not (is_super or has_global_perm):
-        return HttpResponseForbidden("Employee profile required")
-
-    req = get_object_or_404(WorkModeRequest, id=obj_id)
-    try:
-        if getattr(req.employee_id, "employee_user_id", None) == request.user:
-            return HttpResponseForbidden("You cannot revoke your own request")
-    except Exception:
-        pass
-    if not _can_act_on_request(request, req):
-        return HttpResponseForbidden("Not allowed")
-    if req.status != WorkModeRequestStatus.APPROVED:
-        messages.error(request, _("Only approved requests can be revoked."))
-        return HttpResponse("<script>location.reload();</script>")
-
-    old_status = req.status
-    req.status = WorkModeRequestStatus.REVOKED
-    req.action_by = employee if employee is not None else None
-    req.action_at = timezone.now()
-    req.action_type = "REVOKED"
-    req.save(update_fields=["status", "action_by", "action_at", "action_type"])
-    _log_request_action(req, employee, action_type="REVOKED", old_status=old_status, new_status=req.status)
-    recompute_attendance_range(req.employee_id, req.start_date, req.end_date)
-    messages.success(request, _("Request revoked."))
-    return HttpResponse("<script>location.reload();</script>")
-
-
-@login_required
-@hx_request_required
-def work_type_request_document_action(request, obj_id: int, action: str):
-    employee = getattr(request.user, "employee_get", None)
-    is_super = bool(getattr(request.user, "is_superuser", False))
-    has_global_perm = _is_global_work_type_approver(request.user)
-    if employee is None and not (is_super or has_global_perm):
-        return HttpResponseForbidden("Employee profile required")
-
-    req = get_object_or_404(WorkModeRequest, id=obj_id)
-    if req.mode != AttendanceWorkMode.ON_DUTY:
-        return HttpResponseForbidden("Document actions only apply to On Duty")
-    try:
-        if getattr(req.employee_id, "employee_user_id", None) == request.user:
-            return HttpResponseForbidden("You cannot perform this action on your own request")
-    except Exception:
-        pass
-    if not _can_act_on_request(request, req):
-        return HttpResponseForbidden("Not allowed")
-    if req.status != WorkModeRequestStatus.APPROVED:
-        messages.error(request, _("Document actions require approved On Duty request."))
-        return HttpResponse("<script>location.reload();</script>")
-
-    remark = (request.POST.get("remark") or request.POST.get("reason") or "").strip() or None
-    if action == "verify":
-        if req.document_status not in (WorkModeRequestDocumentStatus.SUBMITTED, WorkModeRequestDocumentStatus.PENDING_VERIFICATION):
-            messages.error(request, _("Document is not ready for verification."))
-            return HttpResponse("<script>location.reload();</script>")
-        previous = req.document_status
-        req.document_status = WorkModeRequestDocumentStatus.VERIFIED
-        req.document_verified_by = employee
-        req.document_verified_at = timezone.now()
-        req.action_by = employee
-        req.action_at = req.document_verified_at
-        req.action_type = "VERIFIED"
-        req.document_remark = remark
-        req.save(update_fields=["document_status", "document_verified_by", "document_verified_at", "action_by", "action_at", "action_type", "document_remark"])
-        _log_request_action(req, employee, action_type="VERIFIED", old_status=f"document:{previous}", new_status=f"document:{req.document_status}", remark=remark)
-        recompute_attendance_range(req.employee_id, req.start_date, req.end_date)
-        messages.success(request, _("Document verified."))
-    elif action == "reject":
-        if req.document_status not in (WorkModeRequestDocumentStatus.SUBMITTED, WorkModeRequestDocumentStatus.PENDING_VERIFICATION):
-            messages.error(request, _("Document is not ready for rejection."))
-            return HttpResponse("<script>location.reload();</script>")
-        previous = req.document_status
-        req.document_status = WorkModeRequestDocumentStatus.REJECTED
-        req.action_by = employee
-        req.action_at = timezone.now()
-        req.action_type = "REJECTED"
-        req.document_remark = remark
-        req.save(update_fields=["document_status", "action_by", "action_at", "action_type", "document_remark"])
-        _log_request_action(req, employee, action_type="REJECTED", old_status=f"document:{previous}", new_status=f"document:{req.document_status}", remark=remark)
-        recompute_attendance_range(req.employee_id, req.start_date, req.end_date)
-        messages.success(request, _("Document rejected."))
-    elif action == "reopen":
-        if req.document_status not in (WorkModeRequestDocumentStatus.VERIFIED, WorkModeRequestDocumentStatus.REJECTED):
-            messages.error(request, _("Only verified or rejected documents can be reopened."))
-            return HttpResponse("<script>location.reload();</script>")
-        previous = req.document_status
-        req.document_status = WorkModeRequestDocumentStatus.PENDING_VERIFICATION if has_attachments(req) else WorkModeRequestDocumentStatus.NOT_UPLOADED
-        req.document_verified_by = None
-        req.document_verified_at = None
-        req.action_by = employee
-        req.action_at = timezone.now()
-        req.action_type = "REOPENED"
-        req.document_remark = remark
-        req.save(update_fields=["document_status", "document_verified_by", "document_verified_at", "action_by", "action_at", "action_type", "document_remark"])
-        _log_request_action(req, employee, action_type="REOPENED", old_status=f"document:{previous}", new_status=f"document:{req.document_status}", remark=remark)
-        recompute_attendance_range(req.employee_id, req.start_date, req.end_date)
-        messages.success(request, _("Document review reopened."))
-    else:
-        return HttpResponseForbidden("Unsupported action")
-
-    return HttpResponse("<script>location.reload();</script>")
-
-
-@login_required
-@hx_request_required
-def work_type_request_attachments(request, obj_id: int):
-    """HTMX modal: list attachments for a request.
-
-    Access:
-    - owner can view
-    - approver/manager can view
-    """
-    employee = getattr(request.user, "employee_get", None)
-    is_super = bool(getattr(request.user, "is_superuser", False))
-    has_global_perm = _is_global_work_type_approver(request.user)
-    if employee is None and not (is_super or has_global_perm):
-        return HttpResponseForbidden("Employee profile required")
-
-    req = get_object_or_404(WorkModeRequest, id=obj_id)
-
-    # Owner can always view; otherwise must be allowed to act on this specific request.
-    if employee is not None and req.employee_id_id == employee.id:
-        pass
-    else:
-        if not _can_act_on_request(request, req):
-            return HttpResponseForbidden("Not allowed")
-
-    files = req.files.all()
-    return render(
-        request,
-        "attendance/work_type_requests/attachments_modal.html",
-        {"req": req, "files": files, "mode_label": _mode_label},
-    )
-
-
-@login_required
-@hx_request_required
-def work_type_request_create(request):
-    employee = getattr(request.user, "employee_get", None)
-    if employee is None:
-        return HttpResponseForbidden("Employee profile required")
-
-    form = WorkTypeRequestCreateForm(employee=employee)
-
-    if request.method == "POST":
-        form = WorkTypeRequestCreateForm(request.POST, request.FILES, employee=employee)
-        if form.is_valid():
-            instance: WorkModeRequest = form.save(commit=False)
-            instance.employee_id = employee
-
-            # Status rules
-            files_in = request.FILES.getlist("files")
-            if instance.mode == AttendanceWorkMode.WFA:
-                instance.status = WorkModeRequestStatus.WAITING_FOR_APPROVAL
-            elif instance.mode == AttendanceWorkMode.ON_DUTY:
-                instance.status = (
-                    WorkModeRequestStatus.WAITING_FOR_APPROVAL
-                    if files_in
-                    else WorkModeRequestStatus.PENDING
-                )
-                _set_on_duty_document_state(instance, has_files=bool(files_in), approved=False)
-            else:
-                # Not allowed by model.clean(), but keep safe.
-                instance.status = WorkModeRequestStatus.PENDING
-
-            instance.save()
-
-            # Save attachments
-            for f in files_in:
-                af = AttendanceRequestFile.objects.create(file=f)
-                instance.files.add(af)
-
-            messages.success(request, _(f"Work Type Request created ({_mode_label(instance.mode)})."))
-            # reload page (modal context)
-            response = render(request, "attendance/work_type_requests/form.html", {"form": form})
-            return HttpResponse(response.content.decode("utf-8") + "<script>location.reload();</script>")
-
-    return render(request, "attendance/work_type_requests/form.html", {"form": form})
-
-
-@login_required
-@hx_request_required
-def work_type_request_update(request, obj_id: int):
-    employee = getattr(request.user, "employee_get", None)
-    if employee is None:
-        return HttpResponseForbidden("Employee profile required")
-
-    req = get_object_or_404(WorkModeRequest, id=obj_id)
-
-    # Only the owner can add attachments/notes
-    if req.employee_id_id != employee.id:
-        return HttpResponseForbidden("Not allowed")
-
-    form = WorkTypeRequestUpdateForm(initial={"reason": req.reason or ""})
-
-    if req.mode == AttendanceWorkMode.ON_DUTY and req.document_status == WorkModeRequestDocumentStatus.VERIFIED:
-        return HttpResponseForbidden("Verified On Duty documents are locked")
-
-    if request.method == "POST":
-        form = WorkTypeRequestUpdateForm(request.POST, request.FILES)
-        if form.is_valid():
-            note = (form.cleaned_data.get("reason") or "").strip()
-            if note:
-                req.reason = note
-
-            files_in = request.FILES.getlist("files")
-            if files_in and req.mode == AttendanceWorkMode.ON_DUTY:
-                req.files.clear()
-            for f in files_in:
-                af = AttendanceRequestFile.objects.create(file=f)
-                req.files.add(af)
-
-            if req.mode == AttendanceWorkMode.ON_DUTY:
-                _set_on_duty_document_state(req, has_files=has_attachments(req), approved=(req.status == WorkModeRequestStatus.APPROVED))
-                if req.status == WorkModeRequestStatus.PENDING and has_attachments(req):
-                    req.status = WorkModeRequestStatus.WAITING_FOR_APPROVAL
-
-            req.save()
-            messages.success(request, _("Request updated."))
-            response = render(
-                request,
-                "attendance/work_type_requests/update_form.html",
-                {"form": form, "req": req, "mode_label": _mode_label},
+        # Missing check-in flag (for UI messaging)
+        missing_check_in = (
+            (not clock_in_t)
+            and (
+                bool(clock_out_t)
+                or (bool(check_in_cutoff_has_passed) and not bool(check_out_cutoff_has_passed))
             )
-            return HttpResponse(response.content.decode("utf-8") + "<script>location.reload();</script>")
+        )
 
-    return render(
-        request,
-        "attendance/work_type_requests/update_form.html",
-        {"form": form, "req": req, "mode_label": _mode_label},
-    )
+        # Action permissions
+        in_allowed = _is_punch_allowed(in_mode, in_req, in_source)
+        out_allowed = _is_punch_allowed(out_mode, out_req, out_source)
 
+        requires_photo_in = _requires_proof(in_mode)
+        requires_location_in = _requires_proof(in_mode)
+        requires_photo_out = _requires_proof(out_mode)
+        requires_location_out = _requires_proof(out_mode)
 
-@login_required
-@hx_request_required
-def work_type_request_cancel(request, obj_id: int):
-    employee = getattr(request.user, "employee_get", None)
-    if employee is None:
-        return HttpResponseForbidden("Employee profile required")
+        # Window selection (FINAL spec)
+        in_window_start = check_in_window_start_dt
+        in_window_end = check_in_window_end_dt
 
-    req = get_object_or_404(WorkModeRequest, id=obj_id)
+        # Window end is fixed at cutoff_out when available (per spec); fallback to helper-computed end.
+        out_window_end = cutoff_out_dt or check_out_window_end_dt
 
-    if req.employee_id_id != employee.id:
-        return HttpResponseForbidden("Not allowed")
-
-    if req.status not in (WorkModeRequestStatus.PENDING, WorkModeRequestStatus.WAITING_FOR_APPROVAL):
-        messages.error(request, _("Only pending/waiting requests can be canceled."))
-        return HttpResponse("<script>location.reload();</script>")
-
-    old_status = req.status
-    req.status = WorkModeRequestStatus.CANCELED
-    req.action_by = employee
-    req.action_at = timezone.now()
-    req.action_type = "CANCELED"
-    req.save(update_fields=["status", "action_by", "action_at", "action_type"])
-    _log_request_action(req, employee, action_type="CANCELED", old_status=old_status, new_status=req.status)
-    recompute_attendance_range(req.employee_id, req.start_date, req.end_date)
-    messages.success(request, _("Request canceled."))
-    return HttpResponse("<script>location.reload();</script>")
-
-
-@login_required
-@hx_request_required
-def work_type_request_approve(request, obj_id: int):
-    employee = getattr(request.user, "employee_get", None)
-    is_super = bool(getattr(request.user, "is_superuser", False))
-    has_global_perm = _is_global_work_type_approver(request.user)
-    if employee is None and not (is_super or has_global_perm):
-        return HttpResponseForbidden("Employee profile required")
-
-    req = get_object_or_404(WorkModeRequest, id=obj_id)
-
-    # Never allow self-approval (use cancel instead).
-    try:
-        if getattr(req.employee_id, "employee_user_id", None) == request.user:
-            return HttpResponseForbidden("You cannot approve your own request")
-    except Exception:
-        pass
-
-    if not _can_act_on_request(request, req):
-        return HttpResponseForbidden("Not allowed")
-
-    if req.status != WorkModeRequestStatus.WAITING_FOR_APPROVAL:
-        messages.error(request, _("Only waiting requests can be approved."))
-        return HttpResponse("<script>location.reload();</script>")
-
-    old_status = req.status
-    req.status = WorkModeRequestStatus.APPROVED
-    req.approved_by = employee if employee is not None else None
-    req.approved_at = timezone.now()
-    req.action_by = req.approved_by
-    req.action_at = req.approved_at
-    req.action_type = "APPROVED"
-    if req.mode == AttendanceWorkMode.ON_DUTY:
-        _set_on_duty_document_state(req, has_files=has_attachments(req), approved=True)
-        req.save(update_fields=["status", "approved_by", "approved_at", "action_by", "action_at", "action_type", "document_status"])
-    else:
-        req.save(update_fields=["status", "approved_by", "approved_at", "action_by", "action_at", "action_type"])
-    _log_request_action(req, employee, action_type="APPROVED", old_status=old_status, new_status=req.status)
-    recompute_attendance_range(req.employee_id, req.start_date, req.end_date)
-
-    messages.success(request, _("Request approved."))
-    return HttpResponse("<script>location.reload();</script>")
-
-
-@login_required
-@hx_request_required
-def work_type_request_reject(request, obj_id: int):
-    employee = getattr(request.user, "employee_get", None)
-    is_super = bool(getattr(request.user, "is_superuser", False))
-    has_global_perm = _is_global_work_type_approver(request.user)
-    if employee is None and not (is_super or has_global_perm):
-        return HttpResponseForbidden("Employee profile required")
-
-    req = get_object_or_404(WorkModeRequest, id=obj_id)
-
-    # Never allow self-reject (use cancel instead).
-    try:
-        if getattr(req.employee_id, "employee_user_id", None) == request.user:
-            return HttpResponseForbidden("Use cancel for your own request")
-    except Exception:
-        pass
-
-    if not _can_act_on_request(request, req):
-        return HttpResponseForbidden("Not allowed")
-
-    form = WorkTypeRequestRejectForm(
-        initial={
-            "reason_code": WorkModeRequestRejectReasonCode.MANUAL_REJECT,
-            "reason": req.reason or "",
-        }
-    )
-
-    if request.method == "POST":
-        form = WorkTypeRequestRejectForm(request.POST)
-        if form.is_valid():
-            if req.status not in (WorkModeRequestStatus.WAITING_FOR_APPROVAL, WorkModeRequestStatus.PENDING):
-                messages.error(request, _("Only pending/waiting requests can be rejected."))
-                return HttpResponse("<script>location.reload();</script>")
-
-            old_status = req.status
-            req.status = WorkModeRequestStatus.REJECTED
-            req.reason_code = form.cleaned_data.get("reason_code")
-            req.reason = (form.cleaned_data.get("reason") or "").strip() or req.reason
-            req.approved_by = employee if employee is not None else None
-            req.approved_at = timezone.now()
-            req.action_by = req.approved_by
-            req.action_at = req.approved_at
-            req.action_type = "REJECTED"
-            req.save(update_fields=["status", "reason_code", "reason", "approved_by", "approved_at", "action_by", "action_at", "action_type"])
-            _log_request_action(req, employee, action_type="REJECTED", old_status=old_status, new_status=req.status, remark=req.reason)
-
+        if out_mode == AttendanceWorkMode.ON_DUTY:
+            # ON_DUTY: start checkout AFTER check-in cutoff (avoid overlap at exact cutoff)
+            out_window_start = (cutoff_in_dt + timedelta(minutes=1)) if cutoff_in_dt else check_out_window_start_dt
+        else:
+            # WFO/WFA: dynamic checkout start follows actual check-in time, but clamped:
+            # - if checked-in earlier than shift start -> use shift start
+            # - if checked-in later than shift start + grace -> cap to shift start + grace
+            out_window_start = check_out_window_start_dt
             try:
-                apply_rejection_to_attendance(req)
+                if in_dt and shift_start_dt and shift_end_dt:
+                    grace_sec = int(grace_seconds or 0)
+                    min_start = shift_start_dt
+                    max_start = shift_start_dt + timedelta(seconds=grace_sec)
+                    eff_in = in_dt
+                    if eff_in < min_start:
+                        eff_in = min_start
+                    # Cap check-in used for OUT-window math at shift_start + grace.
+                    # IMPORTANT: grace can be 0, in which case max_start == shift_start.
+                    # We still need to cap (otherwise checkout window would drift later).
+                    elif eff_in > max_start:
+                        eff_in = max_start
+
+                    shift_duration = shift_end_dt - shift_start_dt
+                    dyn_end = eff_in + shift_duration
+
+                    early_grace_min = int(((rules or {}).get("window_config") or {}).get("early_checkout_grace_minutes") or 0)
+                    out_window_start = dyn_end - timedelta(minutes=early_grace_min)
             except Exception:
-                recompute_attendance_range(req.employee_id, req.start_date, req.end_date)
+                pass
 
-            messages.success(request, _("Request rejected."))
-            response = render(
-                request,
-                "attendance/work_type_requests/reject_form.html",
-                {"form": form, "req": req, "mode_label": _mode_label},
+        def _in_window_ok(start_dt, end_dt) -> bool:
+            if start_dt and dt_now < start_dt:
+                return False
+            if end_dt and dt_now > end_dt:
+                return False
+            return True
+
+        in_window_ok = _in_window_ok(in_window_start, in_window_end)
+        out_window_ok = _in_window_ok(out_window_start, out_window_end)
+
+        # Block reasons for mobile UI (FINAL spec)
+        check_in_block_reason = None
+        check_out_block_reason = None
+
+        if clock_in_t or clock_out_t:
+            check_in_block_reason = "ALREADY_PUNCHED"
+        elif not in_allowed:
+            check_in_block_reason = "MODE_NOT_ALLOWED"
+        elif in_window_start and dt_now < in_window_start:
+            check_in_block_reason = "BEFORE_WINDOW_START"
+        elif in_window_end and dt_now > in_window_end:
+            check_in_block_reason = "AFTER_WINDOW_END"
+
+        # Can check-in? (FINAL spec)
+        can_clock_in = (
+            (not bool(clock_in_t))
+            and (not bool(clock_out_t))
+            and in_allowed
+            and in_window_ok
+        )
+
+        # Can update checkout?
+        can_update_clock_out = (
+            bool(clock_out_t)
+            and out_allowed
+            and out_window_ok
+            and ((out_mode in {AttendanceWorkMode.WFA, AttendanceWorkMode.ON_DUTY}) or out_rejected)
+        )
+
+        # Can check-out? (FINAL spec)
+        can_clock_out = False
+        if not out_allowed:
+            check_out_block_reason = "MODE_NOT_ALLOWED"
+        elif out_window_start and dt_now < out_window_start:
+            check_out_block_reason = "BEFORE_WINDOW_START"
+        elif out_window_end and dt_now > out_window_end:
+            check_out_block_reason = "AFTER_WINDOW_END"
+        else:
+            # within window
+            if clock_out_t:
+                can_clock_out = can_update_clock_out
+                if not can_clock_out:
+                    check_out_block_reason = "ALREADY_CHECKED_OUT"
+            else:
+                # allow clock-out even when check-in is missing (single-session placeholder)
+                can_clock_out = True
+
+        # Suggested action (for mobile)
+        suggested_action = None
+        if can_clock_out:
+            suggested_action = "clock_out"
+        elif can_clock_in:
+            suggested_action = "clock_in"
+
+        # Shift context
+        def _sec_to_hhmm(sec_val):
+            try:
+                s = int(sec_val)
+            except Exception:
+                return None
+            if s < 0:
+                return None
+            h = (s // 3600) % 24
+            m = (s % 3600) // 60
+            return f"{h:02d}:{m:02d}"
+
+        # Derived helpers for mobile UI (optional; safe defaults when absent)
+        planned_check_out_hhmm = _sec_to_hhmm(end_time_sec)
+        late_by_hhmm = None
+        work_hours_below_minimum = False
+        work_hours_shortfall_hhmm = None
+        checked_out_early = False
+
+        if attendance and not is_presensi_only:
+            try:
+                is_night_shift = start_time_sec > end_time_sec and start_time_sec != end_time_sec
+            except Exception:
+                is_night_shift = False
+
+            # Late-by is calculated from scheduled start + grace time
+            if clock_in_t and start_time_sec:
+                try:
+                    in_date = getattr(attendance, "attendance_clock_in_date", None) or attendance_date
+                    in_dt = _coerce_datetime_like(datetime.combine(in_date, clock_in_t), dt_now)
+
+                    planned_in_hhmm = _sec_to_hhmm(start_time_sec)
+                    planned_in_time = datetime.strptime(planned_in_hhmm, "%H:%M").time()
+                    planned_in_dt = _coerce_datetime_like(
+                        datetime.combine(attendance_date, planned_in_time), dt_now
+                    )
+
+                    grace_dt = planned_in_dt + timedelta(seconds=int(grace_seconds or 0))
+                    if in_dt and grace_dt and in_dt > grace_dt:
+                        late_s = int((in_dt - grace_dt).total_seconds())
+                        if late_s > 0:
+                            late_by_hhmm = f"{late_s // 3600:02d}:{(late_s % 3600) // 60:02d}"
+                except Exception:
+                    late_by_hhmm = None
+
+            # Below-minimum and shortfall are only meaningful after clock-out
+            min_hhmm = _format_minimum_hour(min_hour)
+            if clock_in_t and clock_out_t and min_hhmm:
+                try:
+                    min_s = strtime_seconds(min_hhmm)
+                    if min_s and int(worked_seconds) < int(min_s):
+                        work_hours_below_minimum = True
+                        short_s = int(min_s) - int(worked_seconds)
+                        work_hours_shortfall_hhmm = f"{short_s // 3600:02d}:{(short_s % 3600) // 60:02d}"
+                except Exception:
+                    pass
+
+            # Early check-out is based on scheduled end time
+            if clock_in_t and clock_out_t and planned_check_out_hhmm:
+                try:
+                    out_date = getattr(attendance, "attendance_clock_out_date", None) or attendance_date
+                    out_dt = _coerce_datetime_like(datetime.combine(out_date, clock_out_t), dt_now)
+
+                    planned_out_date = attendance_date + timedelta(days=1) if is_night_shift else attendance_date
+                    planned_out_time = datetime.strptime(planned_check_out_hhmm, "%H:%M").time()
+                    planned_out_dt = _coerce_datetime_like(
+                        datetime.combine(planned_out_date, planned_out_time), dt_now
+                    )
+
+                    if out_dt and planned_out_dt and out_dt < planned_out_dt:
+                        checked_out_early = True
+                except Exception:
+                    checked_out_early = False
+
+        payload = {
+            "status": (False if is_presensi_only else bool(is_working)),
+            "attendance_enabled": True,
+            "attendance_exempt_reason": None,
+            "has_attendance": bool(attendance),
+            "attendance_date": attendance_date.strftime("%Y-%m-%d"),
+
+            "clock_in_time": clock_in_t.strftime("%H:%M") if clock_in_t else None,
+            "clock_out_time": clock_out_t.strftime("%H:%M") if clock_out_t else None,
+            "clock_in": clock_in_t.strftime("%I:%M %p") if clock_in_t else None,
+            "clock_out": clock_out_t.strftime("%I:%M %p") if clock_out_t else None,
+
+            "first_check_in": clock_in_t.strftime("%I:%M %p") if clock_in_t else None,
+            "last_check_out": clock_out_t.strftime("%I:%M %p") if clock_out_t else None,
+
+            "worked_hours": "00:00" if is_presensi_only else worked_hours,
+            "worked_seconds": 0 if is_presensi_only else int(worked_seconds),
+            "is_working": False if is_presensi_only else bool(is_working),
+
+            "shift_start": _sec_to_hhmm(start_time_sec),
+            "shift_end": _sec_to_hhmm(end_time_sec),
+            "grace_time": int(grace_seconds),
+            "minimum_working_hour": _format_minimum_hour(min_hour),
+
+            "check_in_cutoff_time": cutoff_in_dt.strftime("%H:%M") if cutoff_in_dt else None,
+            "check_out_cutoff_time": cutoff_out_dt.strftime("%H:%M") if cutoff_out_dt else None,
+            "check_in_cutoff_has_passed": bool(check_in_cutoff_has_passed),
+            "check_out_cutoff_has_passed": bool(check_out_cutoff_has_passed),
+
+            "missing_check_in": bool(missing_check_in),
+
+            # Option B (per punch audit status)
+            "in_attendance_status": getattr(attendance, "in_attendance_status", None) if attendance else None,
+            "out_attendance_status": getattr(attendance, "out_attendance_status", None) if attendance else None,
+            "in_attendance_reject_reason_code": getattr(attendance, "in_attendance_reject_reason_code", None) if attendance else None,
+            "out_attendance_reject_reason_code": getattr(attendance, "out_attendance_reject_reason_code", None) if attendance else None,
+            "in_related_work_type_request_id": getattr(attendance, "in_related_work_type_request_id", None) if attendance else None,
+            "out_related_work_type_request_id": getattr(attendance, "out_related_work_type_request_id", None) if attendance else None,
+
+            # Work-mode
+            "in_mode": in_mode,
+                    "out_mode": out_mode,
+                    "in_work_type": in_mode,
+                    "out_work_type": out_mode,
+                    "in_work_type_source": in_source,
+                    "out_work_type_source": out_source,
+                    "in_work_type_request_id": getattr(in_req, 'id', None),
+                    "out_work_type_request_id": getattr(out_req, 'id', None),
+                    "in_work_type_request_status": getattr(in_req, 'status', None),
+                    "out_work_type_request_status": getattr(out_req, 'status', None),
+            "in_request_status": getattr(in_req, "status", None),
+            "out_request_status": getattr(out_req, "status", None),
+            "in_request_scope": getattr(in_req, "scope", None),
+            "out_request_scope": getattr(out_req, "scope", None),
+            "in_work_mode_request_id": getattr(in_req, "id", None),
+            "out_work_mode_request_id": getattr(out_req, "id", None),
+
+            # Gating flags
+            "can_clock_in": bool(can_clock_in),
+            "can_clock_out": bool(can_clock_out),
+            "can_update_clock_out": bool(can_update_clock_out),
+            # New (FINAL spec) keys
+            "can_check_in": bool(can_clock_in),
+            "can_check_out": bool(can_clock_out),
+            "check_in_window_start": in_window_start.strftime("%H:%M") if in_window_start else None,
+            "check_in_window_end": in_window_end.strftime("%H:%M") if in_window_end else None,
+            "check_out_window_start": out_window_start.strftime("%H:%M") if out_window_start else None,
+            "check_out_window_end": out_window_end.strftime("%H:%M") if out_window_end else None,
+            "check_in_block_reason": check_in_block_reason,
+            "check_out_block_reason": check_out_block_reason,
+            "suggested_action": suggested_action,
+            "update_check_out": bool(can_update_clock_out),  # legacy key for existing mobile UI
+
+            # Proof requirements (mobile uses this to show camera/GPS)
+            "requires_photo_in": bool(requires_photo_in),
+            "requires_location_in": bool(requires_location_in),
+            "requires_photo_out": bool(requires_photo_out),
+            "requires_location_out": bool(requires_location_out),
+
+            # Presence-only
+            "is_presensi_only": bool(is_presensi_only),
+
+            "server_now": server_now_iso,
+            "server_time": server_time_hhmm,
+        }
+
+        # Optional helper fields used by mobile UI for status notes.
+        # Keep these stable for backward compatibility.
+        payload.update(
+            {
+                "late_check_in": bool(late_by_hhmm),
+                "late_by": late_by_hhmm,
+                "planned_check_out": planned_check_out_hhmm,
+                "work_hours_below_minimum": bool(work_hours_below_minimum),
+                "work_hours_shortfall": work_hours_shortfall_hhmm,
+                "checked_out_early": bool(checked_out_early),
+            }
+        )
+
+        # Attach proof URLs & locations (audit)
+        if attendance:
+            try:
+                if getattr(attendance, "attendance_clock_in_image", None):
+                    payload["clock_in_image"] = attendance.attendance_clock_in_image.url
+            except Exception:
+                pass
+            try:
+                if getattr(attendance, "attendance_clock_out_image", None):
+                    payload["clock_out_image"] = attendance.attendance_clock_out_image.url
+            except Exception:
+                pass
+            # Location fields may be JSON
+            try:
+                payload["clock_in_location"] = getattr(attendance, "attendance_clock_in_location", None)
+            except Exception:
+                pass
+            try:
+                payload["clock_out_location"] = getattr(attendance, "attendance_clock_out_location", None)
+            except Exception:
+                pass
+        return Response(payload, status=status.HTTP_200_OK)
+
+class MailTemplateView(APIView):
+    """
+    Retrieves a list of recruitment mail templates.
+
+    Method:
+        get(request): Returns all recruitment mail templates.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        instances = HorillaMailTemplate.objects.all()
+        serializer = MailTemplateSerializer(instances, many=True)
+        return Response(serializer.data, status=200)
+
+class ConvertedMailTemplateConvert(APIView):
+    """
+    Renders a recruitment mail template with data from a specified employee.
+
+    Method:
+        put(request): Renders the mail template body with employee and user data and returns the result.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def put(self, request):
+        template_id = request.data.get("template_id", None)
+        employee_id = request.data.get("employee_id", None)
+        employee = Employee.objects.filter(id=employee_id).first()
+        bdy = HorillaMailTemplate.objects.filter(id=template_id).first()
+        template_bdy = template.Template(bdy.body)
+        context = template.Context(
+            {"instance": employee, "self": request.user.employee_get}
+        )
+        render_bdy = template_bdy.render(context)
+        return Response(render_bdy)
+class OfflineEmployeeMailsend(APIView):
+    """
+    Sends an email with attachments and rendered templates to a specified employee.
+
+    Method:
+        post(request): Renders email templates with employee and user data, attaches files, and sends the email.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        employee_id = request.POST.get("employee_id")
+        subject = request.POST.get("subject", "")
+        bdy = request.POST.get("body", "")
+        other_attachments = request.FILES.getlist("other_attachments")
+        attachments = [
+            (file.name, file.read(), file.content_type) for file in other_attachments
+        ]
+        email_backend = ConfiguredEmailBackend()
+        host = email_backend.dynamic_username
+        employee = Employee.objects.get(id=employee_id)
+        template_attachment_ids = request.POST.getlist("template_attachments")
+        bodys = list(
+            HorillaMailTemplate.objects.filter(
+                id__in=template_attachment_ids
+            ).values_list("body", flat=True)
+        )
+        for html in bodys:
+            # Due to not having a solid template we first need to pass the context
+            template_bdy = template.Template(html)
+            context = template.Context(
+                {"instance": employee, "self": request.user.employee_get}
             )
-            return HttpResponse(response.content.decode("utf-8") + "<script>location.reload();</script>")
+            render_bdy = template_bdy.render(context)
+            attachments.append(
+                (
+                    "Document",
+                    generate_pdf(render_bdy, {}, path=False, title="Document").content,
+                    "application/pdf",
+                )
+            )
 
-    return render(
-        request,
-        "attendance/work_type_requests/reject_form.html",
-        {"form": form, "req": req, "mode_label": _mode_label},
-    )
+        template_bdy = template.Template(bdy)
+        context = template.Context(
+            {"instance": employee, "self": request.user.employee_get}
+        )
+        render_bdy = template_bdy.render(context)
+
+        email = EmailMessage(
+            subject,
+            render_bdy,
+            host,
+            [employee.employee_work_info.email],
+        )
+        email.content_subtype = "html"
+
+        email.attachments = attachments
+        try:
+            email.send()
+            if employee.employee_work_info.email:
+                return Response(f"Mail sent to {employee.get_full_name()}")
+            else:
+                return Response(f"Email not set for {employee.get_full_name()}")
+        except Exception as e:
+            return Response("Something went wrong")
+
+
+class UserAttendanceView(APIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = UserAttendanceDetailedSerializer
+
+    def get(self, request):
+        employee_id = request.user.employee_get.id
+
+        attendance_queryset = Attendance.objects.filter(
+            employee_id=employee_id
+        ).order_by("-id")
+
+        paginator = PageNumberPagination()
+        paginator.page_size = 20
+        page = paginator.paginate_queryset(attendance_queryset, request)
+
+        serializer = self.serializer_class(page, many=True)
+        return paginator.get_paginated_response(serializer.data)
+
+
+class AttendancePunchingHistoryPagination(PageNumberPagination):
+    page_size = 20
+    page_size_query_param = "page_size"
+    max_page_size = 100
+
+
+class AttendancePunchingHistoryAPIView(APIView):
+    """Mobile API for raw attendance punches only."""
+
+    permission_classes = [IsAuthenticated]
+    pagination_class = AttendancePunchingHistoryPagination
+
+    def _parse_date(self, raw_value, fallback):
+        if not raw_value:
+            return fallback
+        try:
+            return datetime.strptime(str(raw_value), "%Y-%m-%d").date()
+        except Exception:
+            return fallback
+
+    def _parse_bool(self, raw_value):
+        if raw_value is None or raw_value == "":
+            return None
+        value = str(raw_value).strip().lower()
+        if value in {"1", "true", "yes", "y"}:
+            return True
+        if value in {"0", "false", "no", "n"}:
+            return False
+        return None
+
+    def _employee_name(self, employee):
+        if not employee:
+            return "-"
+        name = f"{getattr(employee, 'employee_first_name', '')} {getattr(employee, 'employee_last_name', '')}".strip()
+        return name or f"Employee #{employee.id}"
+
+    def _employee_scope(self, request):
+        employee = getattr(request.user, "employee_get", None)
+        base_qs = Employee.objects.all().order_by("employee_first_name", "employee_last_name", "id")
+        can_view_all = bool(getattr(request.user, "is_superuser", False) or request.user.has_perm("attendance.view_attendancepunchinghistory"))
+
+        if can_view_all:
+            employees = list(base_qs)
+        elif employee:
+            subordinate_ids = list(
+                filtersubordinatesemployeemodel(
+                    request,
+                    Employee.objects.all(),
+                    "attendance.view_attendancepunchinghistory",
+                ).values_list("id", flat=True)
+            )
+            subordinate_ids = [emp_id for emp_id in subordinate_ids if emp_id != employee.id]
+            scoped_ids = [employee.id] + subordinate_ids
+            employees = list(Employee.objects.filter(id__in=scoped_ids))
+            employees.sort(
+                key=lambda emp: (
+                    0 if employee and emp.id == employee.id else 1,
+                    (emp.employee_first_name or "").lower(),
+                    (emp.employee_last_name or "").lower(),
+                    emp.id,
+                )
+            )
+        else:
+            employees = []
+
+        options = [{"id": emp.id, "name": self._employee_name(emp)} for emp in employees]
+        default_employee_id = employee.id if employee else (employees[0].id if len(employees) == 1 else None)
+        show_filter = len(options) > 1
+        return options, show_filter, default_employee_id
+
+    def get_queryset(self, request):
+        queryset = AttendancePunchingHistory.objects.select_related("employee_id", "attendance_id").all()
+        return filtersubordinates(request, queryset, "attendance.view_attendancepunchinghistory")
+
+    def get(self, request):
+        today = dj_timezone.localdate()
+        start_date = self._parse_date(request.GET.get("start_date"), today)
+        end_date = self._parse_date(request.GET.get("end_date"), today)
+        if start_date > end_date:
+            start_date, end_date = end_date, start_date
+
+        employee_options, show_employee_filter, default_employee_id = self._employee_scope(request)
+        allow_all_employees = show_employee_filter
+        if allow_all_employees:
+            employee_options = [{"id": "all", "name": "All Employee"}] + employee_options
+
+        allowed_employee_ids = {str(item["id"]) for item in employee_options if item.get("id") is not None}
+
+        raw_selected_employee_id = request.GET.get("employee_id")
+        if raw_selected_employee_id is None or raw_selected_employee_id == "":
+            selected_employee_id = default_employee_id if default_employee_id is not None else None
+        else:
+            raw_selected_employee_id = str(raw_selected_employee_id).strip().lower()
+            if raw_selected_employee_id in {"all", "0"} and allow_all_employees:
+                selected_employee_id = "all"
+            else:
+                try:
+                    candidate_employee_id = int(raw_selected_employee_id)
+                except Exception:
+                    candidate_employee_id = None
+                selected_employee_id = candidate_employee_id if candidate_employee_id is not None else None
+
+        if selected_employee_id is not None and str(selected_employee_id) not in allowed_employee_ids:
+            selected_employee_id = default_employee_id if default_employee_id is not None else None
+
+        queryset = self.get_queryset(request).filter(
+            punch_timestamp__date__gte=start_date,
+            punch_timestamp__date__lte=end_date,
+        )
+
+        if selected_employee_id not in (None, "all"):
+            queryset = queryset.filter(employee_id_id=selected_employee_id)
+
+        source = (request.GET.get("source") or "").strip().lower()
+        valid_sources = {choice[0] for choice in AttendancePunchSource.choices}
+        if source in valid_sources:
+            queryset = queryset.filter(source=source)
+
+        accepted_to_attendance = self._parse_bool(request.GET.get("accepted_to_attendance"))
+        if accepted_to_attendance is not None:
+            queryset = queryset.filter(accepted_to_attendance=accepted_to_attendance)
+
+        queryset = queryset.order_by("-punch_timestamp", "-id")
+
+        paginator = self.pagination_class()
+        page = paginator.paginate_queryset(queryset, request)
+        serializer = AttendancePunchingHistorySerializer(page, many=True, context={"request": request})
+        response = paginator.get_paginated_response(serializer.data)
+        response.data["start_date"] = start_date.isoformat()
+        response.data["end_date"] = end_date.isoformat()
+        response.data["selected_employee_id"] = selected_employee_id
+        response.data["show_employee_filter"] = show_employee_filter
+        response.data["employee_options"] = employee_options
+        response.data["allow_all_employees"] = allow_all_employees
+        return response
+
+
+class AttendanceTypeAccessCheck(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        employee_id = user.employee_get.id
+
+        if user.has_perm("attendance.view_attendance"):
+            return Response(status=200)
+
+        is_manager = (
+            EmployeeWorkInformation.objects.filter(reporting_manager_id=employee_id)
+            .only("id")
+            .exists()
+        )
+
+        if is_manager:
+            return Response(status=200)
+
+        return Response(
+            {"error": "Permission denied"}, status=status.HTTP_403_FORBIDDEN
+        )
+
+class UserAttendanceDetailedView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, id):
+        attendance = get_object_or_404(Attendance, pk=id)
+        if attendance.employee_id == request.user.employee_get:
+            serializer = UserAttendanceDetailedSerializer(attendance)
+            return Response(serializer.data, status=200)
+        return Response(
+            {"error": "Permission denied"}, status=status.HTTP_403_FORBIDDEN
+        )
+
+
+class PDFRenderer(BaseRenderer):
+    media_type = "application/pdf"
+    format = "pdf"
+    charset = None
+    render_style = "binary"
+
+    def render(self, data, accepted_media_type=None, renderer_context=None):
+        if data is None:
+            return b""
+        if isinstance(data, (bytes, bytearray)):
+            return bytes(data)
+        if isinstance(data, str):
+            return data.encode("utf-8")
+        try:
+            return json.dumps(data).encode("utf-8")
+        except Exception:
+            return str(data).encode("utf-8")
+
+
+
+class AttendanceMonthlyRecapAPIView(APIView):
+    """Attendance → Attendances (Monthly recap) rows.
+
+    Query params (GET):
+      - employee_id (optional; defaults to the logged-in user)
+      - month (optional; YYYY-MM; defaults to current month)
+      - lang (optional; en|id; defaults to request language or en)
+
+    Response:
+      {"rows": [{no, date, shift_information, check_in, check_out, work_type, late, early_out, note, is_off}]}
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def _resolve_language(self, request) -> str:
+        lang = (request.GET.get("lang") or getattr(request, "LANGUAGE_CODE", "en") or "en")
+        lang = lang.split("-")[0].lower().strip()
+        return "id" if lang == "id" else "en"
+
+    def _resolve_month(self, request) -> str:
+        # Default month = current month
+        month = request.GET.get("month") or dj_timezone.localdate().strftime("%Y-%m")
+
+        # Validate format YYYY-MM; fallback to current month if malformed
+        try:
+            if len(month) != 7 or month[4] != "-":
+                raise ValueError
+            year = int(month[:4])
+            mon = int(month[5:7])
+            if mon < 1 or mon > 12:
+                raise ValueError
+        except Exception:
+            month = dj_timezone.localdate().strftime("%Y-%m")
+
+        # Disallow future months
+        current_month = dj_timezone.localdate().strftime("%Y-%m")
+        if month > current_month:
+            month = current_month
+        return month
+
+    def _allowed_employees_qs(self, request):
+        """Employees accessible to the requester.
+
+        Mirrors the logic of horilla_api.api_methods.base.methods.permission_based_queryset
+        but for Employee queryset.
+        """
+
+        from employee.models import Employee
+
+        user = request.user
+        employee = getattr(user, "employee_get", None)
+        qs = Employee.objects.filter(is_active=True).select_related("employee_work_info")
+
+        # HR/Admin: full access
+        if user.has_perm("attendance.view_attendance"):
+            return qs
+
+        if not employee:
+            return qs.none()
+
+        # Manager: self + subordinates
+        is_manager = EmployeeWorkInformation.objects.filter(reporting_manager_id=employee).exists()
+        if is_manager:
+            return qs.filter(Q(id=employee.id) | Q(employee_work_info__reporting_manager_id=employee))
+
+        # Regular user: self only
+        return qs.filter(id=employee.id)
+
+    def get(self, request):
+        from attendance.services.monthly_recap import get_monthly_attendance_recap
+
+        month = self._resolve_month(request)
+        lang = self._resolve_language(request)
+
+        employees_qs = self._allowed_employees_qs(request)
+
+        # Resolve employee
+        emp_id_raw = request.GET.get("employee_id")
+        selected_employee = None
+        if emp_id_raw:
+            try:
+                selected_employee = employees_qs.filter(id=int(emp_id_raw)).first()
+            except Exception:
+                selected_employee = None
+
+            if selected_employee is None:
+                return Response({"error": "Invalid employee_id"}, status=status.HTTP_400_BAD_REQUEST)
+        else:
+            # Default: self (if accessible), else first accessible employee
+            try:
+                me = request.user.employee_get
+                selected_employee = employees_qs.filter(id=me.id).first() if me else None
+            except Exception:
+                selected_employee = None
+            if selected_employee is None:
+                selected_employee = employees_qs.first()
+
+        if selected_employee is None:
+            return Response(
+                {
+                    "employee_id": None,
+                    "month": month,
+                    "lang": lang,
+                    "summary": {
+                        "late_minutes": 0,
+                        "early_out_minutes": 0,
+                        "total_minutes": 0,
+                    },
+                    "rows": [],
+                },
+                status=200,
+            )
+
+        recap = get_monthly_attendance_recap(selected_employee, month, language=lang)
+        rows = recap["rows"]
+        payload_rows = [
+            {
+                "no": r.no,
+                "date": r.attendance_date.strftime("%Y-%m-%d"),
+                "shift_information": r.shift_information,
+                "check_in": r.check_in,
+                "check_out": r.check_out,
+                "work_type": r.work_type,
+                "late": r.late,
+                "early_out": r.early_out,
+                "note": r.note,
+                "is_off": bool(getattr(r, "is_off", False)),
+            }
+            for r in rows
+        ]
+        return Response(
+            {
+                "employee_id": selected_employee.id,
+                "month": month,
+                "lang": lang,
+                "summary": recap["summary"],
+                "rows": payload_rows,
+            },
+            status=200,
+        )
+
+
+class AttendanceMonthlyRecapExportPDFAPIView(AttendanceMonthlyRecapAPIView):
+    """Export Attendance → Attendances (Monthly recap) as PDF for mobile/API clients."""
+
+    permission_classes = [IsAuthenticated]
+    renderer_classes = [PDFRenderer, JSONRenderer]
+
+    def get(self, request):
+        month = self._resolve_month(request)
+        lang = self._resolve_language(request)
+        employees_qs = self._allowed_employees_qs(request)
+
+        emp_id_raw = request.GET.get("employee_id")
+        if not emp_id_raw:
+            return Response({"error": "employee_id is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            employee = employees_qs.filter(id=int(emp_id_raw)).first()
+        except Exception:
+            employee = None
+
+        if employee is None:
+            return Response({"error": "Invalid employee_id"}, status=status.HTTP_400_BAD_REQUEST)
+
+        from attendance.services.monthly_recap import get_monthly_attendance_recap
+
+        recap = get_monthly_attendance_recap(employee, month, language=lang)
+        rows = recap["rows"]
+        year = int(month[:4])
+        month_no = int(month[5:7])
+
+        if lang == "id":
+            month_names_id = [
+                "Januari",
+                "Februari",
+                "Maret",
+                "April",
+                "Mei",
+                "Juni",
+                "Juli",
+                "Agustus",
+                "September",
+                "Oktober",
+                "November",
+                "Desember",
+            ]
+            month_display = month_names_id[month_no - 1]
+            title = "Rekap Absensi Bulanan"
+        else:
+            month_display = calendar.month_name[month_no]
+            title = "Monthly Attendance Report"
+
+        context = {
+            "lang": lang,
+            "title": title,
+            "employee": employee,
+            "month_display": month_display,
+            "year": year,
+            "rows": rows,
+            "summary": recap["summary"],
+        }
+
+        filename = f"monthly_attendance_{employee.id}_{month}_{lang}.pdf"
+        html_content = render_to_string("attendance/attendances/monthly_export_pdf.html", context)
+        result = io.BytesIO()
+        pdf_status = pisa.CreatePDF(src=html_content, dest=result)
+        if pdf_status.err:
+            logger.error("Error creating Monthly Recap PDF via API")
+            return Response({"error": "Error generating PDF"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        response = HttpResponse(result.getvalue(), content_type="application/pdf")
+        response["Content-Disposition"] = f'attachment; filename="{filename}"'
+        return response
