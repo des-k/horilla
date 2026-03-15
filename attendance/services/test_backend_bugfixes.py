@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+from pathlib import Path
 from datetime import date, datetime
 
 from django.utils import timezone
@@ -95,6 +96,69 @@ class ClockOutWindowBugfixTests(SimpleTestCase):
         self.assertNotIn('attendance.out_attendance_status = "REJECTED"', source)
         self.assertNotIn('EARLY_CHECKOUT_BEFORE_SHIFT_END', source)
         self.assertNotIn('EARLY_CHECKOUT_BEFORE_CUTOFF_IN', source)
+
+
+class CanonicalFlowSourceInspectionTests(SimpleTestCase):
+    def test_web_clock_out_does_not_manually_reapply_early_out_after_canonical_checkout(self):
+        source = inspect.getsource(clock_in_out.clock_out)
+        self.assertNotIn('late_come_early_out.filter(type="early_out")', source)
+        self.assertNotIn('schedule = _get_schedule(shift, day)', source)
+
+    def test_api_clock_out_does_not_manually_reapply_early_out_after_canonical_checkout(self):
+        from horilla_api.api_views.attendance.views import ClockOutAPIView
+
+        source = inspect.getsource(ClockOutAPIView.post)
+        self.assertNotIn('late_come_early_out.filter(type="early_out")', source)
+        self.assertNotIn('AttendanceLateComeEarlyOut.objects.filter(attendance_id=attendance, type="early_out").delete()', source)
+
+    def test_request_restore_helpers_delegate_to_canonical_recompute_without_snapshot_restore(self):
+        from attendance.views.requests import _restore_request_back_to_raw as web_restore
+        from horilla_api.api_views.attendance.views import _restore_request_back_to_raw as api_restore
+
+        web_source = inspect.getsource(web_restore)
+        api_source = inspect.getsource(api_restore)
+
+        self.assertIn('clear_request_override_and_recompute', web_source)
+        self.assertIn('clear_request_override_and_recompute', api_source)
+        self.assertNotIn('restore_raw_state_after_request', web_source)
+        self.assertNotIn('restore_raw_state_after_request', api_source)
+
+    def test_request_cancel_and_reject_handlers_no_longer_delete_derived_rows_manually(self):
+        from attendance.views.requests import cancel_attendance_request, reject_validate_attendance_request
+        from horilla_api.api_views.attendance.views import AttendanceRequestCancelView, AttendanceRequestRejectView
+
+        self.assertNotIn('AttendanceActivity.objects.filter(', inspect.getsource(cancel_attendance_request))
+        self.assertNotIn('AttendanceLateComeEarlyOut.objects.filter(attendance_id=attendance).delete()', inspect.getsource(cancel_attendance_request))
+        self.assertNotIn('AttendanceActivity.objects.filter(', inspect.getsource(reject_validate_attendance_request))
+        self.assertNotIn('AttendanceLateComeEarlyOut.objects.filter(attendance_id=attendance).delete()', inspect.getsource(reject_validate_attendance_request))
+        self.assertNotIn('AttendanceActivity.objects.filter(', inspect.getsource(AttendanceRequestCancelView.put))
+        self.assertNotIn('AttendanceLateComeEarlyOut.objects.filter(attendance_id=attendance).delete()', inspect.getsource(AttendanceRequestCancelView.put))
+        self.assertNotIn('AttendanceActivity.objects.filter(', inspect.getsource(AttendanceRequestRejectView.put))
+        self.assertNotIn('AttendanceLateComeEarlyOut.objects.filter(attendance_id=attendance).delete()', inspect.getsource(AttendanceRequestRejectView.put))
+
+    def test_web_clock_in_does_not_manually_reapply_late_come_before_reconcile(self):
+        source = inspect.getsource(clock_in_out.clock_in_attendance_and_activity)
+        self.assertNotIn('late_come(', source)
+        self.assertNotIn('attendance_created and accept_in', source)
+
+    def test_leave_signal_paths_still_delegate_to_canonical_range_recompute(self):
+        from leave import signals as leave_signals
+
+        self.assertIn('recompute_attendance_range', inspect.getsource(leave_signals._reconcile_leave_related_punches))
+
+    def test_work_type_actions_recompute_canonical_range_for_revoke_and_document_transitions(self):
+        source = Path('attendance/views/work_type_requests.py').read_text()
+        self.assertIn('def work_type_request_revoke', source)
+        self.assertIn('def work_type_request_document_action', source)
+        self.assertIn('recompute_attendance_range(req.employee_id, req.start_date, req.end_date)', source)
+
+        from horilla_api.api_views.attendance.views import WorkModeRequestDocumentActionView
+        self.assertIn('recompute_attendance_range', inspect.getsource(WorkModeRequestDocumentActionView.put))
+
+    def test_monthly_pdf_export_uses_shared_monthly_recap_service(self):
+        source = Path('attendance/views/views.py').read_text()
+        self.assertIn('def attendance_employee_month_export_pdf', source)
+        self.assertIn('get_monthly_attendance_recap(employee, month, language=lang)', source)
 
 
 class AttendanceSaveBugfixTests(SimpleTestCase):
