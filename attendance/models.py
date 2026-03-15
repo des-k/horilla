@@ -1014,6 +1014,32 @@ class Attendance(HorillaModel):
             # worked-hour recalculation because core attendance facts did not change.
             return super().save(*args, **kwargs)
 
+        if update_fields is not None:
+            expanded_update_fields = set(update_fields)
+            trigger_fields = {
+                "attendance_clock_in",
+                "attendance_clock_in_date",
+                "attendance_clock_out",
+                "attendance_clock_out_date",
+                "attendance_worked_hour",
+                "attendance_overtime",
+                "minimum_hour",
+                "is_presensi_only",
+            }
+            if expanded_update_fields & trigger_fields:
+                expanded_update_fields.update(
+                    {
+                        "attendance_worked_hour",
+                        "attendance_overtime",
+                        "at_work_second",
+                        "overtime_second",
+                        "minimum_hour",
+                        "attendance_day",
+                    }
+                )
+                kwargs["update_fields"] = list(expanded_update_fields)
+                update_fields = kwargs["update_fields"]
+
         compress_model_image_field(self, "attendance_clock_in_image")
         compress_model_image_field(self, "attendance_clock_out_image")
         if self.is_presensi_only:
