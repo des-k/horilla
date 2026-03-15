@@ -120,7 +120,7 @@ class AttendanceSaveUpdateFieldsTests(unittest.TestCase):
              patch("attendance.models.Attendance.update_attendance_overtime") as update_ot_mock, \
              patch("attendance.models.Attendance.adjust_minimum_hour") as adjust_min_mock, \
              patch("attendance.models.Attendance.handle_overtime_conditions") as handle_ot_mock, \
-             patch("attendance.models.EmployeeShiftDay.objects.get") as shift_day_get_mock, \
+             patch.object(__import__("attendance.models", fromlist=["EmployeeShiftDay"]).EmployeeShiftDay.objects, "get", create=True) as shift_day_get_mock, \
              patch("attendance.models.HorillaModel.save", autospec=True, return_value=None) as super_save_mock:
             attendance.save(update_fields=["request_restore_snapshot"])
 
@@ -143,14 +143,16 @@ class AttendanceSaveUpdateFieldsTests(unittest.TestCase):
         overtime_account.overtime_second = 0
         employee_overtime_qs = Mock()
         employee_overtime_qs.first.return_value = overtime_account
-        attendance.employee_id = Mock()
-        attendance.employee_id.employee_overtime.filter.return_value = employee_overtime_qs
+        employee = Mock()
+        employee.employee_overtime.filter.return_value = employee_overtime_qs
+        attendance.employee_id_id = 1
+        attendance._state.fields_cache["employee_id"] = employee
 
         with patch("attendance.models.compress_model_image_field") as compress_mock, \
              patch("attendance.models.Attendance.update_attendance_overtime") as update_ot_mock, \
              patch("attendance.models.Attendance.adjust_minimum_hour") as adjust_min_mock, \
              patch("attendance.models.Attendance.handle_overtime_conditions") as handle_ot_mock, \
-             patch("attendance.models.EmployeeShiftDay.objects.get", return_value=Mock()), \
+             patch.object(__import__("attendance.models", fromlist=["EmployeeShiftDay"]).EmployeeShiftDay.objects, "get", create=True, return_value=__import__("attendance.models", fromlist=["EmployeeShiftDay"]).EmployeeShiftDay(day="saturday")) as shift_day_get_mock, \
              patch("attendance.models.Attendance.update_ot") as update_ot_account_mock, \
              patch("attendance.models.HorillaModel.save", autospec=True, return_value=None) as super_save_mock:
             attendance.save(update_fields=["request_description"])
