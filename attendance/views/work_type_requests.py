@@ -474,8 +474,9 @@ def work_type_request_document_action(request, obj_id: int, action: str):
         req.action_by = employee
         req.action_at = req.document_verified_at
         req.action_type = "VERIFIED"
+        req.action_reason = remark
         req.document_remark = remark
-        req.save(update_fields=["document_status", "document_verified_by", "document_verified_at", "action_by", "action_at", "action_type", "document_remark"])
+        req.save(update_fields=["document_status", "document_verified_by", "document_verified_at", "action_by", "action_at", "action_type", "action_reason", "document_remark"])
         _log_request_action(req, employee, action_type="VERIFIED", old_status=f"document:{previous}", new_status=f"document:{req.document_status}", remark=remark)
         recompute_attendance_range(req.employee_id, req.start_date, req.end_date)
         messages.success(request, _("Document verified."))
@@ -488,8 +489,9 @@ def work_type_request_document_action(request, obj_id: int, action: str):
         req.action_by = employee
         req.action_at = timezone.now()
         req.action_type = "REJECTED"
+        req.action_reason = remark
         req.document_remark = remark
-        req.save(update_fields=["document_status", "action_by", "action_at", "action_type", "document_remark"])
+        req.save(update_fields=["document_status", "action_by", "action_at", "action_type", "action_reason", "document_remark"])
         _log_request_action(req, employee, action_type="REJECTED", old_status=f"document:{previous}", new_status=f"document:{req.document_status}", remark=remark)
         recompute_attendance_range(req.employee_id, req.start_date, req.end_date)
         messages.success(request, _("Document rejected."))
@@ -504,8 +506,9 @@ def work_type_request_document_action(request, obj_id: int, action: str):
         req.action_by = employee
         req.action_at = timezone.now()
         req.action_type = "REOPENED"
+        req.action_reason = remark
         req.document_remark = remark
-        req.save(update_fields=["document_status", "document_verified_by", "document_verified_at", "action_by", "action_at", "action_type", "document_remark"])
+        req.save(update_fields=["document_status", "document_verified_by", "document_verified_at", "action_by", "action_at", "action_type", "action_reason", "document_remark"])
         _log_request_action(req, employee, action_type="REOPENED", old_status=f"document:{previous}", new_status=f"document:{req.document_status}", remark=remark)
         recompute_attendance_range(req.employee_id, req.start_date, req.end_date)
         messages.success(request, _("Document review reopened."))
