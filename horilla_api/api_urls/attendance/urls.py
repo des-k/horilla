@@ -175,6 +175,7 @@ urlpatterns = [
         name="api-work-type-request-action",
     ),
 
+    path("mobile-attendance-settings/", MobileAttendanceSettingsAPIView.as_view(), name="api-mobile-attendance-settings"),
     path("checking-in", CheckingStatus.as_view()),
     path("offline-employee-mail-send", OfflineEmployeeMailsend.as_view()),
     path("converted-mail-template", ConvertedMailTemplateConvert.as_view()),
