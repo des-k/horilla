@@ -2451,8 +2451,10 @@ class MobileAttendanceSettingsAPIView(APIView):
 
         return Response(
             {
-                "face_detection_enabled": True,
+                "face_detection_enabled": bool(face_detection.start),
                 "location_enabled": True,
+                "location_capture_enabled": True,
+                "geofencing_enabled": False,
                 "read_only": True,
             },
             status=status.HTTP_200_OK,
