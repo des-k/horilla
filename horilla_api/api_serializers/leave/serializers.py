@@ -7,21 +7,24 @@ from leave.models import *
 
 
 def leave_Validations(self, data):
-    start_date = data.get("start_date")
-    end_date = data.get("end_date")
+    instance = getattr(self, "instance", None)
+    start_date = data.get("start_date") or getattr(instance, "start_date", None)
+    end_date = data.get("end_date") or getattr(instance, "end_date", None)
     start_date_breakdown = (
         data.get("start_date_breakdown")
         if data.get("start_date_breakdown") is not None
-        else "full_day"
+        else getattr(instance, "start_date_breakdown", "full_day")
     )
     end_date_breakdown = (
         data.get("end_date_breakdown")
         if data.get("end_date_breakdown") is not None
-        else "full_day"
+        else getattr(instance, "end_date_breakdown", "full_day")
     )
-    employee = data.get("employee_id")
-    leave_type_id = data.get("leave_type_id")
+    employee = data.get("employee_id") or getattr(instance, "employee_id", None)
+    leave_type_id = data.get("leave_type_id") or getattr(instance, "leave_type_id", None)
     attachment = data.get("attachment")
+    if attachment is None and instance is not None:
+        attachment = getattr(instance, "attachment", None)
     available_leave = (
         AvailableLeave.objects.filter(
             leave_type_id=leave_type_id, employee_id=employee
@@ -51,9 +54,9 @@ def leave_Validations(self, data):
     )
     errors = {}
     # checking if there is any requested days is overlapping with the existing leave request
-    leave_requests = employee.leaverequest_set.filter(
-        start_date__lte=end_date, end_date__gte=start_date
-    )
+    leave_requests = employee.leaverequest_set.exclude(
+        status__in=["cancelled", "rejected"]
+    ).filter(start_date__lte=end_date, end_date__gte=start_date)
     if self.instance:
         leave_requests = leave_requests.exclude(id=self.instance.id)
     if leave_requests:
