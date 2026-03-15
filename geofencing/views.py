@@ -169,25 +169,18 @@ def get_company_location(request):
 @permission_required("geofencing.add_localbackup")
 def geo_location_config(request):
     if request.method == "POST":
-        try:
-            form = GeoFencingSetupForm(
-                request.POST, instance=get_company_location(request)
-            )
-        except Exception as e:
-            data = request.POST
-            if isinstance(data, QueryDict):
-                data = data.dict()
-            if get_company(request) == None:
-                data["company_id"] = None
-            form = GeoFencingSetupForm(data=data)
-        if form.is_valid():
-            form.save()
-            messages.success(request, _("Geofencing config created successfully."))
-        else:
-            messages.info(request, "Not valid")
+        messages.info(
+            request,
+            _("Location capture is managed by the system and cannot be changed here."),
+        )
 
-    try:
-        form = GeoFencingSetupForm(instance=get_company_location(request))
-    except Exception as e:
-        form = GeoFencingSetupForm()
-    return render(request, "geo_config.html", {"form": form})
+    return render(
+        request,
+        "geo_config.html",
+        {
+            "location_enabled": True,
+            "location_capture_enabled": True,
+            "geofencing_enabled": False,
+            "read_only": True,
+        },
+    )
