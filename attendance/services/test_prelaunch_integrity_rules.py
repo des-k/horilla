@@ -140,78 +140,82 @@ class PrelaunchIntegrityRuleTests(unittest.TestCase):
         self.assertEqual(row.check_out, "17:12")
 
     def test_schedule_normal_day_approved_in_later_than_raw_still_wins(self):
-        att = monthly_recap.Attendance()
-        att.id = 20
-        att.employee_id = self.employee
-        att.attendance_date = self.target_date
-        att.attendance_clock_in_date = self.target_date
-        att.attendance_clock_in = time(8, 15)
-        att.attendance_clock_out_date = self.target_date
-        att.attendance_clock_out = time(17, 0)
-        att.attendance_clock_in_channel = APPROVED_REQUEST_CHANNEL
-        att.attendance_clock_out_channel = "biometric"
-        att.requested_data = json.dumps({
-            "attendance_clock_in_date": "2026-03-03",
-            "attendance_clock_in": "08:15",
-            "__meta": {"approved_scopes": ["IN"]},
-        })
-        att.is_validate_request = False
-        att.is_validate_request_approved = True
-        att.shift_id = "SHIFT-A"
-        att.work_type_id = None
-        att.attendance_validated = True
-        act = monthly_recap.AttendanceActivity()
-        act.id = 21
-        act.employee_id = self.employee
-        act.attendance_date = self.target_date
-        act.clock_in_date = self.target_date
-        act.clock_in = time(8, 1)
-        act.in_datetime = datetime(2026, 3, 3, 8, 1)
-        act.clock_out_date = None
-        act.clock_out = None
-        act.out_datetime = None
-        act.clock_in_channel = "biometric"
-        act.clock_out_channel = None
-        act.work_mode_request_id = None
+        att = SimpleNamespace(
+            id=20,
+            employee_id=self.employee,
+            attendance_date=self.target_date,
+            attendance_clock_in_date=self.target_date,
+            attendance_clock_in=time(8, 15),
+            attendance_clock_out_date=self.target_date,
+            attendance_clock_out=time(17, 0),
+            attendance_clock_in_channel=APPROVED_REQUEST_CHANNEL,
+            attendance_clock_out_channel="biometric",
+            requested_data=json.dumps({
+                "attendance_clock_in_date": "2026-03-03",
+                "attendance_clock_in": "08:15",
+                "__meta": {"approved_scopes": ["IN"]},
+            }),
+            is_validate_request=False,
+            is_validate_request_approved=True,
+            shift_id="SHIFT-A",
+            work_type_id=None,
+            attendance_validated=True,
+        )
+        act = SimpleNamespace(
+            id=21,
+            employee_id=self.employee,
+            attendance_date=self.target_date,
+            clock_in_date=self.target_date,
+            clock_in=time(8, 1),
+            in_datetime=datetime(2026, 3, 3, 8, 1),
+            clock_out_date=None,
+            clock_out=None,
+            out_datetime=None,
+            clock_in_channel="biometric",
+            clock_out_channel=None,
+            work_mode_request_id=None,
+        )
         monthly_recap.Attendance.objects = FakeManager([att])
         monthly_recap.AttendanceActivity.objects = FakeManager([act])
         row = self._find_row(monthly_recap.get_monthly_attendance_rows(self.employee, "2026-03"), self.target_date)
         self.assertEqual(row.check_in, "08:15")
 
     def test_schedule_normal_day_approved_out_earlier_than_raw_still_wins(self):
-        att = monthly_recap.Attendance()
-        att.id = 30
-        att.employee_id = self.employee
-        att.attendance_date = self.target_date
-        att.attendance_clock_in_date = self.target_date
-        att.attendance_clock_in = time(8, 0)
-        att.attendance_clock_out_date = self.target_date
-        att.attendance_clock_out = time(16, 45)
-        att.attendance_clock_in_channel = "biometric"
-        att.attendance_clock_out_channel = APPROVED_REQUEST_CHANNEL
-        att.requested_data = json.dumps({
-            "attendance_clock_out_date": "2026-03-03",
-            "attendance_clock_out": "16:45",
-            "__meta": {"approved_scopes": ["OUT"]},
-        })
-        att.is_validate_request = False
-        att.is_validate_request_approved = True
-        att.shift_id = "SHIFT-A"
-        att.work_type_id = None
-        att.attendance_validated = True
-        act = monthly_recap.AttendanceActivity()
-        act.id = 31
-        act.employee_id = self.employee
-        act.attendance_date = self.target_date
-        act.clock_in_date = None
-        act.clock_in = None
-        act.in_datetime = None
-        act.clock_out_date = self.target_date
-        act.clock_out = time(17, 10)
-        act.out_datetime = datetime(2026, 3, 3, 17, 10)
-        act.clock_in_channel = None
-        act.clock_out_channel = "mobile"
-        act.work_mode_request_id = None
+        att = SimpleNamespace(
+            id=30,
+            employee_id=self.employee,
+            attendance_date=self.target_date,
+            attendance_clock_in_date=self.target_date,
+            attendance_clock_in=time(8, 0),
+            attendance_clock_out_date=self.target_date,
+            attendance_clock_out=time(16, 45),
+            attendance_clock_in_channel="biometric",
+            attendance_clock_out_channel=APPROVED_REQUEST_CHANNEL,
+            requested_data=json.dumps({
+                "attendance_clock_out_date": "2026-03-03",
+                "attendance_clock_out": "16:45",
+                "__meta": {"approved_scopes": ["OUT"]},
+            }),
+            is_validate_request=False,
+            is_validate_request_approved=True,
+            shift_id="SHIFT-A",
+            work_type_id=None,
+            attendance_validated=True,
+        )
+        act = SimpleNamespace(
+            id=31,
+            employee_id=self.employee,
+            attendance_date=self.target_date,
+            clock_in_date=None,
+            clock_in=None,
+            in_datetime=None,
+            clock_out_date=self.target_date,
+            clock_out=time(17, 10),
+            out_datetime=datetime(2026, 3, 3, 17, 10),
+            clock_in_channel=None,
+            clock_out_channel="mobile",
+            work_mode_request_id=None,
+        )
         monthly_recap.Attendance.objects = FakeManager([att])
         monthly_recap.AttendanceActivity.objects = FakeManager([act])
         row = self._find_row(monthly_recap.get_monthly_attendance_rows(self.employee, "2026-03"), self.target_date)
@@ -262,26 +266,27 @@ class PrelaunchIntegrityRuleTests(unittest.TestCase):
 
 
     def test_schedule_window_approved_request_outside_window_stays_only_in_note(self):
-        att = monthly_recap.Attendance()
-        att.id = 50
-        att.employee_id = self.employee
-        att.attendance_date = self.target_date
-        att.attendance_clock_in_date = self.target_date
-        att.attendance_clock_in = time(13, 5)
-        att.attendance_clock_out_date = self.target_date
-        att.attendance_clock_out = time(17, 0)
-        att.attendance_clock_in_channel = APPROVED_REQUEST_CHANNEL
-        att.attendance_clock_out_channel = "biometric"
-        att.requested_data = json.dumps({
-            "attendance_clock_in_date": "2026-03-03",
-            "attendance_clock_in": "13:05",
-            "__meta": {"approved_scopes": ["IN"]},
-        })
-        att.is_validate_request = False
-        att.is_validate_request_approved = True
-        att.shift_id = "SHIFT-A"
-        att.work_type_id = None
-        att.attendance_validated = True
+        att = SimpleNamespace(
+            id=50,
+            employee_id=self.employee,
+            attendance_date=self.target_date,
+            attendance_clock_in_date=self.target_date,
+            attendance_clock_in=time(13, 5),
+            attendance_clock_out_date=self.target_date,
+            attendance_clock_out=time(17, 0),
+            attendance_clock_in_channel=APPROVED_REQUEST_CHANNEL,
+            attendance_clock_out_channel="biometric",
+            requested_data=json.dumps({
+                "attendance_clock_in_date": "2026-03-03",
+                "attendance_clock_in": "13:05",
+                "__meta": {"approved_scopes": ["IN"]},
+            }),
+            is_validate_request=False,
+            is_validate_request_approved=True,
+            shift_id="SHIFT-A",
+            work_type_id=None,
+            attendance_validated=True,
+        )
         monthly_recap.Attendance.objects = FakeManager([att])
         row = self._find_row(monthly_recap.get_monthly_attendance_rows(self.employee, "2026-03"), self.target_date)
         self.assertEqual(row.check_in, "-")
@@ -299,19 +304,20 @@ class PrelaunchIntegrityRuleTests(unittest.TestCase):
             mode=monthly_recap.AttendanceWorkMode.ON_DUTY,
             planned_time=time(8, 0),
         )
-        act = monthly_recap.AttendanceActivity()
-        act.id = 62
-        act.employee_id = self.employee
-        act.attendance_date = self.target_date
-        act.clock_in_date = self.target_date
-        act.clock_in = time(8, 0)
-        act.in_datetime = datetime(2026, 3, 3, 8, 0)
-        act.clock_out_date = None
-        act.clock_out = None
-        act.out_datetime = None
-        act.clock_in_channel = "mobile"
-        act.clock_out_channel = None
-        act.work_mode_request_id = pending_work_req
+        act = SimpleNamespace(
+            id=62,
+            employee_id=self.employee,
+            attendance_date=self.target_date,
+            clock_in_date=self.target_date,
+            clock_in=time(8, 0),
+            in_datetime=datetime(2026, 3, 3, 8, 0),
+            clock_out_date=None,
+            clock_out=None,
+            out_datetime=None,
+            clock_in_channel="mobile",
+            clock_out_channel=None,
+            work_mode_request_id=pending_work_req,
+        )
         monthly_recap.WorkModeRequest.objects = FakeManager([pending_work_req])
         monthly_recap.AttendanceActivity.objects = FakeManager([act])
         row = self._find_row(monthly_recap.get_monthly_attendance_rows(self.employee, "2026-03"), self.target_date)
