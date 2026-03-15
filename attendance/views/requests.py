@@ -32,18 +32,15 @@ from attendance.methods.utils import (
     get_diff_dict,
     get_employee_last_name,
     paginator_qry,
-    shift_schedule_today,
 )
 from attendance.models import (
     Attendance,
     AttendanceActivity,
-    AttendanceLateComeEarlyOut,
     AttendanceRequestActionType,
     AttendanceRequestComment,
     AttendanceRequestFile,
     BatchAttendance,
 )
-from attendance.views.clock_in_out import early_out, late_come
 import attendance.views.clock_in_out as cio
 from attendance.services.activity_sync import (
     get_requested_sessions,
@@ -53,12 +50,11 @@ from attendance.services.activity_sync import (
 )
 from attendance.services.punching_history import (
     capture_request_restore_snapshot,
-    clear_request_restore_snapshot,
     clear_raw_links_for_request_override,
     reconcile_attendance_punches,
-    restore_raw_state_after_request,
 )
 from attendance.services.reconciliation import recompute_attendance
+from attendance.services.request_override_recompute import clear_request_override_and_recompute
 from attendance.services.request_audit import log_request_action
 from base.methods import (
     choosesubordinates,
@@ -186,31 +182,6 @@ def _mark_approved_request_channels(attendance: Attendance) -> Attendance:
     return mark_approved_request_channels(attendance)
 
 
-def _refresh_late_come_early_out(attendance: Attendance):
-    """Recompute Late Come / Early Out records using schedule-level grace time."""
-
-    shift = attendance.shift_id
-    if not shift:
-        return
-
-    day_name = attendance.attendance_date.strftime("%A").lower()
-    day = EmployeeShiftDay.objects.get(day=day_name)
-
-    # Remove existing markers for this attendance (because times may have changed)
-    AttendanceLateComeEarlyOut.objects.filter(
-        attendance_id=attendance, type__in=["late_come", "early_out"]
-    ).delete()
-
-    _, start_time_sec, end_time_sec = shift_schedule_today(day=day, shift=shift)
-    schedule = _get_shift_schedule(shift, day)
-
-    if attendance.attendance_clock_in:
-        late_come(attendance, start_time=start_time_sec, end_time=end_time_sec, shift=shift, schedule=schedule)
-
-    if attendance.attendance_clock_out:
-        early_out(attendance, start_time=start_time_sec, end_time=end_time_sec, shift=shift, schedule=schedule)
-
-
 def _apply_request_override_snapshot(attendance: Attendance, *, include_in: bool, include_out: bool):
     capture_request_restore_snapshot(attendance, include_in=include_in, include_out=include_out)
 
@@ -235,61 +206,11 @@ def _detach_request_overridden_raw_links(attendance: Attendance, *, include_in: 
 
 
 def _restore_request_back_to_raw(attendance: Attendance, *, include_in: bool, include_out: bool, prev_attendance_date=None):
-    update_fields = []
-    if include_in:
-        attendance.attendance_clock_in_date = None
-        attendance.attendance_clock_in = None
-        attendance.attendance_clock_in_channel = None
-        attendance.attendance_clock_in_mode = None
-        attendance.attendance_clock_in_punch = None
-        attendance.attendance_clock_in_image = None
-        attendance.attendance_clock_in_location = None
-        attendance.in_attendance_status = None
-        attendance.in_attendance_reject_reason_code = None
-        attendance.in_related_work_type_request_id = None
-        update_fields.extend([
-            "attendance_clock_in_date",
-            "attendance_clock_in",
-            "attendance_clock_in_channel",
-            "attendance_clock_in_mode",
-            "attendance_clock_in_punch",
-            "attendance_clock_in_image",
-            "attendance_clock_in_location",
-            "in_attendance_status",
-            "in_attendance_reject_reason_code",
-            "in_related_work_type_request_id",
-        ])
-    if include_out:
-        attendance.attendance_clock_out_date = None
-        attendance.attendance_clock_out = None
-        attendance.attendance_clock_out_channel = None
-        attendance.attendance_clock_out_mode = None
-        attendance.attendance_clock_out_punch = None
-        attendance.attendance_clock_out_image = None
-        attendance.attendance_clock_out_location = None
-        attendance.out_attendance_status = None
-        attendance.out_attendance_reject_reason_code = None
-        attendance.out_related_work_type_request_id = None
-        update_fields.extend([
-            "attendance_clock_out_date",
-            "attendance_clock_out",
-            "attendance_clock_out_channel",
-            "attendance_clock_out_mode",
-            "attendance_clock_out_punch",
-            "attendance_clock_out_image",
-            "attendance_clock_out_location",
-            "out_attendance_status",
-            "out_attendance_reject_reason_code",
-            "out_related_work_type_request_id",
-        ])
-    attendance.work_mode_request_id = None
-    attendance.request_restore_snapshot = None
-    update_fields.extend(["work_mode_request_id", "request_restore_snapshot"])
-    attendance.save(update_fields=list(dict.fromkeys(update_fields)))
-    result = recompute_attendance(attendance.employee_id, attendance.attendance_date)
-    attendance = result.attendance if result is not None else attendance
-    clear_request_restore_snapshot(attendance, include_in=include_in, include_out=include_out)
-    return attendance
+    return clear_request_override_and_recompute(
+        attendance,
+        include_in=include_in,
+        include_out=include_out,
+    )
 
 
 def _log_attendance_request_action(attendance: Attendance, request, *, action_type: str, old_status: str = None, new_status: str = None, remark: str = None):
@@ -1238,7 +1159,6 @@ def revoke_validate_attendance_request(request, attendance_id):
             attendance.action_by = request.user.employee_get
         except Exception:
             attendance.action_by = None
-        attendance.attendance_validated = cio.attendance_validate(attendance)
         attendance.save()
         _log_attendance_request_action(
             attendance,
@@ -1294,6 +1214,7 @@ def cancel_attendance_request(request, attendance_id):
         req_date = attendance.attendance_date
         req_employee = attendance.employee_id
         wants_in, wants_out = get_requested_sessions(attendance)
+        needs_canonical_reset = bool(req_type == "create_request" or is_approved_request)
 
         if is_approved_request:
             _restore_request_back_to_raw(attendance, include_in=wants_in, include_out=wants_out, prev_attendance_date=req_date)
@@ -1320,18 +1241,12 @@ def cancel_attendance_request(request, attendance_id):
             new_status="cancel_request",
         )
 
-        # For create_request, remove derived daily artifacts so it won't affect reporting.
-        if req_type == "create_request":
-            AttendanceActivity.objects.filter(
-                employee_id=req_employee,
-                attendance_date=req_date,
-            ).delete()
-            AttendanceLateComeEarlyOut.objects.filter(attendance_id=attendance).delete()
-
-        if is_approved_request:
-            result = recompute_attendance(req_employee, req_date)
-            if result is not None:
-                attendance = result.attendance
+        if needs_canonical_reset:
+            attendance = clear_request_override_and_recompute(
+                attendance,
+                include_in=wants_in,
+                include_out=wants_out,
+            )
         messages.success(request, _("Attendance request canceled."))
 
     except Attendance.DoesNotExist:
@@ -1375,6 +1290,8 @@ def reject_validate_attendance_request(request, attendance_id):
         old_status = attendance.request_type or "waiting_request"
         req_date = attendance.attendance_date
         req_employee = attendance.employee_id
+        wants_in, wants_out = get_requested_sessions(attendance)
+        needs_canonical_reset = req_type == "create_request"
 
         attendance.is_validate_request_approved = False
         attendance.is_validate_request = False
@@ -1397,13 +1314,12 @@ def reject_validate_attendance_request(request, attendance_id):
             remark=comment_text,
         )
 
-        # For create_request, remove derived daily artifacts so it won't affect reporting.
-        if req_type == "create_request":
-            AttendanceActivity.objects.filter(
-                employee_id=req_employee,
-                attendance_date=req_date,
-            ).delete()
-            AttendanceLateComeEarlyOut.objects.filter(attendance_id=attendance).delete()
+        if needs_canonical_reset:
+            attendance = clear_request_override_and_recompute(
+                attendance,
+                include_in=wants_in,
+                include_out=wants_out,
+            )
 
         messages.success(request, _("Attendance request rejected."))
 
@@ -1665,6 +1581,8 @@ def bulk_reject_attendance_request(request):
             old_status = attendance.request_type or "waiting_request"
             req_date = attendance.attendance_date
             req_employee = attendance.employee_id
+            wants_in, wants_out = get_requested_sessions(attendance)
+            needs_canonical_reset = req_type == "create_request"
 
             attendance.is_validate_request_approved = False
             attendance.is_validate_request = False
@@ -1685,12 +1603,12 @@ def bulk_reject_attendance_request(request):
                 new_status="reject_request",
             )
 
-            if req_type == "create_request":
-                AttendanceActivity.objects.filter(
-                    employee_id=req_employee,
-                    attendance_date=req_date,
-                ).delete()
-                AttendanceLateComeEarlyOut.objects.filter(attendance_id=attendance).delete()
+            if needs_canonical_reset:
+                clear_request_override_and_recompute(
+                    attendance,
+                    include_in=wants_in,
+                    include_out=wants_out,
+                )
 
         except Exception:
             # Ignore errors per item to continue processing the list
@@ -1730,7 +1648,6 @@ def edit_validate_attendance(request, attendance_id):
                     _restore_request_back_to_raw(attendance, include_in=wants_in, include_out=wants_out, prev_attendance_date=attendance.attendance_date)
                     attendance.refresh_from_db()
                     attendance.is_validate_request_approved = False
-                    attendance.attendance_validated = cio.attendance_validate(attendance)
                     attendance.request_type = "revalidate_request"
                 attendance.requested_data = json.dumps(instance.serialize())
                 attendance.request_description = instance.request_description
