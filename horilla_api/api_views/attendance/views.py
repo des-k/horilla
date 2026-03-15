@@ -2449,12 +2449,18 @@ class MobileAttendanceSettingsAPIView(APIView):
             face_detection.start = True
             face_detection.save(update_fields=["start"])
 
+        geofencing_enabled = False
+        try:
+            geofencing_enabled = bool(company.geo_fencing.start)
+        except Exception:
+            geofencing_enabled = False
+
         return Response(
             {
                 "face_detection_enabled": bool(face_detection.start),
                 "location_enabled": True,
                 "location_capture_enabled": True,
-                "geofencing_enabled": False,
+                "geofencing_enabled": geofencing_enabled,
                 "read_only": True,
             },
             status=status.HTTP_200_OK,
