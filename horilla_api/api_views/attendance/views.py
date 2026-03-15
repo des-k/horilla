@@ -25,6 +25,8 @@ from xhtml2pdf import pisa
 
 import logging
 
+from facedetection.models import FaceDetection
+
 logger = logging.getLogger(__name__)
 
 from attendance.models import (
@@ -2432,6 +2434,29 @@ class AttendanceActivityView(APIView):
         serializer = AttendanceActivitySerializer(queryset.order_by("-attendance_date", "-id"), many=True)
         return Response(serializer.data, status=200)
 
+
+
+
+class MobileAttendanceSettingsAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        company = request.user.employee_get.get_company()
+        face_detection, _ = FaceDetection.objects.get_or_create(
+            company_id=company, defaults={"start": True}
+        )
+        if not face_detection.start:
+            face_detection.start = True
+            face_detection.save(update_fields=["start"])
+
+        return Response(
+            {
+                "face_detection_enabled": True,
+                "location_enabled": True,
+                "read_only": True,
+            },
+            status=status.HTTP_200_OK,
+        )
 
 class TodayAttendance(APIView):
     """
