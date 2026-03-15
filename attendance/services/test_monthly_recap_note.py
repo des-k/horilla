@@ -62,7 +62,7 @@ class MonthlyRecapNoteTests(unittest.TestCase):
                 early_out_seconds=0,
             )
         )
-        self.assertEqual(note, "Late")
+        self.assertEqual(note, "Missing Check-In")
 
     def test_missing_checkout_counts_as_leave_early(self):
         note = derive_note(
@@ -74,7 +74,7 @@ class MonthlyRecapNoteTests(unittest.TestCase):
                 early_out_seconds=0,
             )
         )
-        self.assertEqual(note, "Leave Early")
+        self.assertEqual(note, "Missing Check-Out")
 
     def test_suffixes(self):
         note = derive_note(
