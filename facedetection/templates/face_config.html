@@ -14,13 +14,15 @@
                 </p>
             </div>
             <div class="d-flex align-items-center gap-2">
-                <span class="fw-medium">{% trans "Enabled" %}</span>
+                <span class="fw-medium">
+                    {% if facedetection.start %}{% trans "Enabled" %}{% else %}{% trans "Disabled" %}{% endif %}
+                </span>
                 <div class="oh-switch" title="{% trans 'Face Detection is always active and cannot be changed.' %}">
                     <input
                         id="faceDetectionAlwaysOn"
                         type="checkbox"
                         class="oh-switch__checkbox"
-                        checked
+                        {% if facedetection.start %}checked{% endif %}
                         disabled
                         aria-label="{% trans 'Face Detection is enabled and read only' %}"
                     >
