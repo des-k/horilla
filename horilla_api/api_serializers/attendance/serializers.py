@@ -427,6 +427,17 @@ class WorkModeRequestSerializer(serializers.ModelSerializer):
             pass
         return super().to_internal_value(data)
 
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        # Mobile builds read action_reason for action notes. Older rows and
+        # some document-action flows only populated document_remark, so expose a
+        # stable fallback in the serialized payload.
+        if not (data.get("action_reason") or "").strip():
+            fallback = (data.get("document_remark") or "").strip()
+            if fallback:
+                data["action_reason"] = fallback
+        return data
+
     def validate(self, attrs):
         attrs = super().validate(attrs)
 
