@@ -875,17 +875,6 @@ def clock_in_attendance_and_activity(
     if att_updates:
         attendance.save(update_fields=list(dict.fromkeys(att_updates)))
 
-    if attendance_created and accept_in and not getattr(attendance, "is_presensi_only", False):
-        attendance = Attendance.find(attendance.id)
-        schedule = _get_schedule(shift, day)
-        late_come(
-            attendance=attendance,
-            start_time=start_time_sec,
-            end_time=end_time_sec,
-            shift=shift,
-            schedule=schedule,
-        )
-
     result = recompute_attendance(employee, attendance_date)
     if result is not None:
         return result.attendance
@@ -1334,36 +1323,6 @@ def clock_out(request):
             request,
             _("Check-out recorded, but check-in is missing. Please submit an attendance request later.")
         )
-        # Skip early_out for incomplete attendance (missing)
-    else:
-        # Because check-out can be updated multiple times, always re-evaluate early_out
-        attendance.late_come_early_out.filter(type="early_out").delete()
-
-        next_date = attendance.attendance_date + timedelta(days=1)
-
-        if is_night_shift:
-            # Horilla night-shift condition (noon-to-noon)
-            if (attendance.attendance_date == date_today) or (
-                strtime_seconds("12:00") >= now_sec and date_today == next_date
-            ):
-                schedule = _get_schedule(shift, day)
-                early_out(
-                    attendance=attendance,
-                    start_time=start_time_sec,
-                    end_time=end_time_sec,
-                    shift=shift,
-                    schedule=schedule,
-                )
-        else:
-            if attendance.attendance_date == date_today:
-                schedule = _get_schedule(shift, day)
-                early_out(
-                    attendance=attendance,
-                    start_time=start_time_sec,
-                    end_time=end_time_sec,
-                    shift=shift,
-                    schedule=schedule,
-                )
 
     # UI response
     script = ""
