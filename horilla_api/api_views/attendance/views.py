@@ -1622,6 +1622,13 @@ class AttendanceRequestCancelView(APIView):
             attendance.action_type = AttendanceRequestActionType.CANCELED
             attendance.action_at = dj_timezone.now()
             attendance.save()
+            _log_attendance_request_status_change(
+                attendance,
+                request,
+                action_type=AttendanceRequestActionType.CANCELED,
+                old_status=old_status,
+                new_status="cancel_request",
+            )
 
             if needs_canonical_reset:
                 attendance = clear_request_override_and_recompute(
