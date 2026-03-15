@@ -164,3 +164,147 @@ class AttendanceSaveUpdateFieldsTests(unittest.TestCase):
         handle_ot_mock.assert_called_once()
         overtime_account.save.assert_called_once()
         super_save_mock.assert_called_once()
+
+from datetime import date
+from unittest.mock import patch
+
+from django.contrib.auth.models import User
+from django.db import models as django_models
+from django.test import TestCase
+from rest_framework.test import APIRequestFactory, force_authenticate
+
+from attendance.models import Attendance, AttendanceRequestActionType, AttendanceRequestAuditLog
+from employee.models import Employee
+from horilla_api.api_views.attendance.views import AttendanceRequestCancelView
+
+
+class AttendanceRequestCancelAuditLogTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.factory = APIRequestFactory()
+        cls.view = AttendanceRequestCancelView.as_view()
+        cls.owner_user = User.objects.create_user(
+            username="attendance-owner",
+            email="attendance-owner@example.com",
+            password="testpass123",
+        )
+        cls.owner_employee = Employee.objects.create(
+            employee_user_id=cls.owner_user,
+            employee_first_name="Attendance",
+            employee_last_name="Owner",
+            email="attendance-owner@example.com",
+            phone="1111111111",
+        )
+        cls.other_user = User.objects.create_user(
+            username="attendance-other",
+            email="attendance-other@example.com",
+            password="testpass123",
+        )
+        cls.other_employee = Employee.objects.create(
+            employee_user_id=cls.other_user,
+            employee_first_name="Attendance",
+            employee_last_name="Other",
+            email="attendance-other@example.com",
+            phone="2222222222",
+        )
+
+    def _create_attendance_request(self, **overrides):
+        defaults = {
+            "employee_id": self.owner_employee,
+            "attendance_date": date(2026, 3, 10),
+            "request_type": "update_request",
+            "request_description": "Fix my attendance",
+            "is_validate_request": True,
+            "is_validate_request_approved": False,
+            "requested_data": {"attendance_clock_in": "09:00:00"},
+        }
+        defaults.update(overrides)
+        attendance = Attendance(**defaults)
+        Attendance.objects.bulk_create([attendance])
+        return Attendance.objects.get(id=attendance.id)
+
+    def _make_request(self, user, attendance_id):
+        request = self.factory.put(f"/api/attendance/request-cancel/{attendance_id}/", {}, format="json")
+        force_authenticate(request, user=user)
+        return request
+
+    def test_cancel_pending_request_via_api_creates_single_audit_log(self):
+        attendance = self._create_attendance_request(
+            request_type="update_request",
+            is_validate_request=True,
+            is_validate_request_approved=False,
+        )
+
+        request = self._make_request(self.owner_user, attendance.id)
+        with patch.object(Attendance, "save", new=django_models.Model.save):
+            response = self.view(request, pk=attendance.id)
+
+        self.assertEqual(response.status_code, 200)
+        logs = AttendanceRequestAuditLog.objects.filter(attendance=attendance)
+        self.assertEqual(logs.count(), 1)
+        log = logs.get()
+        self.assertEqual(log.actor, self.owner_employee)
+        self.assertEqual(log.action_type, AttendanceRequestActionType.CANCELED)
+        self.assertEqual(log.old_status, "update_request")
+        self.assertEqual(log.new_status, "cancel_request")
+
+    def test_cancel_approved_request_via_api_creates_single_audit_log(self):
+        attendance = self._create_attendance_request(
+            request_type="update_request",
+            is_validate_request=False,
+            is_validate_request_approved=True,
+            requested_data=None,
+        )
+
+        request = self._make_request(self.owner_user, attendance.id)
+        with patch.object(Attendance, "save", new=django_models.Model.save), \
+             patch("horilla_api.api_views.attendance.views._restore_request_back_to_raw", side_effect=lambda obj, **kwargs: obj), \
+             patch("horilla_api.api_views.attendance.views.clear_request_override_and_recompute", side_effect=lambda obj, **kwargs: obj):
+            response = self.view(request, pk=attendance.id)
+
+        self.assertEqual(response.status_code, 200)
+        logs = AttendanceRequestAuditLog.objects.filter(attendance=attendance)
+        self.assertEqual(logs.count(), 1)
+        log = logs.get()
+        self.assertEqual(log.actor, self.owner_employee)
+        self.assertEqual(log.action_type, AttendanceRequestActionType.CANCELED)
+        self.assertEqual(log.old_status, "update_request")
+        self.assertEqual(log.new_status, "cancel_request")
+
+    def test_non_owner_cannot_cancel_and_no_audit_log_is_created(self):
+        attendance = self._create_attendance_request()
+
+        request = self._make_request(self.other_user, attendance.id)
+        response = self.view(request, pk=attendance.id)
+
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse(AttendanceRequestAuditLog.objects.filter(attendance=attendance).exists())
+
+    def test_invalid_state_cannot_cancel_and_no_audit_log_is_created(self):
+        attendance = self._create_attendance_request(
+            is_validate_request=False,
+            is_validate_request_approved=False,
+        )
+
+        request = self._make_request(self.owner_user, attendance.id)
+        response = self.view(request, pk=attendance.id)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(AttendanceRequestAuditLog.objects.filter(attendance=attendance).exists())
+
+    def test_successful_cancel_does_not_create_duplicate_audit_logs(self):
+        attendance = self._create_attendance_request(
+            request_type="update_request",
+            is_validate_request=True,
+            is_validate_request_approved=False,
+        )
+
+        request = self._make_request(self.owner_user, attendance.id)
+        with patch.object(Attendance, "save", new=django_models.Model.save):
+            response = self.view(request, pk=attendance.id)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            AttendanceRequestAuditLog.objects.filter(attendance=attendance).count(),
+            1,
+        )
