@@ -67,11 +67,12 @@ from attendance.services.punching_history import (
     create_mobile_punch_history,
     humanize_mobile_error,
     reconcile_attendance_punches,
-    restore_raw_state_after_request,
     update_punch_history,
 )
 from attendance.services.request_audit import log_request_action
 from attendance.services.reconciliation import recompute_attendance, recompute_attendance_range
+from attendance.services.request_override_recompute import clear_request_override_and_recompute
+from attendance.services.month_params import normalize_month_yyyy_mm, require_month_yyyy_mm
 
 from attendance.views.dashboard import (
     find_expected_attendances,
@@ -554,53 +555,11 @@ def _detach_request_overridden_raw_links(attendance: Attendance, *, include_in: 
 
 
 def _restore_request_back_to_raw(attendance: Attendance, *, include_in: bool, include_out: bool, prev_attendance_date: date | None = None):
-    restore_raw_state_after_request(attendance, include_in=include_in, include_out=include_out)
-    attendance.attendance_validated = cio.attendance_validate(attendance)
-    attendance.save()
-    result = recompute_attendance(attendance.employee_id, attendance.attendance_date)
-    return result.attendance if result is not None else attendance
-
-
-def _rebuild_late_early(attendance: Attendance):
-    """
-    Recompute late come / early out records after an approval or time edit.
-    """
-    shift = attendance.shift_id
-    if not shift:
-        return
-
-    day = EmployeeShiftDay.objects.get(day=attendance.attendance_date.strftime("%A").lower())
-
-    AttendanceLateComeEarlyOut.objects.filter(
-        attendance_id=attendance, type__in=["late_come", "early_out"]
-    ).delete()
-
-    _, start_time_sec, end_time_sec = shift_schedule_today(day=day, shift=shift)
-
-    schedule = None
-    if hasattr(cio, "_get_schedule"):
-        try:
-            schedule = cio._get_schedule(shift, day)
-        except Exception:
-            schedule = None
-
-    if attendance.attendance_clock_in:
-        late_come(
-            attendance=attendance,
-            start_time=start_time_sec,
-            end_time=end_time_sec,
-            shift=shift,
-            schedule=schedule,
-        )
-
-    if attendance.attendance_clock_out:
-        early_out(
-            attendance=attendance,
-            start_time=start_time_sec,
-            end_time=end_time_sec,
-            shift=shift,
-            schedule=schedule,
-        )
+    return clear_request_override_and_recompute(
+        attendance,
+        include_in=include_in,
+        include_out=include_out,
+    )
 
 
 class ClockInAPIView(APIView):
@@ -870,36 +829,6 @@ class ClockOutAPIView(APIView):
         except Exception as error:
             logger.exception("clock_out_attendance_and_activity failed")
             return _reject(str(error), status.HTTP_400_BAD_REQUEST, attendance=existing_att, attendance_date=attendance_date)
-
-        if (
-            attendance
-            and not getattr(attendance, "is_presensi_only", False)
-            and not missing_check_in
-            and getattr(attendance, "out_attendance_status", None) != "REJECTED"
-        ):
-            try:
-                attendance.late_come_early_out.filter(type="early_out").delete()
-            except Exception:
-                AttendanceLateComeEarlyOut.objects.filter(attendance_id=attendance, type="early_out").delete()
-            schedule = None
-            if hasattr(cio, "_get_schedule"):
-                try:
-                    schedule = cio._get_schedule(shift, day)
-                except Exception:
-                    schedule = None
-            is_night_shift = False
-            try:
-                is_night_shift = attendance.is_night_shift()
-            except Exception:
-                pass
-            date_today = dt_now.date()
-            next_date = attendance.attendance_date + timedelta(days=1)
-            if is_night_shift:
-                if (attendance.attendance_date == date_today) or (strtime_seconds("12:00") >= now_sec and date_today == next_date):
-                    early_out(attendance=attendance, start_time=start_time_sec, end_time=end_time_sec, shift=shift, schedule=schedule)
-            else:
-                if attendance.attendance_date == date_today:
-                    early_out(attendance=attendance, start_time=start_time_sec, end_time=end_time_sec, shift=shift, schedule=schedule)
 
         in_mode, in_source, in_req = _resolve_effective_work_type(employee, attendance_date, "in")
         update_punch_history(punch_log, attendance=attendance, attendance_date=attendance_date, work_mode=out_mode, related_work_mode_request=out_req, decision_source=getattr(attendance, "reconciliation_source", None) if attendance else None)
@@ -1590,7 +1519,6 @@ class AttendanceRequestRevokeView(APIView):
             attendance.action_type = AttendanceRequestActionType.REVOKED
             attendance.action_at = dj_timezone.now()
             attendance.action_by = _request_actor_employee(request)
-            attendance.attendance_validated = cio.attendance_validate(attendance)
             attendance.save()
             _log_attendance_request_status_change(
                 attendance,
@@ -1673,6 +1601,7 @@ class AttendanceRequestCancelView(APIView):
             req_date = attendance.attendance_date
             req_employee = attendance.employee_id
             wants_in, wants_out = get_requested_sessions(attendance)
+            needs_canonical_reset = bool(req_type == "create_request" or is_approved_request)
 
             if is_approved_request:
                 _restore_request_back_to_raw(attendance, include_in=wants_in, include_out=wants_out, prev_attendance_date=req_date)
@@ -1692,18 +1621,12 @@ class AttendanceRequestCancelView(APIView):
             attendance.action_at = dj_timezone.now()
             attendance.save()
 
-            # For create_request, remove created daily artifacts so it won't affect reporting.
-            if req_type == "create_request":
-                AttendanceActivity.objects.filter(
-                    employee_id=req_employee,
-                    attendance_date=req_date,
-                ).delete()
-                AttendanceLateComeEarlyOut.objects.filter(attendance_id=attendance).delete()
-
-            if is_approved_request:
-                result = recompute_attendance(req_employee, req_date)
-                if result is not None:
-                    attendance = result.attendance
+            if needs_canonical_reset:
+                attendance = clear_request_override_and_recompute(
+                    attendance,
+                    include_in=wants_in,
+                    include_out=wants_out,
+                )
 
         except Exception as E:
             return Response({"error": str(E)}, status=400)
@@ -1774,6 +1697,8 @@ class AttendanceRequestRejectView(APIView):
             old_status = attendance.request_type or "waiting_request"
             req_date = attendance.attendance_date
             req_employee = attendance.employee_id
+            wants_in, wants_out = get_requested_sessions(attendance)
+            needs_canonical_reset = req_type == "create_request"
 
             attendance.is_validate_request_approved = False
             attendance.is_validate_request = False
@@ -1796,12 +1721,12 @@ class AttendanceRequestRejectView(APIView):
                 remark=comment_text,
             )
 
-            if req_type == "create_request":
-                AttendanceActivity.objects.filter(
-                    employee_id=req_employee,
-                    attendance_date=req_date,
-                ).delete()
-                AttendanceLateComeEarlyOut.objects.filter(attendance_id=attendance).delete()
+            if needs_canonical_reset:
+                attendance = clear_request_override_and_recompute(
+                    attendance,
+                    include_in=wants_in,
+                    include_out=wants_out,
+                )
 
         except Exception as E:
             return Response({"error": str(E)}, status=400)
@@ -2346,15 +2271,17 @@ class WorkModeRequestDocumentActionView(APIView):
         if action == "verify":
             if obj.document_status not in {WorkModeRequestDocumentStatus.SUBMITTED, WorkModeRequestDocumentStatus.PENDING_VERIFICATION}:
                 return Response({"error": "Document is not ready for verification."}, status=400)
+            previous = obj.document_status
             obj.document_status = WorkModeRequestDocumentStatus.VERIFIED
             obj.document_verified_by = _request_actor_employee(request)
             obj.document_verified_at = dj_timezone.now()
             obj.action_by = obj.document_verified_by
             obj.action_at = obj.document_verified_at
             obj.action_type = WorkModeRequestActionType.VERIFIED
+            obj.action_reason = remark
             obj.document_remark = remark
-            obj.save(update_fields=["document_status", "document_verified_by", "document_verified_at", "action_by", "action_at", "action_type", "document_remark"])
-            _log_work_mode_status_change(obj, request, action_type=WorkModeRequestActionType.VERIFIED, old_status="document:%s" % (WorkModeRequestDocumentStatus.PENDING_VERIFICATION), new_status="document:%s" % obj.document_status, remark=remark)
+            obj.save(update_fields=["document_status", "document_verified_by", "document_verified_at", "action_by", "action_at", "action_type", "action_reason", "document_remark"])
+            _log_work_mode_status_change(obj, request, action_type=WorkModeRequestActionType.VERIFIED, old_status="document:%s" % previous, new_status="document:%s" % obj.document_status, remark=remark)
             recompute_attendance_range(obj.employee_id, obj.start_date, obj.end_date)
             return Response(WorkModeRequestSerializer(obj, context={"request": request}).data, status=200)
 
@@ -2366,8 +2293,9 @@ class WorkModeRequestDocumentActionView(APIView):
             obj.action_by = _request_actor_employee(request)
             obj.action_at = dj_timezone.now()
             obj.action_type = WorkModeRequestActionType.REJECTED
+            obj.action_reason = remark
             obj.document_remark = remark
-            obj.save(update_fields=["document_status", "action_by", "action_at", "action_type", "document_remark"])
+            obj.save(update_fields=["document_status", "action_by", "action_at", "action_type", "action_reason", "document_remark"])
             _log_work_mode_status_change(obj, request, action_type=WorkModeRequestActionType.REJECTED, old_status="document:%s" % previous, new_status="document:%s" % obj.document_status, remark=remark)
             recompute_attendance_range(obj.employee_id, obj.start_date, obj.end_date)
             return Response(WorkModeRequestSerializer(obj, context={"request": request}).data, status=200)
@@ -2382,8 +2310,9 @@ class WorkModeRequestDocumentActionView(APIView):
             obj.action_by = _request_actor_employee(request)
             obj.action_at = dj_timezone.now()
             obj.action_type = WorkModeRequestActionType.REOPENED
+            obj.action_reason = remark
             obj.document_remark = remark
-            obj.save(update_fields=["document_status", "document_verified_by", "document_verified_at", "action_by", "action_at", "action_type", "document_remark"])
+            obj.save(update_fields=["document_status", "document_verified_by", "document_verified_at", "action_by", "action_at", "action_type", "action_reason", "document_remark"])
             _log_work_mode_status_change(obj, request, action_type=WorkModeRequestActionType.REOPENED, old_status="document:%s" % previous, new_status="document:%s" % obj.document_status, remark=remark)
             recompute_attendance_range(obj.employee_id, obj.start_date, obj.end_date)
             return Response(WorkModeRequestSerializer(obj, context={"request": request}).data, status=200)
@@ -3714,26 +3643,24 @@ class AttendanceMonthlyRecapAPIView(APIView):
         lang = lang.split("-")[0].lower().strip()
         return "id" if lang == "id" else "en"
 
-    def _resolve_month(self, request) -> str:
-        # Default month = current month
-        month = request.GET.get("month") or dj_timezone.localdate().strftime("%Y-%m")
-
-        # Validate format YYYY-MM; fallback to current month if malformed
-        try:
-            if len(month) != 7 or month[4] != "-":
-                raise ValueError
-            year = int(month[:4])
-            mon = int(month[5:7])
-            if mon < 1 or mon > 12:
-                raise ValueError
-        except Exception:
-            month = dj_timezone.localdate().strftime("%Y-%m")
-
-        # Disallow future months
+    def _resolve_month(self, request, *, strict: bool = False) -> str:
         current_month = dj_timezone.localdate().strftime("%Y-%m")
-        if month > current_month:
+        month_raw = (request.GET.get("month") or "").strip()
+        if not month_raw:
+            return current_month
+
+        try:
+            month = require_month_yyyy_mm(month_raw)
+        except ValueError:
+            if strict:
+                raise
             month = current_month
-        return month
+
+        return normalize_month_yyyy_mm(
+            month,
+            fallback_month=current_month,
+            max_month=current_month,
+        )
 
     def _allowed_employees_qs(self, request):
         """Employees accessible to the requester.
@@ -3844,7 +3771,10 @@ class AttendanceMonthlyRecapExportPDFAPIView(AttendanceMonthlyRecapAPIView):
     renderer_classes = [PDFRenderer, JSONRenderer]
 
     def get(self, request):
-        month = self._resolve_month(request)
+        try:
+            month = self._resolve_month(request, strict=bool((request.GET.get("month") or "").strip()))
+        except ValueError:
+            return Response({"error": "Invalid month format. Expected YYYY-MM"}, status=status.HTTP_400_BAD_REQUEST)
         lang = self._resolve_language(request)
         employees_qs = self._allowed_employees_qs(request)
 
