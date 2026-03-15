@@ -1,12 +1,11 @@
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required, permission_required
 from django.http import QueryDict
-from django.shortcuts import get_object_or_404, redirect, render
+from django.shortcuts import get_object_or_404, render
 from django.utils.decorators import method_decorator
 from django.utils.translation import gettext_lazy as _
 from geopy.distance import geodesic
 from rest_framework import status
-from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -109,7 +108,7 @@ class GeoFencingEmployeeLocationCheckAPIView(APIView):
             "latitude": request.data.get("latitude"),
             "longitude": request.data.get("longitude"),
         })
-        
+
         company_location = self.get_company_location(request)
         if company_location.start:
             if serializer.is_valid():
@@ -168,19 +167,41 @@ def get_company_location(request):
 @login_required
 @permission_required("geofencing.add_localbackup")
 def geo_location_config(request):
+    location_obj = None
     if request.method == "POST":
-        messages.info(
-            request,
-            _("Location capture is managed by the system and cannot be changed here."),
-        )
+        try:
+            location_obj = get_company_location(request)
+            form = GeoFencingSetupForm(request.POST, instance=location_obj)
+        except Exception:
+            data = request.POST
+            if isinstance(data, QueryDict):
+                data = data.dict()
+            if get_company(request) is None:
+                data["company_id"] = None
+            else:
+                data["company_id"] = get_company(request).id
+            form = GeoFencingSetupForm(data=data)
 
+        if form.is_valid():
+            saved = form.save()
+            location_obj = saved
+            messages.success(request, _("Geofencing config saved successfully."))
+        else:
+            messages.error(request, _("Please correct the errors below."))
+    else:
+        try:
+            location_obj = get_company_location(request)
+            form = GeoFencingSetupForm(instance=location_obj)
+        except Exception:
+            form = GeoFencingSetupForm(initial={"start": False})
+
+    geofencing_enabled = bool(getattr(location_obj, "start", False))
     return render(
         request,
         "geo_config.html",
         {
-            "location_enabled": True,
+            "form": form,
             "location_capture_enabled": True,
-            "geofencing_enabled": False,
-            "read_only": True,
+            "geofencing_enabled": geofencing_enabled,
         },
     )
