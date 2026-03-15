@@ -495,6 +495,7 @@ def _canonical_row_from_attendance(
     shift_information: str,
     language: str,
     is_off: bool,
+    off_kind: Optional[str] = None,
 ) -> Optional[MonthlyRecapRow]:
     if not best_att:
         return None
@@ -504,6 +505,19 @@ def _canonical_row_from_attendance(
 
     note = (getattr(best_att, "reconciliation_note", None) or "").strip()
     source = (getattr(best_att, "reconciliation_source", None) or "").strip()
+    explicit_canonical = bool(note or source)
+
+    # Trust the persisted Attendance row immediately when it carries an explicit
+    # canonical outcome (note/source), or when a full-day leave attendance row is
+    # intentionally kept even though the date is also covered by leave.
+    #
+    # Otherwise fall back to the shared monthly-recap session resolver so recap /
+    # export / PDF stay resilient against older rows whose Attendance shell exists
+    # but whose final session details still need to be derived from activity/raw
+    # state for the day. This also avoids showing punches on holiday / no-schedule
+    # days when those rows should be treated as OFF in the recap output.
+    if not explicit_canonical and off_kind != "leave":
+        return None
 
     final_in_dt = _combine_dt(
         getattr(best_att, "attendance_clock_in_date", None),
@@ -1234,6 +1248,7 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
         )
         is_leave = bool(leave_info.get("full_day"))
         half_day_kind = leave_info.get("breakdown") if not is_leave else None
+        off_kind = None
 
         att_list = att_by_date.get(d, [])
         act_list = act_by_date.get(d, [])
@@ -1259,6 +1274,12 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
             or not rules.get("end_time")
         )
         is_off = bool(holiday_obj) or is_leave or no_schedule_off
+        if is_leave:
+            off_kind = "leave"
+        elif holiday_obj:
+            off_kind = "holiday"
+        elif no_schedule_off:
+            off_kind = "no_schedule"
 
         if is_leave:
             canonical_shift_info = _localize_leave_session_label("full", language)
@@ -1283,6 +1304,7 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
             shift_information=canonical_shift_info,
             language=language,
             is_off=is_off,
+            off_kind=off_kind,
         )
         if canonical_row is not None:
             rows.append(canonical_row)
