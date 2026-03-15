@@ -1,4 +1,33 @@
-<form hx-post="{% url 'geo-config' %}" hx-swap="none" hx-on-htmx-after-request="$('#reloadMessagesButton').click();">
-    {% csrf_token %}
-    {{form.as_p}}
-</form>
+{% load i18n %}
+<div class="oh-card">
+    <div class="oh-card__header">
+        <h3 class="oh-card__title mb-0">{% trans "Location" %}</h3>
+    </div>
+    <div class="oh-card__body">
+        <div class="d-flex justify-content-between align-items-center flex-wrap gap-3">
+            <div>
+                <label class="oh-input__label d-block mb-1" for="locationAlwaysOn">
+                    {% trans "Enable Location" %}
+                </label>
+                <p class="text-muted mb-0">
+                    {% trans "Always enabled for mobile attendance. This setting is managed by the system and cannot be changed here." %}
+                </p>
+            </div>
+            <div class="d-flex align-items-center gap-2">
+                <span class="fw-medium">
+                    {% if location_enabled %}{% trans "Enabled" %}{% else %}{% trans "Disabled" %}{% endif %}
+                </span>
+                <div class="oh-switch" title="{% trans 'Location is managed by the system and cannot be changed.' %}">
+                    <input
+                        id="locationAlwaysOn"
+                        type="checkbox"
+                        class="oh-switch__checkbox"
+                        {% if location_enabled %}checked{% endif %}
+                        disabled
+                        aria-label="{% trans 'Location is enabled and read only' %}"
+                    >
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
