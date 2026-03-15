@@ -1,0 +1,570 @@
+from __future__ import annotations
+
+
+from datetime import date, datetime
+
+from django.utils import timezone
+
+from attendance.models import AttendancePunchDirection
+from attendance.services import reconciliation
+from attendance.services.test_reconciliation_canonical import FakePunchLog
+from types import SimpleNamespace
+from unittest.mock import patch
+
+from django.test import RequestFactory, SimpleTestCase, TestCase
+from rest_framework.test import APIRequestFactory, force_authenticate
+
+from attendance.models import (
+    AttendanceWorkMode,
+    WorkModeRequestActionType,
+    WorkModeRequestDocumentStatus,
+    WorkModeRequestStatus,
+)
+
+
+class LeaveSignalCanonicalRangeTests(SimpleTestCase):
+    def test_reconcile_leave_related_punches_uses_impacted_date_range(self):
+        from leave import signals as leave_signals
+
+        instance = SimpleNamespace(
+            employee_id="EMP-1",
+            start_date=date(2026, 3, 14),
+            end_date=date(2026, 3, 16),
+            requested_dates=lambda: [date(2026, 3, 14), date(2026, 3, 15), date(2026, 3, 16)],
+        )
+        calls = []
+
+        with patch.object(
+            leave_signals,
+            "impacted_attendance_dates_for_leave_request",
+            return_value=[date(2026, 3, 15), date(2026, 3, 16), date(2026, 3, 14)],
+        ), patch(
+            "attendance.services.reconciliation.recompute_attendance_range",
+            lambda employee, start_date, end_date: calls.append((employee, start_date, end_date)),
+        ):
+            leave_signals._reconcile_leave_related_punches(instance)
+
+        self.assertEqual(calls, [("EMP-1", date(2026, 3, 14), date(2026, 3, 16))])
+
+    def test_reconcile_leave_related_punches_falls_back_to_requested_dates(self):
+        from leave import signals as leave_signals
+
+        instance = SimpleNamespace(
+            employee_id="EMP-2",
+            start_date=date(2026, 3, 14),
+            end_date=date(2026, 3, 16),
+            requested_dates=lambda: [date(2026, 3, 16), date(2026, 3, 14)],
+        )
+        calls = []
+
+        with patch.object(
+            leave_signals,
+            "impacted_attendance_dates_for_leave_request",
+            side_effect=RuntimeError("fallback"),
+        ), patch(
+            "attendance.services.reconciliation.recompute_attendance_range",
+            lambda employee, start_date, end_date: calls.append((employee, start_date, end_date)),
+        ):
+            leave_signals._reconcile_leave_related_punches(instance)
+
+        self.assertEqual(calls, [("EMP-2", date(2026, 3, 14), date(2026, 3, 16))])
+
+
+class CanonicalRecomputeDecisionFlowTests(SimpleTestCase):
+    databases = {"default"}
+    def test_full_day_leave_after_existing_raw_punches_keeps_logs_but_ignores_them(self):
+        attendance_date = date(2026, 3, 14)
+        attendance = SimpleNamespace(attendance_date=attendance_date, save=lambda *args, **kwargs: None)
+        activity = SimpleNamespace(save=lambda *args, **kwargs: None)
+        ctx = reconciliation.ShiftContext(
+            employee="EMP-LEAVE",
+            attendance_date=attendance_date,
+            day=None,
+            shift=None,
+            schedule=None,
+            shift_start_dt=timezone.make_aware(datetime(2026, 3, 14, 8, 0)),
+            shift_end_dt=timezone.make_aware(datetime(2026, 3, 14, 17, 0)),
+            check_in_window_start_dt=timezone.make_aware(datetime(2026, 3, 14, 6, 0)),
+            check_in_window_end_dt=timezone.make_aware(datetime(2026, 3, 14, 12, 0)),
+            check_out_window_start_dt=timezone.make_aware(datetime(2026, 3, 14, 12, 0)),
+            check_out_window_end_dt=timezone.make_aware(datetime(2026, 3, 14, 23, 0)),
+            minimum_hour="08:00",
+            grace_seconds=0,
+            grace_clock_in_type="after",
+        )
+        leave_ctx = reconciliation.LeaveContext(
+            request=SimpleNamespace(id=55),
+            kind="full_day",
+            late_reference_dt=None,
+            early_reference_dt=None,
+            minimum_hour="00:00",
+        )
+        logs = [
+            FakePunchLog(1, AttendancePunchDirection.IN, timezone.make_aware(datetime(2026, 3, 14, 8, 5))),
+            FakePunchLog(2, AttendancePunchDirection.OUT, timezone.make_aware(datetime(2026, 3, 14, 17, 1))),
+        ]
+        sync_calls = []
+
+        with patch.object(reconciliation, "_ensure_records", return_value=(attendance, activity)), \
+             patch.object(reconciliation, "_resolve_shift_context", return_value=ctx), \
+             patch.object(reconciliation, "_resolve_leave_context", return_value=leave_ctx), \
+             patch.object(reconciliation, "_approved_work_mode_request", return_value=None), \
+             patch.object(reconciliation, "_latest_revoked_request", return_value=None), \
+             patch.object(reconciliation, "_candidate_logs", return_value=logs), \
+             patch.object(reconciliation, "_sync_attendance_and_activity", lambda *args, **kwargs: sync_calls.append(kwargs)), \
+             patch.object(reconciliation, "_set_late_early_rows", lambda *args, **kwargs: None):
+            reconciliation.recompute_attendance("EMP-LEAVE", attendance_date)
+
+        self.assertIsNone(sync_calls[0]["final_in_dt"])
+        self.assertIsNone(sync_calls[0]["final_out_dt"])
+        self.assertEqual(sync_calls[0]["source"], reconciliation.SOURCE_LEAVE)
+        self.assertEqual(sync_calls[0]["note"], reconciliation.NOTE_FULL_DAY_LEAVE)
+        self.assertFalse(logs[0].accepted_to_attendance)
+        self.assertFalse(logs[1].accepted_to_attendance)
+        self.assertEqual(logs[0].reason, reconciliation.NOTE_IGNORED_FULL_DAY_LEAVE)
+        self.assertEqual(logs[1].reason, reconciliation.NOTE_IGNORED_FULL_DAY_LEAVE)
+
+    def test_wfa_latest_checkout_wins_and_older_checkout_becomes_superseded(self):
+        attendance_date = date(2026, 3, 14)
+        attendance = SimpleNamespace(attendance_date=attendance_date, save=lambda *args, **kwargs: None)
+        activity = SimpleNamespace(save=lambda *args, **kwargs: None)
+        ctx = reconciliation.ShiftContext(
+            employee="EMP-WFA",
+            attendance_date=attendance_date,
+            day=None,
+            shift=None,
+            schedule=None,
+            shift_start_dt=timezone.make_aware(datetime(2026, 3, 14, 8, 0)),
+            shift_end_dt=timezone.make_aware(datetime(2026, 3, 14, 17, 0)),
+            check_in_window_start_dt=timezone.make_aware(datetime(2026, 3, 14, 6, 0)),
+            check_in_window_end_dt=timezone.make_aware(datetime(2026, 3, 14, 12, 0)),
+            check_out_window_start_dt=timezone.make_aware(datetime(2026, 3, 14, 12, 0)),
+            check_out_window_end_dt=timezone.make_aware(datetime(2026, 3, 14, 23, 0)),
+            minimum_hour="08:00",
+            grace_seconds=0,
+            grace_clock_in_type="after",
+        )
+        leave_ctx = reconciliation.LeaveContext(
+            request=None,
+            kind=None,
+            late_reference_dt=None,
+            early_reference_dt=None,
+            minimum_hour="08:00",
+        )
+        work_request = SimpleNamespace(mode=AttendanceWorkMode.WFA, status=WorkModeRequestStatus.APPROVED)
+        logs = [
+            FakePunchLog(1, AttendancePunchDirection.IN, timezone.make_aware(datetime(2026, 3, 14, 8, 0))),
+            FakePunchLog(2, AttendancePunchDirection.OUT, timezone.make_aware(datetime(2026, 3, 14, 16, 0))),
+            FakePunchLog(3, AttendancePunchDirection.OUT, timezone.make_aware(datetime(2026, 3, 14, 17, 5))),
+        ]
+        sync_calls = []
+
+        with patch.object(reconciliation, "_ensure_records", return_value=(attendance, activity)), \
+             patch.object(reconciliation, "_resolve_shift_context", return_value=ctx), \
+             patch.object(reconciliation, "_resolve_leave_context", return_value=leave_ctx), \
+             patch.object(reconciliation, "_approved_work_mode_request", return_value=work_request), \
+             patch.object(reconciliation, "_latest_revoked_request", return_value=None), \
+             patch.object(reconciliation, "_candidate_logs", return_value=logs), \
+             patch.object(reconciliation, "_sync_attendance_and_activity", lambda *args, **kwargs: sync_calls.append(kwargs)), \
+             patch.object(reconciliation, "_set_late_early_rows", lambda *args, **kwargs: None):
+            reconciliation.recompute_attendance("EMP-WFA", attendance_date)
+
+        self.assertEqual(sync_calls[0]["source"], reconciliation.SOURCE_WFA)
+        self.assertEqual(sync_calls[0]["note"], "WFA reconciled under normal attendance rules")
+        self.assertEqual(sync_calls[0]["final_out_dt"], timezone.make_aware(datetime(2026, 3, 14, 17, 5)))
+        self.assertTrue(logs[0].accepted_to_attendance)
+        self.assertFalse(logs[1].accepted_to_attendance)
+        self.assertTrue(logs[2].accepted_to_attendance)
+        self.assertEqual(logs[1].reason, reconciliation.NOTE_SUPERSEDED_CHECKOUT)
+        self.assertEqual(logs[1].decision_status, "superseded")
+        self.assertEqual(logs[2].reason, reconciliation.NOTE_FINAL_OUT)
+
+
+class WorkModeDocumentActionFlowTests(TestCase):
+    def setUp(self):
+        self.api_factory = APIRequestFactory()
+        self.request_factory = RequestFactory()
+        self.user = SimpleNamespace(is_authenticated=True, is_superuser=False)
+        self.actor = SimpleNamespace(id=999)
+        self.owner = SimpleNamespace(id=321, employee_user_id=SimpleNamespace(username="owner"))
+
+    def _request_obj(self, *, document_status, status=WorkModeRequestStatus.APPROVED, mode=AttendanceWorkMode.ON_DUTY):
+        saved = {}
+
+        def _save(*, update_fields=None):
+            saved["update_fields"] = list(update_fields or [])
+
+        req = SimpleNamespace(
+            id=77,
+            employee_id=self.owner,
+            employee_id_id=self.owner.id,
+            status=status,
+            mode=mode,
+            document_status=document_status,
+            document_verified_by=None,
+            document_verified_at=None,
+            action_by=None,
+            action_at=None,
+            action_type=None,
+            action_reason=None,
+            document_remark=None,
+            start_date=date(2026, 3, 14),
+            end_date=date(2026, 3, 15),
+            save=_save,
+            _saved=saved,
+        )
+        return req
+
+    def test_api_verify_logs_actual_previous_document_status_and_recomputes(self):
+        from horilla_api.api_views.attendance import views as api_views
+
+        req_obj = self._request_obj(document_status=WorkModeRequestDocumentStatus.SUBMITTED)
+        recompute_calls = []
+        log_calls = []
+
+        request = self.api_factory.put("/api/work-mode/77/verify", {"remark": "checked"}, format="json")
+        force_authenticate(request, user=self.user)
+
+        class DummySerializer:
+            def __init__(self, obj, context=None):
+                self.data = {"id": getattr(obj, "id", None), "document_status": getattr(obj, "document_status", None)}
+
+        with patch.object(api_views, "get_object_or_404", return_value=req_obj), \
+             patch.object(api_views, "_can_act_on_employee", return_value=True), \
+             patch.object(api_views, "_request_actor_employee", return_value=self.actor), \
+             patch.object(api_views, "recompute_attendance_range", lambda employee, start_date, end_date: recompute_calls.append((employee, start_date, end_date))), \
+             patch.object(api_views, "_log_work_mode_status_change", lambda *args, **kwargs: log_calls.append(kwargs)), \
+             patch.object(api_views, "WorkModeRequestSerializer", DummySerializer):
+            response = api_views.WorkModeRequestDocumentActionView.as_view()(request, pk=req_obj.id, action="verify")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(req_obj.document_status, WorkModeRequestDocumentStatus.VERIFIED)
+        self.assertEqual(req_obj.action_type, WorkModeRequestActionType.VERIFIED)
+        self.assertEqual(req_obj._saved["update_fields"], [
+            "document_status",
+            "document_verified_by",
+            "document_verified_at",
+            "action_by",
+            "action_at",
+            "action_type",
+            "action_reason",
+            "document_remark",
+        ])
+        self.assertEqual(recompute_calls, [(self.owner, date(2026, 3, 14), date(2026, 3, 15))])
+        self.assertEqual(log_calls[0]["old_status"], "document:submitted")
+        self.assertEqual(log_calls[0]["new_status"], "document:verified")
+        self.assertEqual(log_calls[0]["remark"], "checked")
+
+    def test_web_reopen_sets_pending_verification_and_recomputes(self):
+        from attendance.views import work_type_requests
+
+        req_obj = self._request_obj(document_status=WorkModeRequestDocumentStatus.VERIFIED)
+        log_calls = []
+        recompute_calls = []
+        self.actor.is_active = True
+        web_user = SimpleNamespace(is_authenticated=True, is_active=True, is_superuser=False, employee_get=self.actor)
+        request = self.request_factory.post(
+            "/attendance/work-mode/77/reopen",
+            {"remark": "reopen it"},
+            HTTP_HX_REQUEST="true",
+        )
+        request.user = web_user
+        request.session = {}
+
+        with patch.object(work_type_requests, "get_object_or_404", return_value=req_obj), \
+             patch.object(work_type_requests, "_can_act_on_request", return_value=True), \
+             patch.object(work_type_requests, "has_attachments", return_value=True), \
+             patch.object(work_type_requests, "recompute_attendance_range", lambda employee, start_date, end_date: recompute_calls.append((employee, start_date, end_date))), \
+             patch.object(work_type_requests, "_log_request_action", lambda *args, **kwargs: log_calls.append(kwargs)), \
+             patch.object(work_type_requests.messages, "success", lambda *args, **kwargs: None):
+            response = work_type_requests.work_type_request_document_action(request, req_obj.id, "reopen")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(req_obj.document_status, WorkModeRequestDocumentStatus.PENDING_VERIFICATION)
+        self.assertEqual(req_obj.action_type, "REOPENED")
+        self.assertEqual(recompute_calls, [(self.owner, date(2026, 3, 14), date(2026, 3, 15))])
+        self.assertEqual(log_calls[0]["old_status"], "document:verified")
+        self.assertEqual(log_calls[0]["new_status"], "document:pending_verification")
+        self.assertEqual(log_calls[0]["remark"], "reopen it")
+
+
+class MonthlyPdfExportParityTests(SimpleTestCase):
+    def setUp(self):
+        self.factory = RequestFactory()
+
+    def test_pdf_export_passes_shared_recap_rows_and_summary_into_template(self):
+        from attendance.views import views
+
+        employee = SimpleNamespace(id=17, employee_work_info=SimpleNamespace())
+        recap = {
+            "rows": [SimpleNamespace(attendance_date=date(2026, 3, 14), note="Approved Full-Day Leave")],
+            "summary": {"total_late_minutes": 15, "total_early_out_minutes": 5, "total_penalty_minutes": 20},
+        }
+        context_capture = {}
+        recap_calls = []
+
+        class FakeEmployeesQS:
+            def __init__(self, items):
+                self._items = list(items)
+
+            def select_related(self, *_args, **_kwargs):
+                return self
+
+            def filter(self, **kwargs):
+                if "id" in kwargs:
+                    return FakeEmployeesQS([item for item in self._items if getattr(item, "id", None) == kwargs["id"]])
+                return self
+
+            def first(self):
+                return self._items[0] if self._items else None
+
+        def _render_to_string(template_name, context):
+            context_capture["template_name"] = template_name
+            context_capture["context"] = context
+            return "<html>ok</html>"
+
+        def _create_pdf(*, src, dest):
+            dest.write(b"PDF")
+            return SimpleNamespace(err=False)
+
+        request = self.factory.get(
+            "/attendance/attendances-recap/export-pdf/",
+            {"employee_id": str(employee.id), "month": "2026-03", "lang": "id"},
+        )
+        viewer = SimpleNamespace(id=44, is_active=True)
+        request.user = SimpleNamespace(
+            is_authenticated=True,
+            is_active=True,
+            employee_get=viewer,
+            has_perm=lambda perm: True,
+        )
+        request.session = {}
+
+        raw_export_view = views.attendance_employee_month_export_pdf.__closure__[0].cell_contents.__closure__[2].cell_contents
+
+        with patch.object(views.Employee.objects, "filter", return_value=FakeEmployeesQS([employee])), \
+             patch.object(views, "filtersubordinatesemployeemodel", lambda request, qs, perm=None: qs), \
+             patch.object(views, "get_monthly_attendance_recap", lambda emp, month, language=None: recap_calls.append((emp, month, language)) or recap), \
+             patch.object(views, "render_to_string", _render_to_string), \
+             patch.object(views.pisa, "CreatePDF", _create_pdf):
+            response = raw_export_view(request)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "application/pdf")
+        self.assertIn('monthly_attendance_17_2026-03_id.pdf', response["Content-Disposition"])
+        self.assertEqual(recap_calls, [(employee, "2026-03", "id")])
+        self.assertEqual(context_capture["template_name"], "attendance/attendances/monthly_export_pdf.html")
+        self.assertIs(context_capture["context"]["employee"], employee)
+        self.assertEqual(context_capture["context"]["rows"], recap["rows"])
+        self.assertEqual(context_capture["context"]["summary"], recap["summary"])
+        self.assertEqual(context_capture["context"]["lang"], "id")
+
+
+class ApiMonthlyRecapParityTests(SimpleTestCase):
+    def setUp(self):
+        self.factory = APIRequestFactory()
+
+    def test_api_month_resolution_uses_shared_month_rules(self):
+        from horilla_api.api_views.attendance import views as api_views
+
+        view = api_views.AttendanceMonthlyRecapAPIView()
+
+        with patch.object(api_views.dj_timezone, "localdate", return_value=date(2026, 3, 14)):
+            malformed = self.factory.get("/api/attendance/recap", {"month": "2026-13"})
+            future = self.factory.get("/api/attendance/recap", {"month": "2026-12"})
+            blank = self.factory.get("/api/attendance/recap")
+
+            self.assertEqual(view._resolve_month(malformed), "2026-03")
+            self.assertEqual(view._resolve_month(future), "2026-03")
+            self.assertEqual(view._resolve_month(blank), "2026-03")
+
+    def test_api_pdf_export_uses_shared_recap_rows_and_summary_into_template(self):
+        from horilla_api.api_views.attendance import views as api_views
+
+        employee = SimpleNamespace(id=17, employee_work_info=SimpleNamespace())
+        recap = {
+            "rows": [SimpleNamespace(attendance_date=date(2026, 3, 14), note="Approved Full-Day Leave")],
+            "summary": {"total_late_minutes": 15, "total_early_out_minutes": 5, "total_penalty_minutes": 20},
+        }
+        context_capture = {}
+        recap_calls = []
+
+        class FakeEmployeesQS:
+            def __init__(self, items):
+                self._items = list(items)
+
+            def filter(self, **kwargs):
+                if "id" in kwargs:
+                    return FakeEmployeesQS([item for item in self._items if getattr(item, "id", None) == kwargs["id"]])
+                return self
+
+            def first(self):
+                return self._items[0] if self._items else None
+
+        def _render_to_string(template_name, context):
+            context_capture["template_name"] = template_name
+            context_capture["context"] = context
+            return "<html>ok</html>"
+
+        def _create_pdf(*, src, dest):
+            dest.write(b"PDF")
+            return SimpleNamespace(err=False)
+
+        request = self.factory.get(
+            "/api/attendance/monthly-recap/export-pdf/",
+            {"employee_id": str(employee.id), "month": "2026-12", "lang": "id"},
+            format="json",
+        )
+        force_authenticate(request, user=SimpleNamespace(is_authenticated=True))
+
+        with patch.object(api_views.dj_timezone, "localdate", return_value=date(2026, 3, 14)), \
+             patch.object(api_views.AttendanceMonthlyRecapExportPDFAPIView, "_allowed_employees_qs", return_value=FakeEmployeesQS([employee])), \
+             patch.object(api_views, "render_to_string", _render_to_string), \
+             patch.object(api_views.pisa, "CreatePDF", _create_pdf), \
+             patch("attendance.services.monthly_recap.get_monthly_attendance_recap", lambda emp, month, language=None: recap_calls.append((emp, month, language)) or recap):
+            response = api_views.AttendanceMonthlyRecapExportPDFAPIView.as_view()(request)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "application/pdf")
+        self.assertIn('monthly_attendance_17_2026-03_id.pdf', response["Content-Disposition"])
+        self.assertEqual(recap_calls, [(employee, "2026-03", "id")])
+        self.assertEqual(context_capture["template_name"], "attendance/attendances/monthly_export_pdf.html")
+        self.assertIs(context_capture["context"]["employee"], employee)
+        self.assertEqual(context_capture["context"]["rows"], recap["rows"])
+        self.assertEqual(context_capture["context"]["summary"], recap["summary"])
+        self.assertEqual(context_capture["context"]["lang"], "id")
+
+    def test_api_pdf_export_rejects_invalid_month_format(self):
+        from horilla_api.api_views.attendance import views as api_views
+
+        request = self.factory.get(
+            "/api/attendance/monthly-recap/export-pdf/",
+            {"employee_id": "17", "month": "2026-13", "lang": "en"},
+            format="json",
+        )
+        force_authenticate(request, user=SimpleNamespace(is_authenticated=True))
+
+        with patch.object(api_views.dj_timezone, "localdate", return_value=date(2026, 3, 14)):
+            response = api_views.AttendanceMonthlyRecapExportPDFAPIView.as_view()(request)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data["error"], "Invalid month format. Expected YYYY-MM")
+
+
+class WorkModePayloadParityTests(SimpleTestCase):
+    def test_serializer_falls_back_action_reason_to_document_remark_for_mobile_clients(self):
+        from horilla_api.api_serializers.attendance.serializers import WorkModeRequestSerializer
+
+        instance = SimpleNamespace(
+            employee_id=SimpleNamespace(
+                pk=1,
+                id=1,
+                employee_first_name="Owner",
+                employee_last_name="User",
+                badge_id="B-1",
+            ),
+            action_reason=None,
+            document_remark="doc verified from field audit",
+            action_by=None,
+            approved_by=None,
+            approved_at=None,
+            action_at=None,
+            mode=AttendanceWorkMode.ON_DUTY,
+            status=WorkModeRequestStatus.APPROVED,
+            document_status=WorkModeRequestDocumentStatus.VERIFIED,
+            reason="Visit customer site",
+            files=SimpleNamespace(all=lambda: []),
+            id=91,
+            employee_id_id=1,
+            scope="full",
+            start_date=date(2026, 3, 14),
+            end_date=date(2026, 3, 14),
+            reason_code=None,
+            duty_destination_location="Site A",
+            duty_destination_detail="HQ",
+        )
+
+        data = WorkModeRequestSerializer(instance).data
+
+        self.assertEqual(data["action_reason"], "doc verified from field audit")
+        self.assertEqual(data["document_remark"], "doc verified from field audit")
+
+
+class WorkModeDocumentActionReasonParityTests(TestCase):
+    def setUp(self):
+        self.api_factory = APIRequestFactory()
+        self.request_factory = RequestFactory()
+        self.user = SimpleNamespace(is_authenticated=True, is_superuser=False)
+        self.actor = SimpleNamespace(id=777, is_active=True)
+        self.owner = SimpleNamespace(id=322, employee_user_id=SimpleNamespace(username="owner"))
+
+    def _request_obj(self, *, document_status):
+        saved = {}
+
+        def _save(*, update_fields=None):
+            saved["update_fields"] = list(update_fields or [])
+
+        return SimpleNamespace(
+            id=88,
+            employee_id=self.owner,
+            employee_id_id=self.owner.id,
+            status=WorkModeRequestStatus.APPROVED,
+            mode=AttendanceWorkMode.ON_DUTY,
+            document_status=document_status,
+            document_verified_by=None,
+            document_verified_at=None,
+            action_by=None,
+            action_at=None,
+            action_type=None,
+            action_reason=None,
+            document_remark=None,
+            start_date=date(2026, 3, 14),
+            end_date=date(2026, 3, 15),
+            save=_save,
+            _saved=saved,
+        )
+
+    def test_api_reject_document_persists_action_reason_for_mobile_payload(self):
+        from horilla_api.api_views.attendance import views as api_views
+
+        req_obj = self._request_obj(document_status=WorkModeRequestDocumentStatus.SUBMITTED)
+        request = self.api_factory.put("/api/work-mode/88/reject-document", {"remark": "document blurred"}, format="json")
+        force_authenticate(request, user=self.user)
+
+        class DummySerializer:
+            def __init__(self, obj, context=None):
+                self.data = {
+                    "id": getattr(obj, "id", None),
+                    "action_reason": getattr(obj, "action_reason", None),
+                    "document_remark": getattr(obj, "document_remark", None),
+                }
+
+        with patch.object(api_views, "get_object_or_404", return_value=req_obj),              patch.object(api_views, "_can_act_on_employee", return_value=True),              patch.object(api_views, "_request_actor_employee", return_value=self.actor),              patch.object(api_views, "recompute_attendance_range", lambda *args, **kwargs: None),              patch.object(api_views, "_log_work_mode_status_change", lambda *args, **kwargs: None),              patch.object(api_views, "WorkModeRequestSerializer", DummySerializer):
+            response = api_views.WorkModeRequestDocumentActionView.as_view()(request, pk=req_obj.id, action="reject-document")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(req_obj.action_reason, "document blurred")
+        self.assertEqual(req_obj.document_remark, "document blurred")
+        self.assertIn("action_reason", req_obj._saved["update_fields"])
+        self.assertEqual(response.data["action_reason"], "document blurred")
+
+    def test_web_verify_persists_action_reason_for_mobile_payload(self):
+        from attendance.views import work_type_requests
+
+        req_obj = self._request_obj(document_status=WorkModeRequestDocumentStatus.SUBMITTED)
+        web_user = SimpleNamespace(is_authenticated=True, is_active=True, is_superuser=False, employee_get=self.actor)
+        request = self.request_factory.post(
+            "/attendance/work-mode/88/verify",
+            {"remark": "assignment letter valid"},
+            HTTP_HX_REQUEST="true",
+        )
+        request.user = web_user
+        request.session = {}
+
+        with patch.object(work_type_requests, "get_object_or_404", return_value=req_obj),              patch.object(work_type_requests, "_can_act_on_request", return_value=True),              patch.object(work_type_requests, "recompute_attendance_range", lambda *args, **kwargs: None),              patch.object(work_type_requests, "_log_request_action", lambda *args, **kwargs: None),              patch.object(work_type_requests.messages, "success", lambda *args, **kwargs: None):
+            response = work_type_requests.work_type_request_document_action(request, req_obj.id, "verify")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(req_obj.action_reason, "assignment letter valid")
+        self.assertEqual(req_obj.document_remark, "assignment letter valid")
+        self.assertIn("action_reason", req_obj._saved["update_fields"])
