@@ -79,10 +79,10 @@
                 <span class="oh-badge oh-badge--secondary oh-badge--small oh-badge--round">PENDING</span>
               {% endif %}
 
-              {% if r.action_by %}
+              {% if r.action_actor_display %}
                 <div class="text-muted" style="font-size: 12px; margin-top: 4px;">
-                  {% trans "Action by" %}: {{ r.action_by.employee_first_name }} {{ r.action_by.employee_last_name }}
-                  {% if r.action_at %} • {{ r.action_at|date:"Y-m-d H:i" }}{% endif %}
+                  {% trans "Action by" %}: {{ r.action_actor_display }}
+                  {% if r.action_effective_at %} • {{ r.action_effective_at|date:"Y-m-d H:i" }}{% endif %}
                 </div>
               {% endif %}
             </div>
@@ -124,6 +124,11 @@
                 <span title="{{ r.reason }}">{{ r.reason|truncatechars:40 }}</span>
               {% else %}
                 <span class="text-muted">-</span>
+              {% endif %}
+              {% if r.action_reason %}
+                <div class="text-muted" style="font-size: 11px; margin-top: 4px;">{{ r.action_reason|truncatechars:40 }}</div>
+              {% elif r.document_remark %}
+                <div class="text-muted" style="font-size: 11px; margin-top: 4px;">{{ r.document_remark|truncatechars:40 }}</div>
               {% endif %}
             </div>
             <div class="oh-sticky-table__td oh-sticky-table__right">
