@@ -45,6 +45,7 @@ from attendance.models import (
     AttendanceWorkMode,
     AttendancePunchStatus,
     WorkModeRequest,
+    WorkModeRequestDocumentStatus,
     WorkModeRequestRejectReasonCode,
     WorkModeRequestScope,
     WorkModeRequestStatus,
@@ -111,8 +112,43 @@ def scheduled_attendance_mode(employee, target_date: date) -> str:
 # Request pickers & effective mode
 # -----------------------------------------------------------------------------
 
+TERMINAL_WORK_MODE_REQUEST_STATUSES = {
+    WorkModeRequestStatus.REJECTED,
+    WorkModeRequestStatus.CANCELED,
+    WorkModeRequestStatus.REVOKED,
+}
+
+
+def is_terminal_work_mode_request_status(status_val: str | None) -> bool:
+    return status_val in TERMINAL_WORK_MODE_REQUEST_STATUSES
+
+
+def is_active_work_mode_request_status(status_val: str | None) -> bool:
+    return not is_terminal_work_mode_request_status(status_val)
+
+
 def _is_active_status(status_val: str) -> bool:
-    return status_val not in (WorkModeRequestStatus.REJECTED, WorkModeRequestStatus.CANCELED)
+    return is_active_work_mode_request_status(status_val)
+
+
+def active_work_mode_request_status_q() -> Q:
+    return ~Q(status__in=list(TERMINAL_WORK_MODE_REQUEST_STATUSES))
+
+
+def work_mode_request_approval_q(*, include_pending_on_duty: bool = False) -> Q:
+    queue_q = Q(status=WorkModeRequestStatus.WAITING_FOR_APPROVAL) | Q(
+        status=WorkModeRequestStatus.APPROVED,
+        mode=AttendanceWorkMode.ON_DUTY,
+        document_status__in=[
+            WorkModeRequestDocumentStatus.SUBMITTED,
+            WorkModeRequestDocumentStatus.PENDING_VERIFICATION,
+            WorkModeRequestDocumentStatus.REJECTED,
+            WorkModeRequestDocumentStatus.VERIFIED,
+        ],
+    )
+    if include_pending_on_duty:
+        queue_q |= Q(status=WorkModeRequestStatus.PENDING, mode=AttendanceWorkMode.ON_DUTY)
+    return queue_q
 
 
 def pick_relevant_request(employee, target_date: date, want: str) -> Optional[WorkModeRequest]:
@@ -134,7 +170,7 @@ def pick_relevant_request(employee, target_date: date, want: str) -> Optional[Wo
             start_date__lte=target_date,
             end_date__gte=target_date,
         )
-        .exclude(status__in=[WorkModeRequestStatus.REJECTED, WorkModeRequestStatus.CANCELED])
+        .filter(active_work_mode_request_status_q())
         .order_by("-id")
     )
 
@@ -233,7 +269,7 @@ def punch_allowed(eff: EffectiveWorkType) -> bool:
 # -----------------------------------------------------------------------------
 
 def _active_status_q() -> Q:
-    return ~Q(status__in=[WorkModeRequestStatus.REJECTED, WorkModeRequestStatus.CANCELED])
+    return active_work_mode_request_status_q()
 
 
 def validate_work_type_request(
