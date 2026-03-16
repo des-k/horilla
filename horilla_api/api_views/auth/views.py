@@ -5,6 +5,7 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from horilla_api.docs import document_api
+from geofencing.policy import geofencing_is_effectively_enabled
 
 from ...api_serializers.auth.serializers import (
     GetEmployeeSerializer,
@@ -66,9 +67,9 @@ class LoginAPIView(APIView):
                 except:
                     pass
                 try:
-                    geo_fencing = employee.get_company().geo_fencing.start
-                except:
-                    pass
+                    geo_fencing = geofencing_is_effectively_enabled(company=employee.get_company())
+                except Exception:
+                    geo_fencing = geofencing_is_effectively_enabled()
                 try:
                     face_detection_image = employee.face_detection.image.url
                 except:
