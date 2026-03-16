@@ -501,6 +501,42 @@ def _calculate_late_early(
     return late_minutes, early_minutes
 
 
+def _resolve_final_work_mode(
+    employee,
+    attendance_date: date,
+    *,
+    request_override_mode: Optional[str] = None,
+    approved_work_request: Optional[WorkModeRequest] = None,
+    accepted_in_punch: Optional[AttendancePunchingHistory] = None,
+    accepted_out_punch: Optional[AttendancePunchingHistory] = None,
+) -> str:
+    """Resolve final attendance mode with audit-safe priority.
+
+    Priority:
+    1. approved attendance/request override mode
+    2. approved work mode request
+    3. accepted raw punch work_mode
+    4. scheduled/default work type for the date
+    5. WFO fallback only when business truth cannot be derived
+    """
+
+    if request_override_mode:
+        return request_override_mode
+
+    if approved_work_request and getattr(approved_work_request, "mode", None):
+        return approved_work_request.mode
+
+    for punch in (accepted_in_punch, accepted_out_punch):
+        mode = getattr(punch, "work_mode", None)
+        if mode:
+            return mode
+
+    from attendance.services.work_type_request_rules import resolve_biometric_work_mode
+
+    resolved = resolve_biometric_work_mode(employee, attendance_date)
+    return resolved.mode or AttendanceWorkMode.WFO
+
+
 def _minimum_for_final(ctx: ShiftContext, leave_ctx: LeaveContext, is_presence_only: bool) -> str:
     if is_presence_only:
         return "00:00"
@@ -653,6 +689,7 @@ def recompute_attendance(employee, attendance_date: date) -> ReconciliationResul
     note = "Present"
     final_mode = AttendanceWorkMode.WFO
     is_presence_only = False
+    request_override_mode = None
 
     if leave_ctx.is_full_day:
         source = SOURCE_LEAVE
@@ -662,21 +699,28 @@ def recompute_attendance(employee, attendance_date: date) -> ReconciliationResul
             final_in_dt = _session_dt_from_attendance(attendance, AttendancePunchDirection.IN)
             source = SOURCE_ATTENDANCE_REQUEST
             note = NOTE_APPROVED_ATTENDANCE_REQUEST
-            final_mode = _session_mode_from_attendance(attendance, AttendancePunchDirection.IN) or final_mode
+            request_override_mode = _session_mode_from_attendance(attendance, AttendancePunchDirection.IN) or request_override_mode
         elif raw.get("final_in") is not None:
             final_in_punch = raw.get("final_in")
             final_in_dt = _localize(final_in_punch.punch_timestamp)
-            final_mode = work_request.mode if work_request else (getattr(final_in_punch, "work_mode", None) or AttendanceWorkMode.WFO)
 
         if _request_is_approved_request_override(attendance, AttendancePunchDirection.OUT):
             final_out_dt = _session_dt_from_attendance(attendance, AttendancePunchDirection.OUT)
             source = SOURCE_ATTENDANCE_REQUEST
             note = NOTE_APPROVED_ATTENDANCE_REQUEST
-            final_mode = _session_mode_from_attendance(attendance, AttendancePunchDirection.OUT) or final_mode
+            request_override_mode = _session_mode_from_attendance(attendance, AttendancePunchDirection.OUT) or request_override_mode
         elif raw.get("final_out") is not None:
             final_out_punch = raw.get("final_out")
             final_out_dt = _localize(final_out_punch.punch_timestamp)
-            final_mode = work_request.mode if work_request else (getattr(final_out_punch, "work_mode", None) or final_mode)
+
+        final_mode = _resolve_final_work_mode(
+            employee,
+            attendance_date,
+            request_override_mode=request_override_mode,
+            approved_work_request=work_request,
+            accepted_in_punch=final_in_punch,
+            accepted_out_punch=final_out_punch,
+        )
 
         if leave_ctx.is_half_day:
             source = SOURCE_LEAVE if source == SOURCE_NORMAL else source
