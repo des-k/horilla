@@ -3,6 +3,8 @@ from django.db import models
 from django.db.models import Q
 from geopy.geocoders import Nominatim
 
+from .policy import coerce_geofencing_start, geofencing_is_effectively_enabled
+
 
 class GeoFencing(models.Model):
     latitude = models.FloatField()
@@ -16,6 +18,10 @@ class GeoFencing(models.Model):
         null=True,
     )
     start = models.BooleanField(default=False)
+
+    @property
+    def effective_start(self) -> bool:
+        return geofencing_is_effectively_enabled(instance=self)
 
     def clean(self):
         if self.company_id is None:
@@ -41,6 +47,7 @@ class GeoFencing(models.Model):
         return super().clean()
 
     def save(self, *args, **kwargs):
+        self.start = coerce_geofencing_start(self.start)
         self.full_clean()  # Run clean before save
         super().save(*args, **kwargs)
 
