@@ -26,6 +26,7 @@ from xhtml2pdf import pisa
 import logging
 
 from facedetection.models import FaceDetection
+from geofencing.policy import geofencing_is_effectively_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -2463,11 +2464,7 @@ class MobileAttendanceSettingsAPIView(APIView):
             face_detection.start = True
             face_detection.save(update_fields=["start"])
 
-        geofencing_enabled = False
-        try:
-            geofencing_enabled = bool(company.geo_fencing.start)
-        except Exception:
-            geofencing_enabled = False
+        geofencing_enabled = geofencing_is_effectively_enabled(company=company)
 
         return Response(
             {
