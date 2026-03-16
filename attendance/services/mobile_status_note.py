@@ -47,6 +47,18 @@ def _as_bool(value: Any) -> bool:
     return bool(value)
 
 
+def _late_detail_text(late_by: str | None) -> str | None:
+    return f"Late by {late_by}" if late_by else None
+
+
+def _early_detail_text(checked_out_early: bool, checked_out_early_by: str | None) -> str | None:
+    if checked_out_early_by:
+        return f"Checked out early by {checked_out_early_by}"
+    if checked_out_early:
+        return "Checked out early"
+    return None
+
+
 def build_mobile_header_state(payload: Mapping[str, Any]) -> dict[str, str | None]:
     """Return the canonical, backend-driven mobile header state.
 
@@ -68,6 +80,8 @@ def build_mobile_header_state(payload: Mapping[str, Any]) -> dict[str, str | Non
     shortfall = _clean_text(payload.get("header_note_work_hours_shortfall")) or _clean_text(payload.get("work_hours_shortfall"))
     minimum_hour = _clean_text(payload.get("header_note_effective_minimum_hour")) or _clean_text(payload.get("minimum_working_hour"))
     unavailable_detail = _clean_text(payload.get("attendance_disabled_message"))
+    late_by = _clean_text(payload.get("late_by"))
+    checked_out_early_by = _clean_text(payload.get("checked_out_early_by"))
 
     has_attendance = _as_bool(payload.get("has_attendance"))
     has_check_in = bool(first_check_in)
@@ -126,20 +140,29 @@ def build_mobile_header_state(payload: Mapping[str, Any]) -> dict[str, str | Non
                 message="Check Out cutoff passed • Please submit an attendance request",
             ).as_payload()
 
+        detail_parts: list[str] = []
+        late_detail = _late_detail_text(late_by)
+        if late_detail:
+            detail_parts.append(late_detail)
         return MobileAttendanceHeaderState(
             code=CHECKED_IN,
             message="Checked In • Don’t forget to Check Out",
+            detail_message=" • ".join(detail_parts) if detail_parts else None,
         ).as_payload()
 
     if has_check_in and has_check_out:
         if work_hours_below_minimum:
             detail_parts: list[str] = []
+            late_detail = _late_detail_text(late_by)
+            if late_detail:
+                detail_parts.append(late_detail)
             if shortfall:
                 detail_parts.append(f"Short by {shortfall}")
             elif minimum_hour:
                 detail_parts.append(f"Expected work session {minimum_hour}")
-            if checked_out_early:
-                detail_parts.append("Checked out early")
+            early_detail = _early_detail_text(checked_out_early, checked_out_early_by)
+            if early_detail:
+                detail_parts.append(early_detail)
             detail_message = " • ".join(detail_parts) if detail_parts else None
             return MobileAttendanceHeaderState(
                 code=BELOW_MINIMUM_HOURS,
@@ -148,14 +171,27 @@ def build_mobile_header_state(payload: Mapping[str, Any]) -> dict[str, str | Non
             ).as_payload()
 
         if checked_out_early:
+            detail_parts: list[str] = []
+            early_detail = _early_detail_text(checked_out_early, checked_out_early_by)
+            if early_detail:
+                detail_parts.append(early_detail)
+            late_detail = _late_detail_text(late_by)
+            if late_detail:
+                detail_parts.append(late_detail)
             return MobileAttendanceHeaderState(
                 code=CHECKED_OUT_EARLY,
                 message="Checked Out early",
+                detail_message=" • ".join(detail_parts) if detail_parts else None,
             ).as_payload()
 
+        detail_parts: list[str] = []
+        late_detail = _late_detail_text(late_by)
+        if late_detail:
+            detail_parts.append(late_detail)
         return MobileAttendanceHeaderState(
             code=ATTENDANCE_RECORDED,
             message="Attendance recorded",
+            detail_message=" • ".join(detail_parts) if detail_parts else None,
         ).as_payload()
 
     if has_check_out and not has_check_in:
