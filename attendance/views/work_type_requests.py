@@ -35,7 +35,11 @@ from attendance.models import (
     WorkModeRequestRejectReasonCode,
     WorkModeRequestStatus,
 )
-from attendance.services.work_type_request_rules import apply_rejection_to_attendance, has_attachments
+from attendance.services.work_type_request_rules import (
+    apply_rejection_to_attendance,
+    has_attachments,
+    work_mode_request_approval_q,
+)
 from attendance.services.request_audit import log_request_action
 from attendance.services.reconciliation import recompute_attendance_range
 from attendance.methods.utils import paginator_qry
@@ -108,6 +112,90 @@ def _log_request_action(req: WorkModeRequest, actor, *, action_type: str, old_st
     except Exception:
         pass
 
+
+def _request_actor_employee(request):
+    return getattr(request.user, "employee_get", None)
+
+
+def _request_actor_label(request, fallback):
+    actor = _request_actor_employee(request)
+    if actor is not None:
+        return actor
+    return fallback
+
+
+def _is_web_update_allowed(req: WorkModeRequest) -> bool:
+    if req.status in (
+        WorkModeRequestStatus.REJECTED,
+        WorkModeRequestStatus.CANCELED,
+        WorkModeRequestStatus.REVOKED,
+    ):
+        return False
+    if req.mode != AttendanceWorkMode.ON_DUTY:
+        return req.status in (
+            WorkModeRequestStatus.PENDING,
+            WorkModeRequestStatus.WAITING_FOR_APPROVAL,
+        )
+    if req.status in (
+        WorkModeRequestStatus.PENDING,
+        WorkModeRequestStatus.WAITING_FOR_APPROVAL,
+    ):
+        return True
+    if req.status != WorkModeRequestStatus.APPROVED:
+        return False
+    return req.document_status != WorkModeRequestDocumentStatus.VERIFIED
+
+
+def _request_remark_value(request, *keys: str):
+    for key in keys:
+        value = (request.POST.get(key) or request.GET.get(key) or "").strip()
+        if value:
+            return value
+    return None
+
+
+def _save_on_duty_uploads(req: WorkModeRequest, uploaded_files, *, replace_existing: bool = False):
+    if replace_existing:
+        req.files.clear()
+    for uploaded in uploaded_files:
+        af = AttendanceRequestFile.objects.create(file=uploaded)
+        req.files.add(af)
+
+
+def _sync_on_duty_document_after_upload(req: WorkModeRequest):
+    if req.mode != AttendanceWorkMode.ON_DUTY:
+        return False
+
+    had_approved_finalization = req.status == WorkModeRequestStatus.APPROVED
+    previous_document_status = req.document_status
+    previous_verified_by = req.document_verified_by_id
+    previous_verified_at = req.document_verified_at
+
+    _set_on_duty_document_state(
+        req,
+        has_files=has_attachments(req),
+        approved=had_approved_finalization,
+    )
+
+    if req.status == WorkModeRequestStatus.PENDING and has_attachments(req):
+        req.status = WorkModeRequestStatus.WAITING_FOR_APPROVAL
+
+    document_changed = previous_document_status != req.document_status
+    verification_reset = False
+    if had_approved_finalization and req.document_status != WorkModeRequestDocumentStatus.VERIFIED:
+        if req.document_verified_by_id is not None or req.document_verified_at is not None:
+            verification_reset = True
+        req.document_verified_by = None
+        req.document_verified_at = None
+
+    return document_changed or verification_reset or previous_verified_by != req.document_verified_by_id or previous_verified_at != req.document_verified_at
+
+
+def _recompute_if_needed(req: WorkModeRequest, *, should_recompute: bool):
+    if should_recompute:
+        recompute_attendance_range(req.employee_id, req.start_date, req.end_date)
+
+
 def _mode_label(mode: str) -> str:
     if mode == AttendanceWorkMode.ON_DUTY:
         return "ON DUTY"
@@ -161,7 +249,7 @@ def work_type_request_view(request):
     a Django superuser.
     """
 
-    employee = getattr(request.user, "employee_get", None)
+    employee = _request_actor_employee(request)
     is_super = bool(getattr(request.user, "is_superuser", False))
     has_global_perm = _is_global_work_type_approver(request.user)
 
@@ -276,26 +364,12 @@ def work_type_request_view(request):
     sub_ids = _subordinate_ids(request)
     can_approve = bool(is_super or has_global_perm or bool(sub_ids))
 
-    # Include pending ON_DUTY so web matches mobile approvals list.
-    try:
-        from django.db.models import Q
-
-        approvals_qs = WorkModeRequest.objects.filter(
-            Q(status=WorkModeRequestStatus.WAITING_FOR_APPROVAL)
-            | Q(status=WorkModeRequestStatus.PENDING, mode=AttendanceWorkMode.ON_DUTY)
-            | Q(
-                status=WorkModeRequestStatus.APPROVED,
-                mode=AttendanceWorkMode.ON_DUTY,
-                document_status__in=[
-                    WorkModeRequestDocumentStatus.SUBMITTED,
-                    WorkModeRequestDocumentStatus.PENDING_VERIFICATION,
-                    WorkModeRequestDocumentStatus.REJECTED,
-                    WorkModeRequestDocumentStatus.VERIFIED,
-                ],
-            )
+    include_pending_on_duty = bool(is_super or has_global_perm)
+    approvals_qs = WorkModeRequest.objects.filter(
+        work_mode_request_approval_q(
+            include_pending_on_duty=include_pending_on_duty
         )
-    except Exception:
-        approvals_qs = WorkModeRequest.objects.filter(status=WorkModeRequestStatus.WAITING_FOR_APPROVAL)
+    )
     if not (is_super or has_global_perm):
         approvals_qs = filtersubordinates(
             request=request,
@@ -428,12 +502,14 @@ def work_type_request_revoke(request, obj_id: int):
         return HttpResponse("<script>location.reload();</script>")
 
     old_status = req.status
+    remark = _request_remark_value(request, "reason", "remark", "note")
     req.status = WorkModeRequestStatus.REVOKED
     req.action_by = employee if employee is not None else None
     req.action_at = timezone.now()
     req.action_type = "REVOKED"
-    req.save(update_fields=["status", "action_by", "action_at", "action_type"])
-    _log_request_action(req, employee, action_type="REVOKED", old_status=old_status, new_status=req.status)
+    req.action_reason = remark
+    req.save(update_fields=["status", "action_by", "action_at", "action_type", "action_reason"])
+    _log_request_action(req, _request_actor_label(request, employee), action_type="REVOKED", old_status=old_status, new_status=req.status, remark=remark)
     recompute_attendance_range(req.employee_id, req.start_date, req.end_date)
     messages.success(request, _("Request revoked."))
     return HttpResponse("<script>location.reload();</script>")
@@ -477,7 +553,7 @@ def work_type_request_document_action(request, obj_id: int, action: str):
         req.action_reason = remark
         req.document_remark = remark
         req.save(update_fields=["document_status", "document_verified_by", "document_verified_at", "action_by", "action_at", "action_type", "action_reason", "document_remark"])
-        _log_request_action(req, employee, action_type="VERIFIED", old_status=f"document:{previous}", new_status=f"document:{req.document_status}", remark=remark)
+        _log_request_action(req, _request_actor_label(request, employee), action_type="VERIFIED", old_status=f"document:{previous}", new_status=f"document:{req.document_status}", remark=remark)
         recompute_attendance_range(req.employee_id, req.start_date, req.end_date)
         messages.success(request, _("Document verified."))
     elif action == "reject":
@@ -488,11 +564,11 @@ def work_type_request_document_action(request, obj_id: int, action: str):
         req.document_status = WorkModeRequestDocumentStatus.REJECTED
         req.action_by = employee
         req.action_at = timezone.now()
-        req.action_type = "REJECTED"
+        req.action_type = WorkModeRequestActionType.DOCUMENT_REJECTED
         req.action_reason = remark
         req.document_remark = remark
         req.save(update_fields=["document_status", "action_by", "action_at", "action_type", "action_reason", "document_remark"])
-        _log_request_action(req, employee, action_type="REJECTED", old_status=f"document:{previous}", new_status=f"document:{req.document_status}", remark=remark)
+        _log_request_action(req, _request_actor_label(request, employee), action_type=WorkModeRequestActionType.DOCUMENT_REJECTED, old_status=f"document:{previous}", new_status=f"document:{req.document_status}", remark=remark)
         recompute_attendance_range(req.employee_id, req.start_date, req.end_date)
         messages.success(request, _("Document rejected."))
     elif action == "reopen":
@@ -509,7 +585,7 @@ def work_type_request_document_action(request, obj_id: int, action: str):
         req.action_reason = remark
         req.document_remark = remark
         req.save(update_fields=["document_status", "document_verified_by", "document_verified_at", "action_by", "action_at", "action_type", "action_reason", "document_remark"])
-        _log_request_action(req, employee, action_type="REOPENED", old_status=f"document:{previous}", new_status=f"document:{req.document_status}", remark=remark)
+        _log_request_action(req, _request_actor_label(request, employee), action_type="REOPENED", old_status=f"document:{previous}", new_status=f"document:{req.document_status}", remark=remark)
         recompute_attendance_range(req.employee_id, req.start_date, req.end_date)
         messages.success(request, _("Document review reopened."))
     else:
@@ -553,7 +629,7 @@ def work_type_request_attachments(request, obj_id: int):
 @login_required
 @hx_request_required
 def work_type_request_create(request):
-    employee = getattr(request.user, "employee_get", None)
+    employee = _request_actor_employee(request)
     if employee is None:
         return HttpResponseForbidden("Employee profile required")
 
@@ -564,31 +640,29 @@ def work_type_request_create(request):
         if form.is_valid():
             instance: WorkModeRequest = form.save(commit=False)
             instance.employee_id = employee
+            instance.reason = (form.cleaned_data.get("reason") or "").strip()
+            instance.duty_destination_location = (
+                form.cleaned_data.get("duty_destination_location") or ""
+            ).strip()
+            instance.duty_destination_detail = (form.cleaned_data.get("duty_destination_detail") or "").strip()
 
-            # Status rules
             files_in = request.FILES.getlist("files")
             if instance.mode == AttendanceWorkMode.WFA:
                 instance.status = WorkModeRequestStatus.WAITING_FOR_APPROVAL
             elif instance.mode == AttendanceWorkMode.ON_DUTY:
                 instance.status = (
-                    WorkModeRequestStatus.WAITING_FOR_APPROVAL
-                    if files_in
-                    else WorkModeRequestStatus.PENDING
+                    WorkModeRequestStatus.WAITING_FOR_APPROVAL if files_in else WorkModeRequestStatus.PENDING
                 )
                 _set_on_duty_document_state(instance, has_files=bool(files_in), approved=False)
             else:
-                # Not allowed by model.clean(), but keep safe.
                 instance.status = WorkModeRequestStatus.PENDING
 
+            instance.action_reason = None
+            instance.document_remark = None
             instance.save()
-
-            # Save attachments
-            for f in files_in:
-                af = AttendanceRequestFile.objects.create(file=f)
-                instance.files.add(af)
+            _save_on_duty_uploads(instance, files_in)
 
             messages.success(request, _(f"Work Type Request created ({_mode_label(instance.mode)})."))
-            # reload page (modal context)
             response = render(request, "attendance/work_type_requests/form.html", {"form": form})
             return HttpResponse(response.content.decode("utf-8") + "<script>location.reload();</script>")
 
@@ -598,41 +672,46 @@ def work_type_request_create(request):
 @login_required
 @hx_request_required
 def work_type_request_update(request, obj_id: int):
-    employee = getattr(request.user, "employee_get", None)
+    employee = _request_actor_employee(request)
     if employee is None:
         return HttpResponseForbidden("Employee profile required")
 
     req = get_object_or_404(WorkModeRequest, id=obj_id)
 
-    # Only the owner can add attachments/notes
     if req.employee_id_id != employee.id:
         return HttpResponseForbidden("Not allowed")
 
-    form = WorkTypeRequestUpdateForm(initial={"reason": req.reason or ""})
+    if not _is_web_update_allowed(req):
+        return HttpResponseForbidden("This request can no longer be updated")
 
-    if req.mode == AttendanceWorkMode.ON_DUTY and req.document_status == WorkModeRequestDocumentStatus.VERIFIED:
-        return HttpResponseForbidden("Verified On Duty documents are locked")
+    form = WorkTypeRequestUpdateForm(
+        request_obj=req,
+        initial={
+            "reason": req.reason or "",
+            "duty_destination_location": req.duty_destination_location or "",
+            "duty_destination_detail": req.duty_destination_detail or "",
+        },
+    )
 
     if request.method == "POST":
-        form = WorkTypeRequestUpdateForm(request.POST, request.FILES)
+        form = WorkTypeRequestUpdateForm(request.POST, request.FILES, request_obj=req)
         if form.is_valid():
-            note = (form.cleaned_data.get("reason") or "").strip()
-            if note:
-                req.reason = note
+            req.reason = (form.cleaned_data.get("reason") or "").strip()
+            req.duty_destination_location = (
+                form.cleaned_data.get("duty_destination_location") or req.duty_destination_location or ""
+            ).strip()
+            req.duty_destination_detail = (form.cleaned_data.get("duty_destination_detail") or "").strip()
 
             files_in = request.FILES.getlist("files")
+            should_recompute = False
             if files_in and req.mode == AttendanceWorkMode.ON_DUTY:
-                req.files.clear()
-            for f in files_in:
-                af = AttendanceRequestFile.objects.create(file=f)
-                req.files.add(af)
-
-            if req.mode == AttendanceWorkMode.ON_DUTY:
-                _set_on_duty_document_state(req, has_files=has_attachments(req), approved=(req.status == WorkModeRequestStatus.APPROVED))
-                if req.status == WorkModeRequestStatus.PENDING and has_attachments(req):
-                    req.status = WorkModeRequestStatus.WAITING_FOR_APPROVAL
+                _save_on_duty_uploads(req, files_in, replace_existing=True)
+                should_recompute = _sync_on_duty_document_after_upload(req)
+            elif req.mode == AttendanceWorkMode.ON_DUTY:
+                should_recompute = _sync_on_duty_document_after_upload(req)
 
             req.save()
+            _recompute_if_needed(req, should_recompute=should_recompute and req.status == WorkModeRequestStatus.APPROVED)
             messages.success(request, _("Request updated."))
             response = render(
                 request,
@@ -651,7 +730,7 @@ def work_type_request_update(request, obj_id: int):
 @login_required
 @hx_request_required
 def work_type_request_cancel(request, obj_id: int):
-    employee = getattr(request.user, "employee_get", None)
+    employee = _request_actor_employee(request)
     if employee is None:
         return HttpResponseForbidden("Employee profile required")
 
@@ -669,8 +748,9 @@ def work_type_request_cancel(request, obj_id: int):
     req.action_by = employee
     req.action_at = timezone.now()
     req.action_type = "CANCELED"
-    req.save(update_fields=["status", "action_by", "action_at", "action_type"])
-    _log_request_action(req, employee, action_type="CANCELED", old_status=old_status, new_status=req.status)
+    req.action_reason = None
+    req.save(update_fields=["status", "action_by", "action_at", "action_type", "action_reason"])
+    _log_request_action(req, _request_actor_label(request, employee), action_type="CANCELED", old_status=old_status, new_status=req.status)
     recompute_attendance_range(req.employee_id, req.start_date, req.end_date)
     messages.success(request, _("Request canceled."))
     return HttpResponse("<script>location.reload();</script>")
@@ -679,7 +759,7 @@ def work_type_request_cancel(request, obj_id: int):
 @login_required
 @hx_request_required
 def work_type_request_approve(request, obj_id: int):
-    employee = getattr(request.user, "employee_get", None)
+    employee = _request_actor_employee(request)
     is_super = bool(getattr(request.user, "is_superuser", False))
     has_global_perm = _is_global_work_type_approver(request.user)
     if employee is None and not (is_super or has_global_perm):
@@ -687,7 +767,6 @@ def work_type_request_approve(request, obj_id: int):
 
     req = get_object_or_404(WorkModeRequest, id=obj_id)
 
-    # Never allow self-approval (use cancel instead).
     try:
         if getattr(req.employee_id, "employee_user_id", None) == request.user:
             return HttpResponseForbidden("You cannot approve your own request")
@@ -708,12 +787,13 @@ def work_type_request_approve(request, obj_id: int):
     req.action_by = req.approved_by
     req.action_at = req.approved_at
     req.action_type = "APPROVED"
+    req.action_reason = None
     if req.mode == AttendanceWorkMode.ON_DUTY:
         _set_on_duty_document_state(req, has_files=has_attachments(req), approved=True)
-        req.save(update_fields=["status", "approved_by", "approved_at", "action_by", "action_at", "action_type", "document_status"])
+        req.save(update_fields=["status", "approved_by", "approved_at", "action_by", "action_at", "action_type", "action_reason", "document_status"])
     else:
-        req.save(update_fields=["status", "approved_by", "approved_at", "action_by", "action_at", "action_type"])
-    _log_request_action(req, employee, action_type="APPROVED", old_status=old_status, new_status=req.status)
+        req.save(update_fields=["status", "approved_by", "approved_at", "action_by", "action_at", "action_type", "action_reason"])
+    _log_request_action(req, _request_actor_label(request, employee), action_type="APPROVED", old_status=old_status, new_status=req.status)
     recompute_attendance_range(req.employee_id, req.start_date, req.end_date)
 
     messages.success(request, _("Request approved."))
@@ -723,7 +803,7 @@ def work_type_request_approve(request, obj_id: int):
 @login_required
 @hx_request_required
 def work_type_request_reject(request, obj_id: int):
-    employee = getattr(request.user, "employee_get", None)
+    employee = _request_actor_employee(request)
     is_super = bool(getattr(request.user, "is_superuser", False))
     has_global_perm = _is_global_work_type_approver(request.user)
     if employee is None and not (is_super or has_global_perm):
@@ -731,7 +811,6 @@ def work_type_request_reject(request, obj_id: int):
 
     req = get_object_or_404(WorkModeRequest, id=obj_id)
 
-    # Never allow self-reject (use cancel instead).
     try:
         if getattr(req.employee_id, "employee_user_id", None) == request.user:
             return HttpResponseForbidden("Use cancel for your own request")
@@ -741,10 +820,13 @@ def work_type_request_reject(request, obj_id: int):
     if not _can_act_on_request(request, req):
         return HttpResponseForbidden("Not allowed")
 
+    if req.status == WorkModeRequestStatus.PENDING and not (is_super or has_global_perm):
+        return HttpResponseForbidden("Pending On Duty requests are not actionable for non-admin reviewers")
+
     form = WorkTypeRequestRejectForm(
         initial={
             "reason_code": WorkModeRequestRejectReasonCode.MANUAL_REJECT,
-            "reason": req.reason or "",
+            "reason": "",
         }
     )
 
@@ -755,17 +837,18 @@ def work_type_request_reject(request, obj_id: int):
                 messages.error(request, _("Only pending/waiting requests can be rejected."))
                 return HttpResponse("<script>location.reload();</script>")
 
+            remark = (form.cleaned_data.get("reason") or "").strip() or None
             old_status = req.status
             req.status = WorkModeRequestStatus.REJECTED
             req.reason_code = form.cleaned_data.get("reason_code")
-            req.reason = (form.cleaned_data.get("reason") or "").strip() or req.reason
-            req.approved_by = employee if employee is not None else None
-            req.approved_at = timezone.now()
-            req.action_by = req.approved_by
-            req.action_at = req.approved_at
+            req.approved_by = None
+            req.approved_at = None
+            req.action_by = employee if employee is not None else None
+            req.action_at = timezone.now()
             req.action_type = "REJECTED"
-            req.save(update_fields=["status", "reason_code", "reason", "approved_by", "approved_at", "action_by", "action_at", "action_type"])
-            _log_request_action(req, employee, action_type="REJECTED", old_status=old_status, new_status=req.status, remark=req.reason)
+            req.action_reason = remark
+            req.save(update_fields=["status", "reason_code", "approved_by", "approved_at", "action_by", "action_at", "action_type", "action_reason"])
+            _log_request_action(req, _request_actor_label(request, employee), action_type="REJECTED", old_status=old_status, new_status=req.status, remark=remark)
 
             try:
                 apply_rejection_to_attendance(req)
@@ -785,3 +868,4 @@ def work_type_request_reject(request, obj_id: int):
         "attendance/work_type_requests/reject_form.html",
         {"form": form, "req": req, "mode_label": _mode_label},
     )
+
