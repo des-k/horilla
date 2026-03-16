@@ -40,7 +40,7 @@
         <div>
             <h3 class="oh-card__title mb-0">{% trans "Geofencing" %}</h3>
             <p class="text-muted mb-0">
-                {% trans "Configure and enable or disable geofencing for mobile attendance." %}
+                {{ geofencing_policy_help }}
             </p>
         </div>
         <span class="badge {% if geofencing_enabled %}bg-success{% else %}bg-secondary{% endif %}">
@@ -48,9 +48,9 @@
         </span>
     </div>
     <div class="oh-card__body">
-        <form hx-post="{% url 'geo-config' %}" hx-swap="none" hx-on-htmx-after-request="$('#reloadMessagesButton').click();">
-            {% csrf_token %}
-            {{ form.as_p }}
-        </form>
+        <div class="alert alert-secondary mb-3" role="alert">
+            <strong>{% trans "Read only" %}:</strong> {{ geofencing_policy_note }}
+        </div>
+        {{ form.as_p }}
     </div>
 </div>
