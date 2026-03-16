@@ -12,7 +12,7 @@
 <div class="oh-modal__dialog-body">
   <div class="mb-2">
     <small class="text-muted">
-      {% trans "Allowed edit: add attachments and update note." %}
+      {% trans "Allowed edit: update note, destination, detail, and replace attachments when the request is still editable." %}
       <br />
       <strong>{% trans "Current status" %}:</strong> {{ req.status|upper }}<br/>
       <strong>{% trans "Document status" %}:</strong> {{ req.get_document_status_display }}
@@ -27,11 +27,25 @@
       {% if form.reason.errors %}<small class="text-danger">{{ form.reason.errors|join:", " }}</small>{% endif %}
     </div>
 
+    {% if req.mode == 'on_duty' %}
+      <div class="oh-input-group">
+        <label class="oh-label">{{ form.duty_destination_location.label }}</label>
+        {{ form.duty_destination_location }}
+        {% if form.duty_destination_location.errors %}<small class="text-danger">{{ form.duty_destination_location.errors|join:", " }}</small>{% endif %}
+      </div>
+
+      <div class="oh-input-group">
+        <label class="oh-label">{{ form.duty_destination_detail.label }}</label>
+        {{ form.duty_destination_detail }}
+        {% if form.duty_destination_detail.errors %}<small class="text-danger">{{ form.duty_destination_detail.errors|join:", " }}</small>{% endif %}
+      </div>
+    {% endif %}
+
     <div class="oh-input-group">
       <label class="oh-label">{{ form.files.label }}</label>
       {{ form.files }}
       {% if form.files.errors %}<small class="text-danger">{{ form.files.errors|join:", " }}</small>{% endif %}
-      <small class="text-muted">{% trans "Uploading new files replaces the current On Duty document until it is verified." %}</small>
+      <small class="text-muted">{% trans "Uploading new files replaces the current On Duty document and moves it back into review until it is verified again." %}</small>
     </div>
 
     {% if form.non_field_errors %}
