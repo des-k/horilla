@@ -21,6 +21,7 @@ from attendance.models import (
     WorkModeRequestRejectReasonCode,
     WorkModeRequestScope,
 )
+from attendance.services.attachment_validation import validate_uploaded_files
 from attendance.services.work_type_request_rules import validate_work_type_request
 
 
@@ -35,11 +36,17 @@ class MultipleFileField(forms.FileField):
 
     def clean(self, data, initial=None):
         if data in (None, "", []):
-            return super().clean(None, initial)
+            cleaned = super().clean(None, initial)
+            validate_uploaded_files([])
+            return cleaned
         if isinstance(data, (list, tuple)):
             parent_clean = super(MultipleFileField, self).clean
-            return [parent_clean(d, initial) for d in data]
-        return super().clean(data, initial)
+            cleaned = [parent_clean(d, initial) for d in data]
+            validate_uploaded_files(cleaned)
+            return cleaned
+        cleaned = super().clean(data, initial)
+        validate_uploaded_files([cleaned])
+        return cleaned
 
 
 class WorkTypeRequestCreateForm(forms.ModelForm):
@@ -99,7 +106,6 @@ class WorkTypeRequestCreateForm(forms.ModelForm):
         super().__init__(*args, **kwargs)
         self._employee = employee
 
-        # UX: prevent picking past dates in the browser (server-side validation still applies).
         today = timezone.localdate().isoformat()
         try:
             self.fields["start_date"].widget.attrs.setdefault("min", today)
@@ -107,13 +113,20 @@ class WorkTypeRequestCreateForm(forms.ModelForm):
         except Exception:
             pass
 
-        # Default end_date = start_date (single-day scopes will sync via JS too)
         if self.initial.get("start_date") and not self.initial.get("end_date"):
             self.initial["end_date"] = self.initial.get("start_date")
 
     class Meta:
         model = WorkModeRequest
-        fields = ["mode", "scope", "start_date", "end_date", "reason", "duty_destination_location", "duty_destination_detail"]
+        fields = [
+            "mode",
+            "scope",
+            "start_date",
+            "end_date",
+            "reason",
+            "duty_destination_location",
+            "duty_destination_detail",
+        ]
 
     def clean(self):
         cleaned = super().clean()
@@ -127,19 +140,22 @@ class WorkTypeRequestCreateForm(forms.ModelForm):
         start_date: Optional[date] = cleaned.get("start_date")
         end_date: Optional[date] = cleaned.get("end_date")
 
-        # Require non-empty reason (avoid whitespace-only submissions).
         reason = (cleaned.get("reason") or "").strip()
         if not reason:
             raise ValidationError({"reason": "Reason / Note is required"})
         cleaned["reason"] = reason
 
-        if mode == AttendanceWorkMode.ON_DUTY and not (cleaned.get("duty_destination_location") or "").strip():
+        duty_destination_location = (cleaned.get("duty_destination_location") or "").strip()
+        duty_destination_detail = (cleaned.get("duty_destination_detail") or "").strip()
+        cleaned["duty_destination_location"] = duty_destination_location
+        cleaned["duty_destination_detail"] = duty_destination_detail
+
+        if mode == AttendanceWorkMode.ON_DUTY and not duty_destination_location:
             raise ValidationError({"duty_destination_location": "Duty destination location is required for On Duty."})
 
         if not start_date:
             return cleaned
 
-        # For IN/OUT, force single day.
         if scope in (WorkModeRequestScope.IN, WorkModeRequestScope.OUT):
             cleaned["end_date"] = start_date
             end_date = start_date
@@ -148,7 +164,6 @@ class WorkTypeRequestCreateForm(forms.ModelForm):
             cleaned["end_date"] = start_date
             end_date = start_date
 
-        # Central rules
         validate_work_type_request(
             employee=employee,
             mode=mode,
@@ -162,7 +177,7 @@ class WorkTypeRequestCreateForm(forms.ModelForm):
 
 
 class WorkTypeRequestUpdateForm(forms.Form):
-    """Limited edit: add attachments + update note."""
+    """Limited edit: add attachments + update note/destination metadata."""
 
     reason = forms.CharField(
         label="Reason / Note",
@@ -187,6 +202,23 @@ class WorkTypeRequestUpdateForm(forms.Form):
         required=False,
         widget=MultipleClearableFileInput(attrs={"multiple": True, "class": "oh-input w-100"}),
     )
+
+    def __init__(self, *args, request_obj: WorkModeRequest | None = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._request_obj = request_obj
+
+    def clean(self):
+        cleaned = super().clean()
+        cleaned["reason"] = (cleaned.get("reason") or "").strip()
+        cleaned["duty_destination_location"] = (cleaned.get("duty_destination_location") or "").strip()
+        cleaned["duty_destination_detail"] = (cleaned.get("duty_destination_detail") or "").strip()
+
+        req = self._request_obj
+        if req and req.mode == AttendanceWorkMode.ON_DUTY:
+            destination = cleaned.get("duty_destination_location") or (getattr(req, "duty_destination_location", "") or "").strip()
+            if not destination:
+                raise ValidationError({"duty_destination_location": "Duty destination location is required for On Duty."})
+        return cleaned
 
 
 class WorkTypeRequestRejectForm(forms.Form):
