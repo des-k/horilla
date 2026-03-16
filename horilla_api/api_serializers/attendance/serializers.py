@@ -3,6 +3,7 @@ from rest_framework import serializers
 
 from attendance.models import *
 from base.models import HorillaMailTemplate
+from base.methods import get_subordinate_employee_ids
 
 from attendance.services.work_type_request_rules import (
     coerce_work_type_payload,
@@ -410,15 +411,59 @@ class WorkModeRequestSerializer(serializers.ModelSerializer):
     approved_by_name = serializers.SerializerMethodField(read_only=True)
     action_by_name = serializers.SerializerMethodField(read_only=True)
     action_at = serializers.SerializerMethodField(read_only=True)
+    can_approve = serializers.SerializerMethodField(read_only=True)
+    can_reject = serializers.SerializerMethodField(read_only=True)
+    can_revoke = serializers.SerializerMethodField(read_only=True)
+    can_verify_document = serializers.SerializerMethodField(read_only=True)
+    can_reopen_document = serializers.SerializerMethodField(read_only=True)
+    can_upload_document = serializers.SerializerMethodField(read_only=True)
 
-    # UI/UX alias (read-only). Input alias is handled in to_internal_value().
     work_type = serializers.CharField(source="mode", read_only=True)
 
+    class Meta:
+        model = WorkModeRequest
+        fields = "__all__"
+
+    def _request(self):
+        return self.context.get("request") if hasattr(self, "context") else None
+
+    def _request_actor_employee(self):
+        request = self._request()
+        try:
+            return request.user.employee_get if request else None
+        except Exception:
+            return None
+
+    def _is_admin(self, request):
+        try:
+            if getattr(request.user, "is_superuser", False):
+                return True
+            return bool(
+                request.user.has_perm("attendance.change_workmoderequest")
+                or request.user.has_perm("attendance.change_attendance")
+            )
+        except Exception:
+            return False
+
+    def _is_owner(self, obj, request):
+        try:
+            return obj.employee_id.employee_user_id == request.user
+        except Exception:
+            return False
+
+    def _can_manage(self, obj):
+        request = self._request()
+        if not request:
+            return False
+        if self._is_admin(request):
+            return not self._is_owner(obj, request)
+        try:
+            subordinate_ids = set(get_subordinate_employee_ids(request) or [])
+        except Exception:
+            subordinate_ids = set()
+        return getattr(obj, "employee_id_id", None) in subordinate_ids and not self._is_owner(obj, request)
+
     def to_internal_value(self, data):
-        # Allow clients to send `work_type` instead of legacy `mode`.
-        # NOTE: For multipart requests, DRF passes a QueryDict; calling dict(QueryDict)
-        # turns values into lists (e.g. {"mode": ["wfa"]}) and breaks ChoiceField.
-        # Use `.dict()` to get single values.
         try:
             raw = data.dict() if hasattr(data, "dict") else dict(data)
             _mode, new_data = coerce_work_type_payload(raw)
@@ -429,9 +474,6 @@ class WorkModeRequestSerializer(serializers.ModelSerializer):
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
-        # Mobile builds read action_reason for action notes. Older rows and
-        # some document-action flows only populated document_remark, so expose a
-        # stable fallback in the serialized payload.
         if not (data.get("action_reason") or "").strip():
             fallback = (data.get("document_remark") or "").strip()
             if fallback:
@@ -441,23 +483,40 @@ class WorkModeRequestSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         attrs = super().validate(attrs)
 
-        # Reason/Notes is required on create, and must not be cleared on update.
-        # (Model field is blank=True for backward compatibility, but UX requires it.)
+        for field in ("reason", "duty_destination_location", "duty_destination_detail"):
+            if field in attrs and attrs.get(field) is not None:
+                attrs[field] = str(attrs.get(field)).strip()
+
         reason_in = attrs.get("reason")
         if self.instance is None:
-            # Creating
             if reason_in is None or str(reason_in).strip() == "":
                 raise serializers.ValidationError({"reason": "Reason / Notes is required."})
         else:
-            # Updating via serializer (some endpoints may use serializer directly)
             if "reason" in attrs and str(reason_in or "").strip() == "":
                 raise serializers.ValidationError({"reason": "Reason / Notes is required."})
 
+        request = self._request()
+        actor = self._request_actor_employee()
         employee = attrs.get("employee_id") or getattr(self.instance, "employee_id", None)
         mode = attrs.get("mode") or getattr(self.instance, "mode", None)
         scope = attrs.get("scope") or getattr(self.instance, "scope", None)
         start_date = attrs.get("start_date") or getattr(self.instance, "start_date", None)
         end_date = attrs.get("end_date") or getattr(self.instance, "end_date", None)
+        destination = attrs.get("duty_destination_location")
+        if destination is None and self.instance is not None:
+            destination = getattr(self.instance, "duty_destination_location", None)
+
+        if self.instance is None:
+            if request is None:
+                raise serializers.ValidationError({"employee_id": "Request context is required."})
+            if actor is None:
+                raise serializers.ValidationError({"employee_id": "An employee profile is required to create this request."})
+            if employee is not None and employee != actor:
+                raise serializers.ValidationError({"employee_id": "Requests can only be created for yourself."})
+            attrs["employee_id"] = actor
+
+        if mode == AttendanceWorkMode.ON_DUTY and not str(destination or "").strip():
+            raise serializers.ValidationError({"duty_destination_location": "Destination location is required for ON DUTY requests."})
 
         if employee and mode and scope and start_date and end_date:
             validate_work_type_request(
@@ -469,30 +528,14 @@ class WorkModeRequestSerializer(serializers.ModelSerializer):
                 instance_id=getattr(self.instance, "id", None),
             )
 
-        # If rejected, reason_code must exist (spec)
-        status_val = attrs.get("status") or getattr(self.instance, "status", None)
-        reason_code = attrs.get("reason_code") or getattr(self.instance, "reason_code", None)
-        if attrs.get("employee_id") is not None and self.instance is None:
-            request = self.context.get("request")
-            try:
-                actor = request.user.employee_get if request else None
-            except Exception:
-                actor = None
-            if actor and attrs.get("employee_id") != actor:
-                raise serializers.ValidationError({"employee_id": "Requests can only be created for yourself."})
-
         doc_status = attrs.get("document_status") or getattr(self.instance, "document_status", None)
-        if mode == AttendanceWorkMode.ON_DUTY and doc_status == "verified" and getattr(self.instance, "document_status", None) == "verified":
+        if mode == AttendanceWorkMode.ON_DUTY and doc_status == WorkModeRequestDocumentStatus.VERIFIED and getattr(self.instance, "document_status", None) == WorkModeRequestDocumentStatus.VERIFIED:
             immutable = {"reason", "start_date", "end_date", "scope", "mode", "duty_destination_location", "duty_destination_detail"}
             changed = [field for field in immutable if field in attrs]
             if changed:
                 raise serializers.ValidationError({"document_status": "Verified On Duty documents are locked. Reopen verification first."})
 
         return attrs
-
-    class Meta:
-        model = WorkModeRequest
-        fields = "__all__"
 
     def get_attachment_urls(self, obj):
         try:
@@ -511,16 +554,10 @@ class WorkModeRequestSerializer(serializers.ModelSerializer):
         return self.get_attachment_urls(obj)
 
     def get_action_by_name(self, obj):
-        actor = getattr(obj, "action_by", None)
-        if not actor:
-            return None
-        try:
-            return f"{actor.employee_first_name} {actor.employee_last_name}".strip() or str(actor)
-        except Exception:
-            return None
+        return getattr(obj, "action_actor_display", None)
 
     def get_action_at(self, obj):
-        return getattr(obj, "action_at", None) or getattr(obj, "approved_at", None)
+        return getattr(obj, "action_effective_at", None)
 
     def get_employee_profile_url(self, obj):
         try:
@@ -530,12 +567,48 @@ class WorkModeRequestSerializer(serializers.ModelSerializer):
             return None
 
     def get_approved_by_name(self, obj):
-        try:
-            if obj.approved_by:
-                return f"{obj.approved_by.employee_first_name} {obj.approved_by.employee_last_name}".strip()
-        except Exception:
-            pass
-        return None
+        return getattr(obj, "approved_actor_display", None)
+
+    def get_can_approve(self, obj):
+        return bool(obj.status == WorkModeRequestStatus.WAITING_FOR_APPROVAL and self._can_manage(obj))
+
+    def get_can_reject(self, obj):
+        request = self._request()
+        if not request or not self._can_manage(obj):
+            return False
+        if obj.status == WorkModeRequestStatus.WAITING_FOR_APPROVAL:
+            return True
+        return bool(obj.status == WorkModeRequestStatus.PENDING and obj.mode == AttendanceWorkMode.ON_DUTY and self._is_admin(request))
+
+    def get_can_revoke(self, obj):
+        return bool(obj.status == WorkModeRequestStatus.APPROVED and self._can_manage(obj))
+
+    def get_can_verify_document(self, obj):
+        return bool(
+            obj.mode == AttendanceWorkMode.ON_DUTY
+            and obj.status == WorkModeRequestStatus.APPROVED
+            and obj.document_status in {WorkModeRequestDocumentStatus.SUBMITTED, WorkModeRequestDocumentStatus.PENDING_VERIFICATION}
+            and self._can_manage(obj)
+        )
+
+    def get_can_reopen_document(self, obj):
+        return bool(
+            obj.mode == AttendanceWorkMode.ON_DUTY
+            and obj.status == WorkModeRequestStatus.APPROVED
+            and obj.document_status in {WorkModeRequestDocumentStatus.VERIFIED, WorkModeRequestDocumentStatus.REJECTED}
+            and self._can_manage(obj)
+        )
+
+    def get_can_upload_document(self, obj):
+        request = self._request()
+        if not request:
+            return False
+        return bool(
+            self._is_owner(obj, request)
+            and obj.mode == AttendanceWorkMode.ON_DUTY
+            and obj.status in {WorkModeRequestStatus.PENDING, WorkModeRequestStatus.WAITING_FOR_APPROVAL, WorkModeRequestStatus.APPROVED}
+            and obj.document_status != WorkModeRequestDocumentStatus.VERIFIED
+        )
 
 class MailTemplateSerializer(serializers.ModelSerializer):
     class Meta:
