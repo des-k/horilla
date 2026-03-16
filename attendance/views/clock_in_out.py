@@ -45,6 +45,7 @@ from attendance.models import (
     AttendanceActivity,
     AttendanceGeneralSetting,
     AttendanceLateComeEarlyOut,
+    AttendancePunchSource,
     GraceTime,
 )
 from attendance.views.views import attendance_validate
@@ -60,9 +61,11 @@ from attendance.services.image_compression import _extract_error_message
 from attendance.services.punching_history import (
     assign_raw_punch_to_attendance,
     canonical_punch_image_reference,
+    update_punch_history,
 )
 from attendance.services.reconciliation import recompute_attendance
 from attendance.services.attendance_access import evaluate_attendance_access
+from attendance.services.work_type_request_rules import resolve_biometric_work_mode
 from base.context_processors import (
     enable_late_come_early_out_tracking,
     timerunner_enabled,
@@ -215,6 +218,30 @@ def _time_like_to_hhmm(time_like) -> Optional[str]:
         return None
 
     return None
+
+
+def _resolve_biometric_mode_context(request, employee, attendance_date: date):
+    """Resolve effective work mode for server-side biometric punches.
+
+    This keeps the raw biometric punch auditable with the same work-mode context
+    that will later drive final attendance reconciliation.
+    """
+
+    raw_punch_history = getattr(request, "raw_punch_history", None)
+    if raw_punch_history is None:
+        return None, None
+
+    if getattr(raw_punch_history, "source", None) != AttendancePunchSource.BIOMETRIC:
+        return None, None
+
+    resolved = resolve_biometric_work_mode(employee, attendance_date)
+    update_punch_history(
+        raw_punch_history,
+        attendance_date=attendance_date,
+        work_mode=resolved.mode,
+        related_work_mode_request=resolved.request,
+    )
+    return resolved.mode, resolved.request
 
 
 def _seconds_to_time(seconds: Optional[int]) -> Optional[time]:
@@ -1119,10 +1146,6 @@ def clock_in(request):
             _("You Don't have work information filled or your employee detail neither entered ")
         )
 
-    access = evaluate_attendance_access(employee=employee, user=getattr(request, "user", None))
-    if not access.allowed:
-        return HttpResponse(_(access.message or "Attendance is disabled for this employee."))
-
     shift = work_info.shift_id
     datetime_now = _get_request_datetime(request)
     date_today = datetime_now.date()
@@ -1145,6 +1168,12 @@ def clock_in(request):
         day = EmployeeShiftDay.objects.get(day=date_yesterday.strftime("%A").lower())
         minimum_hour, start_time_sec, end_time_sec = shift_schedule_today(day=day, shift=shift)
         attendance_date = date_yesterday
+
+    biometric_mode, biometric_request = _resolve_biometric_mode_context(request, employee, attendance_date)
+
+    access = evaluate_attendance_access(employee=employee, user=getattr(request, "user", None))
+    if not access.allowed:
+        return HttpResponse(_(access.message or "Attendance is disabled for this employee."))
 
     # Cutoff IN enforcement
     schedule = _get_schedule(shift, day)
@@ -1175,7 +1204,8 @@ def clock_in(request):
             end_time_sec=end_time_sec,
             in_datetime=datetime_now,
             clock_in_image=clock_in_image,
-            clock_in_mode=getattr(AttendanceWorkMode, "WFO", None) if AttendanceWorkMode else "wfo",
+            clock_in_mode=biometric_mode or (getattr(AttendanceWorkMode, "WFO", None) if AttendanceWorkMode else "wfo"),
+            work_mode_request=biometric_request,
             clock_in_channel="biometric",
             raw_punch_history=getattr(request, "raw_punch_history", None),
         )
@@ -1249,10 +1279,6 @@ def clock_out(request):
             _("You Don't have work information filled or your employee detail neither entered ")
         )
 
-    access = evaluate_attendance_access(employee=employee, user=getattr(request, "user", None))
-    if not access.allowed:
-        return HttpResponse(_(access.message or "Attendance is disabled for this employee."))
-
     shift = work_info.shift_id
     datetime_now = _get_request_datetime(request)
     date_today = datetime_now.date()
@@ -1274,6 +1300,12 @@ def clock_out(request):
         day = EmployeeShiftDay.objects.get(day=date_yesterday.strftime("%A").lower())
         minimum_hour, start_time_sec, end_time_sec = shift_schedule_today(day=day, shift=shift)
         attendance_date = date_yesterday
+
+    biometric_mode, biometric_request = _resolve_biometric_mode_context(request, employee, attendance_date)
+
+    access = evaluate_attendance_access(employee=employee, user=getattr(request, "user", None))
+    if not access.allowed:
+        return HttpResponse(_(access.message or "Attendance is disabled for this employee."))
 
     # Cutoff OUT enforcement (strict block)
     schedule = _get_schedule(shift, day)
@@ -1299,7 +1331,8 @@ def clock_out(request):
             minimum_hour=minimum_hour,
             out_datetime=datetime_now,
             clock_out_image=clock_out_image,
-            clock_out_mode=getattr(AttendanceWorkMode, "WFO", None) if AttendanceWorkMode else "wfo",
+            clock_out_mode=biometric_mode or (getattr(AttendanceWorkMode, "WFO", None) if AttendanceWorkMode else "wfo"),
+            work_mode_request=biometric_request,
             allow_update_clock_out=True,
             clock_out_channel="biometric",
             raw_punch_history=getattr(request, "raw_punch_history", None),
