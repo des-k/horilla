@@ -57,6 +57,7 @@ from attendance.services.work_type_request_rules import (
     auto_reject_wfa_waiting_for_date,
     apply_rejection_to_attendance,
     has_attachments,
+    work_mode_request_approval_q,
 )
 from attendance.services.activity_sync import (
     get_requested_sessions,
@@ -306,13 +307,66 @@ def _is_admin_with_perm(request, perm_codename: str) -> bool:
         return False
 
 
+def _subordinate_employee_ids(request):
+    try:
+        return get_subordinate_employee_ids(request) or []
+    except Exception:
+        return []
+
+
 def _is_supervisor_of(request, employee_id: int) -> bool:
     """True if request.user is in the reporting chain above `employee_id`."""
     try:
-        sub_ids = get_subordinate_employee_ids(request, nested=True)
+        sub_ids = _subordinate_employee_ids(request)
         return int(employee_id) in set(map(int, sub_ids or []))
     except Exception:
         return False
+
+
+def _work_mode_update_allowed(obj: WorkModeRequest) -> bool:
+    if obj.status in {
+        WorkModeRequestStatus.REJECTED,
+        WorkModeRequestStatus.CANCELED,
+        WorkModeRequestStatus.REVOKED,
+    }:
+        return False
+    if obj.mode != AttendanceWorkMode.ON_DUTY:
+        return obj.status in {
+            WorkModeRequestStatus.PENDING,
+            WorkModeRequestStatus.WAITING_FOR_APPROVAL,
+        }
+    if obj.status in {
+        WorkModeRequestStatus.PENDING,
+        WorkModeRequestStatus.WAITING_FOR_APPROVAL,
+    }:
+        return True
+    if obj.status != WorkModeRequestStatus.APPROVED:
+        return False
+    return obj.document_status != WorkModeRequestDocumentStatus.VERIFIED
+
+
+def _sync_on_duty_document_after_upload(obj: WorkModeRequest):
+    if obj.mode != AttendanceWorkMode.ON_DUTY:
+        return False
+
+    was_approved = obj.status == WorkModeRequestStatus.APPROVED
+    previous_document_status = obj.document_status
+    previous_verified_by = obj.document_verified_by_id
+    previous_verified_at = obj.document_verified_at
+
+    _set_on_duty_document_state(obj, has_files=has_attachments(obj), approved=was_approved)
+    if obj.status == WorkModeRequestStatus.PENDING and has_attachments(obj):
+        obj.status = WorkModeRequestStatus.WAITING_FOR_APPROVAL
+
+    if was_approved and obj.document_status != WorkModeRequestDocumentStatus.VERIFIED:
+        obj.document_verified_by = None
+        obj.document_verified_at = None
+
+    return bool(
+        previous_document_status != obj.document_status
+        or previous_verified_by != obj.document_verified_by_id
+        or previous_verified_at != obj.document_verified_at
+    )
 
 
 def _can_act_on_employee(request, employee_id: int, perm_codename: str, allow_owner: bool = False) -> bool:
@@ -1950,16 +2004,7 @@ class AttendanceRequestRejectView(APIView):
         return Response(AttendanceRequestSerializer(attendance, context={"request": request}).data, status=200)
 
 class WorkModeRequestView(APIView):
-    """CRUD for WorkModeRequest (WFA / ON_DUTY).
-
-    Notes:
-    - Endpoint aliases expose this as work-type-request.
-    - DB model stays WorkModeRequest.
-    - Status rules (FINAL spec):
-        * WFA: WAITING_FOR_APPROVAL
-        * ON_DUTY: PENDING if no attachment; WAITING_FOR_APPROVAL if attachment exists
-    - Edit (PATCH/PUT) is restricted: only add attachments and/or update note (reason).
-    """
+    """CRUD for WorkModeRequest (WFA / ON_DUTY)."""
 
     permission_classes = [IsAuthenticated]
     serializer_class = WorkModeRequestSerializer
@@ -1984,19 +2029,17 @@ class WorkModeRequestView(APIView):
                     {"error": "You do not have permission to view this request."},
                     status=status.HTTP_403_FORBIDDEN,
                 )
-            return Response(self.serializer_class(obj).data, status=200)
+            return Response(self.serializer_class(obj, context={"request": request}).data, status=200)
 
         qs = WorkModeRequest.objects.all()
         qs = filtersubordinates(request, qs, perm="attendance.view_workmoderequest")
 
-        # mine=1 => only my requests
         if request.GET.get("mine") in ("1", "true", "True"):
             try:
                 qs = qs.filter(employee_id=request.user.employee_get)
             except Exception:
                 qs = qs.none()
 
-        # Filters
         status_q = request.GET.get("status")
         if status_q:
             qs = qs.filter(status=status_q)
@@ -2011,7 +2054,7 @@ class WorkModeRequestView(APIView):
 
         pagenation = PageNumberPagination()
         page = pagenation.paginate_queryset(qs.order_by("-id"), request)
-        serializer = self.serializer_class(page, many=True)
+        serializer = self.serializer_class(page, many=True, context={"request": request})
         return pagenation.get_paginated_response(serializer.data)
 
     def _collect_uploaded_files(self, request):
@@ -2025,9 +2068,11 @@ class WorkModeRequestView(APIView):
         validate_uploaded_files(uploaded)
         return uploaded
 
-    def _attach_files(self, obj: WorkModeRequest, uploaded_files):
+    def _attach_files(self, obj: WorkModeRequest, uploaded_files, *, replace_existing: bool = False):
         from attendance.models import AttendanceRequestFile
 
+        if replace_existing:
+            obj.files.clear()
         for up in uploaded_files:
             arf = AttendanceRequestFile.objects.create(file=up)
             obj.files.add(arf)
@@ -2036,7 +2081,6 @@ class WorkModeRequestView(APIView):
     def post(self, request):
         data = request.data.copy() if hasattr(request.data, "copy") else dict(request.data)
 
-        # Backward compatible aliases
         if not data.get("mode") and data.get("work_mode"):
             data["mode"] = data.get("work_mode")
         if not data.get("mode") and data.get("work_type"):
@@ -2048,31 +2092,27 @@ class WorkModeRequestView(APIView):
         if not data.get("end_date") and data.get("start_date"):
             data["end_date"] = data.get("start_date")
 
-        # Default employee_id to current user
-        try:
-            my_emp = request.user.employee_get
-        except Exception:
-            my_emp = None
-        if not data.get("employee_id") and my_emp:
-            data["employee_id"] = my_emp.id
-
-        # Requests are strictly self-service only.
-        if my_emp and str(data.get("employee_id")) != str(my_emp.id):
+        my_emp = _request_actor_employee(request)
+        if my_emp is None:
             return Response(
-                {"error": "Requests can only be created for yourself."},
+                {"employee_id": ["An employee profile is required to create this request."]},
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        # Disallow WFO
+        requested_employee_id = data.get("employee_id")
+        if requested_employee_id and str(requested_employee_id) != str(my_emp.id):
+            return Response(
+                {"employee_id": ["Requests can only be created for yourself."]},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        data["employee_id"] = my_emp.id
+
         if str(data.get("mode")) == AttendanceWorkMode.WFO:
             return Response(
                 {"error": "WFO should not be requested. Use WFA or ON DUTY."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # IMPORTANT: For multipart/form-data, DRF includes uploaded files inside request.data.
-        # Our serializer expects `files` to be a list of PKs (M2M), not raw uploaded files.
-        # Attachments are handled separately from request.FILES (see _collect_uploaded_files).
         for _k in ("files", "file", "files[]"):
             try:
                 if hasattr(data, "pop"):
@@ -2080,15 +2120,17 @@ class WorkModeRequestView(APIView):
             except Exception:
                 pass
 
+        try:
+            uploaded = self._collect_uploaded_files(request)
+        except ValidationError as exc:
+            return Response({"files": exc.messages}, status=status.HTTP_400_BAD_REQUEST)
 
-        serializer = self.serializer_class(data=data)
+        serializer = self.serializer_class(data=data, context={"request": request})
         if not serializer.is_valid():
             return Response(serializer.errors, status=400)
 
-        # Create with provisional status; finalized after file attach
-        obj: WorkModeRequest = serializer.save(status=WorkModeRequestStatus.PENDING)
+        obj: WorkModeRequest = serializer.save(status=WorkModeRequestStatus.PENDING, action_reason=None, document_remark=None)
 
-        uploaded = self._collect_uploaded_files(request)
         if uploaded:
             try:
                 self._attach_files(obj, uploaded)
@@ -2099,18 +2141,13 @@ class WorkModeRequestView(APIView):
                     status=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 )
 
-        # FINAL status rules
         has_files = has_attachments(obj)
         update_fields = []
         if obj.mode == AttendanceWorkMode.WFA:
             obj.status = WorkModeRequestStatus.WAITING_FOR_APPROVAL
             update_fields.append("status")
         elif obj.mode == AttendanceWorkMode.ON_DUTY:
-            obj.status = (
-                WorkModeRequestStatus.WAITING_FOR_APPROVAL
-                if has_files
-                else WorkModeRequestStatus.PENDING
-            )
+            obj.status = WorkModeRequestStatus.WAITING_FOR_APPROVAL if has_files else WorkModeRequestStatus.PENDING
             _set_on_duty_document_state(obj, has_files=has_files, approved=False)
             update_fields.extend(["status", "document_status"])
         if update_fields:
@@ -2124,7 +2161,6 @@ class WorkModeRequestView(APIView):
 
     @transaction.atomic
     def put(self, request, pk):
-        # Backward compatibility: treat PUT as PATCH
         return self._patch_or_put(request, pk)
 
     def _patch_or_put(self, request, pk):
@@ -2143,89 +2179,88 @@ class WorkModeRequestView(APIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        allowed_statuses = {
-            WorkModeRequestStatus.PENDING,
-            WorkModeRequestStatus.WAITING_FOR_APPROVAL,
-        }
-        if obj.mode == AttendanceWorkMode.ON_DUTY:
-            allowed_statuses.add(WorkModeRequestStatus.APPROVED)
-        if obj.status not in allowed_statuses:
+        if not _work_mode_update_allowed(obj):
             return Response({"error": "This request cannot be updated in its current status."}, status=400)
         if obj.mode == AttendanceWorkMode.ON_DUTY and obj.document_status == WorkModeRequestDocumentStatus.VERIFIED:
             return Response({"error": "Verified On Duty documents are locked. Reopen verification first."}, status=400)
 
-        # Spec: edit only for adding attachment + note; do not allow changing type/scope/dates
         data = request.data.copy() if hasattr(request.data, "copy") else dict(request.data)
-        forbidden = {"mode", "work_type", "work_mode", "scope", "start_date", "end_date", "employee_id"}
+        forbidden = {
+            "mode", "work_type", "work_mode", "scope", "start_date", "end_date", "employee_id",
+            "status", "approved_by", "approved_at", "action_type", "action_by", "action_at", "document_status",
+            "document_verified_by", "document_verified_at",
+        }
         if any(k in data for k in forbidden):
             return Response(
-                {"error": "You can only add attachments and/or update note. work_type/scope/dates cannot be changed."},
+                {"error": "You can only update note, destination/detail, and attachments from this endpoint."},
                 status=400,
             )
 
-        # Update reason/note
         note = data.get("reason") or data.get("note") or data.get("description")
         if note is not None:
-            obj.reason = str(note)
-            obj.save(update_fields=["reason"])
+            note = str(note).strip()
+            if not note:
+                return Response({"reason": ["Reason / Notes is required."]}, status=400)
+            obj.reason = note
 
-        # Attach / replace documents
-        uploaded = self._collect_uploaded_files(request)
+        if obj.mode == AttendanceWorkMode.ON_DUTY:
+            if any(k in data for k in ("duty_destination_location", "duty_destination_detail")):
+                obj.duty_destination_location = str(data.get("duty_destination_location") or obj.duty_destination_location or "").strip()
+                obj.duty_destination_detail = str(data.get("duty_destination_detail") or "").strip()
+            if not str(obj.duty_destination_location or "").strip():
+                return Response({"duty_destination_location": ["Destination location is required for ON DUTY requests."]}, status=400)
+
+        try:
+            uploaded = self._collect_uploaded_files(request)
+        except ValidationError as exc:
+            return Response({"files": exc.messages}, status=status.HTTP_400_BAD_REQUEST)
+
+        should_recompute = False
         if uploaded:
             try:
                 if obj.mode == AttendanceWorkMode.ON_DUTY:
-                    obj.files.clear()
-                self._attach_files(obj, uploaded)
+                    self._attach_files(obj, uploaded, replace_existing=True)
+                else:
+                    self._attach_files(obj, uploaded)
             except Exception as e:
-                try:
-                    transaction.set_rollback(True)
-                except Exception:
-                    pass
+                transaction.set_rollback(True)
                 return Response(
                     {"error": "Attachment upload failed.", "detail": str(e)},
                     status=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 )
+            if obj.mode == AttendanceWorkMode.ON_DUTY:
+                should_recompute = _sync_on_duty_document_after_upload(obj)
+        elif obj.mode == AttendanceWorkMode.ON_DUTY:
+            should_recompute = _sync_on_duty_document_after_upload(obj)
 
-        has_files = has_attachments(obj)
-        update_fields = []
-        if obj.mode == AttendanceWorkMode.ON_DUTY:
-            _set_on_duty_document_state(obj, has_files=has_files, approved=(obj.status == WorkModeRequestStatus.APPROVED))
-            update_fields.append("document_status")
-            if obj.status == WorkModeRequestStatus.PENDING and has_files:
-                obj.status = WorkModeRequestStatus.WAITING_FOR_APPROVAL
-                update_fields.append("status")
-        if update_fields:
-            obj.save(update_fields=update_fields)
+        obj.save()
+        if should_recompute and obj.status == WorkModeRequestStatus.APPROVED:
+            recompute_attendance_range(obj.employee_id, obj.start_date, obj.end_date)
 
         return Response(self.serializer_class(obj, context={"request": request}).data, status=200)
 
-
 class WorkModeRequestApprovalsView(APIView):
-    """List requests for managers/admins.
-
-    Includes:
-    - WAITING_FOR_APPROVAL (approvable)
-    - ON_DUTY PENDING (not yet approvable, usually waiting for letter upload)
-    """
+    """List actionable requests for managers/admins."""
 
     permission_classes = [IsAuthenticated]
+    serializer_class = WorkModeRequestSerializer
 
     def get(self, request):
-        # Ensure stale WFA WAITING are auto-rejected for *today* to keep approvals clean.
         now_dt = _api_now(request)
         today = now_dt.date()
         try:
-            # auto reject for current user and subordinates (lightweight per employee)
             emp_ids = []
             if _is_admin_with_perm(request, "attendance.change_workmoderequest"):
-                emp_ids = list(WorkModeRequest.objects.filter(
-                    mode=AttendanceWorkMode.WFA,
-                    status=WorkModeRequestStatus.WAITING_FOR_APPROVAL,
-                    start_date__lte=today,
-                    end_date__gte=today,
-                ).values_list("employee_id", flat=True).distinct())
+                emp_ids = list(
+                    WorkModeRequest.objects.filter(
+                        mode=AttendanceWorkMode.WFA,
+                        status=WorkModeRequestStatus.WAITING_FOR_APPROVAL,
+                        start_date__lte=today,
+                        end_date__gte=today,
+                    ).values_list("employee_id", flat=True).distinct()
+                )
             else:
-                emp_ids = get_subordinate_employee_ids(request, nested=True) or []
+                emp_ids = _subordinate_employee_ids(request)
 
             from employee.models import Employee
             for eid in emp_ids:
@@ -2247,7 +2282,6 @@ class WorkModeRequestApprovalsView(APIView):
                 except Exception:
                     start_sec, end_sec = 0, 0
 
-                rules = {}
                 try:
                     rules = cio.get_shift_rules(today, shift, day, start_time_sec=start_sec, end_time_sec=end_sec)
                 except Exception:
@@ -2263,28 +2297,13 @@ class WorkModeRequestApprovalsView(APIView):
         except Exception:
             pass
 
-        from django.db.models import Q
+        include_pending_on_duty = _is_admin_with_perm(request, "attendance.change_workmoderequest")
         qs = WorkModeRequest.objects.filter(
-            Q(status=WorkModeRequestStatus.WAITING_FOR_APPROVAL)
-            | Q(status=WorkModeRequestStatus.PENDING, mode=AttendanceWorkMode.ON_DUTY)
-            | Q(
-                status=WorkModeRequestStatus.APPROVED,
-                mode=AttendanceWorkMode.ON_DUTY,
-                document_status__in=[
-                    WorkModeRequestDocumentStatus.SUBMITTED,
-                    WorkModeRequestDocumentStatus.PENDING_VERIFICATION,
-                    WorkModeRequestDocumentStatus.REJECTED,
-                ],
-            )
-        )
+            work_mode_request_approval_q(include_pending_on_duty=include_pending_on_duty)
+        ).exclude(employee_id__employee_user_id=request.user)
 
-        # Never show own requests in approvals list (admin can still view them in My Requests).
-        qs = qs.exclude(employee_id__employee_user_id=request.user)
-
-        if _is_admin_with_perm(request, "attendance.change_workmoderequest"):
-            pass
-        else:
-            sub_ids = get_subordinate_employee_ids(request, nested=True)
+        if not include_pending_on_duty:
+            sub_ids = _subordinate_employee_ids(request)
             if not sub_ids:
                 qs = qs.none()
             else:
@@ -2292,30 +2311,27 @@ class WorkModeRequestApprovalsView(APIView):
 
         pagenation = PageNumberPagination()
         page = pagenation.paginate_queryset(qs.order_by("-id"), request)
-        serializer = WorkModeRequestSerializer(page, many=True)
+        serializer = self.serializer_class(page, many=True, context={"request": request})
         return pagenation.get_paginated_response(serializer.data)
 
 
 class WorkModeRequestApproveView(APIView):
     permission_classes = [IsAuthenticated]
+    serializer_class = WorkModeRequestSerializer
 
     @transaction.atomic
     def put(self, request, pk):
         obj = get_object_or_404(WorkModeRequest.objects.select_for_update(), pk=pk)
         emp_id = getattr(obj, "employee_id_id", None) or obj.employee_id.id
 
-        # Owner cannot approve their own request (even if admin).
         try:
             if obj.employee_id.employee_user_id == request.user:
                 return Response(
-                    {
-                        "error": "You cannot approve your own request. Ask another approver or use cancel."
-                    },
+                    {"error": "You cannot approve your own request. Ask another approver or use cancel."},
                     status=status.HTTP_403_FORBIDDEN,
                 )
         except Exception:
             pass
-
 
         if not _can_act_on_employee(request, emp_id, "attendance.change_workmoderequest", allow_owner=False):
             return Response(
@@ -2329,15 +2345,13 @@ class WorkModeRequestApproveView(APIView):
         old_status = obj.status
         obj.status = WorkModeRequestStatus.APPROVED
         obj.reason_code = None
-        try:
-            obj.approved_by = request.user.employee_get
-        except Exception:
-            obj.approved_by = None
+        obj.approved_by = _request_actor_employee(request)
         obj.approved_at = dj_timezone.now()
         obj.action_by = obj.approved_by
         obj.action_at = obj.approved_at
         obj.action_type = WorkModeRequestActionType.APPROVED
-        update_fields = ["status", "reason_code", "approved_by", "approved_at", "action_by", "action_at", "action_type"]
+        obj.action_reason = None
+        update_fields = ["status", "reason_code", "approved_by", "approved_at", "action_by", "action_at", "action_type", "action_reason"]
         if obj.mode == AttendanceWorkMode.ON_DUTY:
             _set_on_duty_document_state(obj, has_files=has_attachments(obj), approved=True)
             update_fields.append("document_status")
@@ -2349,13 +2363,13 @@ class WorkModeRequestApproveView(APIView):
 
 class WorkModeRequestRejectView(APIView):
     permission_classes = [IsAuthenticated]
+    serializer_class = WorkModeRequestSerializer
 
     @transaction.atomic
     def put(self, request, pk):
         obj = get_object_or_404(WorkModeRequest.objects.select_for_update(), pk=pk)
         emp_id = getattr(obj, "employee_id_id", None) or obj.employee_id.id
 
-        # Owner cannot reject their own request (use cancel), even if admin.
         try:
             if obj.employee_id.employee_user_id == request.user:
                 return Response(
@@ -2364,7 +2378,6 @@ class WorkModeRequestRejectView(APIView):
                 )
         except Exception:
             pass
-
 
         if not _can_act_on_employee(request, emp_id, "attendance.change_workmoderequest", allow_owner=False):
             return Response(
@@ -2376,27 +2389,27 @@ class WorkModeRequestRejectView(APIView):
         if obj.status not in (WorkModeRequestStatus.WAITING_FOR_APPROVAL, WorkModeRequestStatus.PENDING):
             return Response({"error": "Request cannot be rejected in this status."}, status=400)
         if obj.status == WorkModeRequestStatus.PENDING and not is_admin:
-            return Response({"error": "Pending ON DUTY requests are not in approvals."}, status=400)
+            return Response({"error": "Pending ON DUTY requests are not actionable for non-admin reviewers."}, status=400)
 
         comment_text = (
             (request.data.get("comment") if hasattr(request, "data") else None)
             or (request.data.get("reason") if hasattr(request, "data") else None)
+            or (request.data.get("remark") if hasattr(request, "data") else None)
             or None
         )
-        if comment_text:
-            obj.action_reason = str(comment_text)
+        comment_text = str(comment_text).strip() if comment_text is not None else None
+        if not comment_text:
+            comment_text = None
 
         old_status = obj.status
         obj.status = WorkModeRequestStatus.REJECTED
         obj.reason_code = WorkModeRequestRejectReasonCode.MANUAL_REJECT
-        try:
-            obj.approved_by = request.user.employee_get
-        except Exception:
-            obj.approved_by = None
-        obj.approved_at = dj_timezone.now()
-        obj.action_by = obj.approved_by
-        obj.action_at = obj.approved_at
+        obj.approved_by = None
+        obj.approved_at = None
+        obj.action_by = _request_actor_employee(request)
+        obj.action_at = dj_timezone.now()
         obj.action_type = WorkModeRequestActionType.REJECTED
+        obj.action_reason = comment_text
         obj.save(update_fields=["status", "reason_code", "action_reason", "approved_by", "approved_at", "action_by", "action_at", "action_type"])
         _log_work_mode_status_change(obj, request, action_type=WorkModeRequestActionType.REJECTED, old_status=old_status, new_status=obj.status, remark=obj.action_reason)
 
@@ -2410,6 +2423,7 @@ class WorkModeRequestRejectView(APIView):
 
 class WorkModeRequestCancelView(APIView):
     permission_classes = [IsAuthenticated]
+    serializer_class = WorkModeRequestSerializer
 
     @transaction.atomic
     def put(self, request, pk):
@@ -2433,13 +2447,11 @@ class WorkModeRequestCancelView(APIView):
 
         old_status = obj.status
         obj.status = WorkModeRequestStatus.CANCELED
-        try:
-            obj.action_by = request.user.employee_get
-        except Exception:
-            obj.action_by = None
+        obj.action_by = _request_actor_employee(request)
         obj.action_at = dj_timezone.now()
         obj.action_type = WorkModeRequestActionType.CANCELED
-        obj.save(update_fields=["status", "action_by", "action_at", "action_type"])
+        obj.action_reason = None
+        obj.save(update_fields=["status", "action_by", "action_at", "action_type", "action_reason"])
         _log_work_mode_status_change(obj, request, action_type=WorkModeRequestActionType.CANCELED, old_status=old_status, new_status=obj.status)
         recompute_attendance_range(obj.employee_id, obj.start_date, obj.end_date)
         return Response(self.serializer_class(obj, context={"request": request}).data, status=200)
@@ -2447,6 +2459,7 @@ class WorkModeRequestCancelView(APIView):
 
 class WorkModeRequestDocumentActionView(APIView):
     permission_classes = [IsAuthenticated]
+    serializer_class = WorkModeRequestSerializer
 
     @transaction.atomic
     def put(self, request, pk, action):
@@ -2462,27 +2475,27 @@ class WorkModeRequestDocumentActionView(APIView):
         if not _can_act_on_employee(request, emp_id, "attendance.change_workmoderequest", allow_owner=False):
             return Response({"error": "You do not have permission to perform this action."}, status=status.HTTP_403_FORBIDDEN)
 
+        remark = (request.data.get("reason") or request.data.get("comment") or request.data.get("remark") or "").strip() or None
+
         if action == "revoke":
             if obj.status != WorkModeRequestStatus.APPROVED:
                 return Response({"error": "Only approved requests can be revoked."}, status=400)
             old_status = obj.status
             obj.status = WorkModeRequestStatus.REVOKED
-            obj.action_reason = (request.data.get("reason") or request.data.get("comment") or obj.action_reason)
+            obj.action_reason = remark
             obj.action_by = _request_actor_employee(request)
             obj.action_at = dj_timezone.now()
             obj.action_type = WorkModeRequestActionType.REVOKED
             obj.save(update_fields=["status", "action_reason", "action_by", "action_at", "action_type"])
             _log_work_mode_status_change(obj, request, action_type=WorkModeRequestActionType.REVOKED, old_status=old_status, new_status=obj.status, remark=obj.action_reason)
             recompute_attendance_range(obj.employee_id, obj.start_date, obj.end_date)
-            return Response(WorkModeRequestSerializer(obj, context={"request": request}).data, status=200)
+            return Response(self.serializer_class(obj, context={"request": request}).data, status=200)
 
         if obj.mode != AttendanceWorkMode.ON_DUTY:
             return Response({"error": "Document actions are only available for On Duty requests."}, status=400)
 
         if obj.status != WorkModeRequestStatus.APPROVED:
             return Response({"error": "Document actions require an approved On Duty request."}, status=400)
-
-        remark = (request.data.get("reason") or request.data.get("comment") or request.data.get("remark") or "").strip() or None
 
         if action == "verify":
             if obj.document_status not in {WorkModeRequestDocumentStatus.SUBMITTED, WorkModeRequestDocumentStatus.PENDING_VERIFICATION}:
@@ -2499,7 +2512,7 @@ class WorkModeRequestDocumentActionView(APIView):
             obj.save(update_fields=["document_status", "document_verified_by", "document_verified_at", "action_by", "action_at", "action_type", "action_reason", "document_remark"])
             _log_work_mode_status_change(obj, request, action_type=WorkModeRequestActionType.VERIFIED, old_status="document:%s" % previous, new_status="document:%s" % obj.document_status, remark=remark)
             recompute_attendance_range(obj.employee_id, obj.start_date, obj.end_date)
-            return Response(WorkModeRequestSerializer(obj, context={"request": request}).data, status=200)
+            return Response(self.serializer_class(obj, context={"request": request}).data, status=200)
 
         if action == "reject-document":
             if obj.document_status not in {WorkModeRequestDocumentStatus.SUBMITTED, WorkModeRequestDocumentStatus.PENDING_VERIFICATION}:
@@ -2508,13 +2521,13 @@ class WorkModeRequestDocumentActionView(APIView):
             obj.document_status = WorkModeRequestDocumentStatus.REJECTED
             obj.action_by = _request_actor_employee(request)
             obj.action_at = dj_timezone.now()
-            obj.action_type = WorkModeRequestActionType.REJECTED
+            obj.action_type = WorkModeRequestActionType.DOCUMENT_REJECTED
             obj.action_reason = remark
             obj.document_remark = remark
             obj.save(update_fields=["document_status", "action_by", "action_at", "action_type", "action_reason", "document_remark"])
-            _log_work_mode_status_change(obj, request, action_type=WorkModeRequestActionType.REJECTED, old_status="document:%s" % previous, new_status="document:%s" % obj.document_status, remark=remark)
+            _log_work_mode_status_change(obj, request, action_type=WorkModeRequestActionType.DOCUMENT_REJECTED, old_status="document:%s" % previous, new_status="document:%s" % obj.document_status, remark=remark)
             recompute_attendance_range(obj.employee_id, obj.start_date, obj.end_date)
-            return Response(WorkModeRequestSerializer(obj, context={"request": request}).data, status=200)
+            return Response(self.serializer_class(obj, context={"request": request}).data, status=200)
 
         if action == "reopen-document":
             if obj.document_status not in {WorkModeRequestDocumentStatus.VERIFIED, WorkModeRequestDocumentStatus.REJECTED}:
@@ -2531,7 +2544,7 @@ class WorkModeRequestDocumentActionView(APIView):
             obj.save(update_fields=["document_status", "document_verified_by", "document_verified_at", "action_by", "action_at", "action_type", "action_reason", "document_remark"])
             _log_work_mode_status_change(obj, request, action_type=WorkModeRequestActionType.REOPENED, old_status="document:%s" % previous, new_status="document:%s" % obj.document_status, remark=remark)
             recompute_attendance_range(obj.employee_id, obj.start_date, obj.end_date)
-            return Response(WorkModeRequestSerializer(obj, context={"request": request}).data, status=200)
+            return Response(self.serializer_class(obj, context={"request": request}).data, status=200)
 
         return Response({"error": "Unsupported action."}, status=400)
 
