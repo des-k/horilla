@@ -1609,6 +1609,20 @@ class AttendanceGeneralSetting(HorillaModel):
             "Enabling this feature allows employees to record their attendance using the Check-In/Check-Out button."
         ),
     )
+    allow_reporting_manager_attendance = models.BooleanField(
+        default=False,
+        verbose_name=_("Allow Reporting Manager Attendance"),
+        help_text=_(
+            "Allow employees who act as reporting managers to perform attendance actions."
+        ),
+    )
+    allow_admin_attendance = models.BooleanField(
+        default=False,
+        verbose_name=_("Allow Admin Attendance"),
+        help_text=_(
+            "Allow admin users to perform attendance actions."
+        ),
+    )
     company_id = models.ForeignKey(Company, on_delete=models.CASCADE, null=True)
     objects = HorillaCompanyManager()
 
