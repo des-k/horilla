@@ -69,29 +69,46 @@ class MobileAttendanceHeaderStateTests(SimpleTestCase):
         self.assertEqual(header["header_state_code"], ATTENDANCE_RECORDED)
         self.assertEqual(header["header_state_message"], "Attendance recorded")
 
-    def test_below_minimum_hours_returns_detail_from_backend_truth(self):
+    def test_below_minimum_hours_returns_detail_from_note_specific_backend_truth(self):
         payload = {
             "has_attendance": True,
             "first_check_in": "08:02 AM",
             "last_check_out": "03:30 PM",
-            "work_hours_below_minimum": True,
-            "work_hours_shortfall": "02:30",
-            "minimum_working_hour": "08:00",
+            "work_hours_below_minimum": False,
+            "header_note_work_hours_below_minimum": True,
+            "header_note_work_hours_shortfall": "00:30",
+            "header_note_effective_minimum_hour": "08:00",
         }
 
         header = build_mobile_header_state(payload)
 
         self.assertEqual(header["header_state_code"], BELOW_MINIMUM_HOURS)
         self.assertEqual(header["header_state_message"], "Below minimum hours")
-        self.assertEqual(header["header_detail_message"], "Short by 02:30")
+        self.assertEqual(header["header_detail_message"], "Short by 00:30")
 
-    def test_checked_out_early_has_priority_over_generic_recorded_state(self):
+    def test_below_minimum_hours_has_priority_over_checked_out_early_when_both_true(self):
         payload = {
             "has_attendance": True,
             "first_check_in": "08:00 AM",
             "last_check_out": "03:45 PM",
             "checked_out_early": True,
-            "work_hours_below_minimum": False,
+            "header_note_work_hours_below_minimum": True,
+            "header_note_work_hours_shortfall": "00:15",
+        }
+
+        header = build_mobile_header_state(payload)
+
+        self.assertEqual(header["header_state_code"], BELOW_MINIMUM_HOURS)
+        self.assertEqual(header["header_state_message"], "Below minimum hours")
+        self.assertEqual(header["header_detail_message"], "Short by 00:15 • Checked out early")
+
+    def test_checked_out_early_is_used_when_note_is_not_below_minimum(self):
+        payload = {
+            "has_attendance": True,
+            "first_check_in": "08:00 AM",
+            "last_check_out": "03:45 PM",
+            "checked_out_early": True,
+            "header_note_work_hours_below_minimum": False,
         }
 
         header = build_mobile_header_state(payload)
@@ -139,8 +156,8 @@ class MobileAttendanceHeaderSourceIntegrationTests(SimpleTestCase):
         source = inspect.getsource(CheckingStatus.get)
 
         self.assertIn("payload.update(build_mobile_header_state(payload))", source)
-        self.assertIn('"first_check_in"', source)
-        self.assertIn('"last_check_out"', source)
+        self.assertIn("header_note_work_hours_below_minimum", source)
+        self.assertIn("_build_mobile_header_note_context", source)
 
     def test_clock_actions_attach_header_state_alongside_action_message(self):
         from horilla_api.api_views.attendance.views import ClockInAPIView, ClockOutAPIView
@@ -151,4 +168,5 @@ class MobileAttendanceHeaderSourceIntegrationTests(SimpleTestCase):
         self.assertIn('"message": "Clocked-In"', in_source)
         self.assertIn("response_payload.update(build_mobile_header_state(response_payload))", in_source)
         self.assertIn('"message": "Clocked-Out"', out_source)
+        self.assertIn("header_note_work_hours_below_minimum", out_source)
         self.assertIn("response_payload.update(build_mobile_header_state(response_payload))", out_source)
