@@ -65,8 +65,8 @@ def build_mobile_header_state(payload: Mapping[str, Any]) -> dict[str, str | Non
         or payload.get("clock_out")
         or payload.get("clock_out_time")
     )
-    shortfall = _clean_text(payload.get("work_hours_shortfall"))
-    minimum_hour = _clean_text(payload.get("minimum_working_hour"))
+    shortfall = _clean_text(payload.get("header_note_work_hours_shortfall")) or _clean_text(payload.get("work_hours_shortfall"))
+    minimum_hour = _clean_text(payload.get("header_note_effective_minimum_hour")) or _clean_text(payload.get("minimum_working_hour"))
     unavailable_detail = _clean_text(payload.get("attendance_disabled_message"))
 
     has_attendance = _as_bool(payload.get("has_attendance"))
@@ -77,7 +77,10 @@ def build_mobile_header_state(payload: Mapping[str, Any]) -> dict[str, str | Non
     can_clock_out = _as_bool(payload.get("can_clock_out") or payload.get("can_check_out"))
     attendance_enabled = _as_bool(payload.get("attendance_enabled", True))
     check_in_cutoff_passed = _as_bool(payload.get("check_in_cutoff_has_passed"))
-    work_hours_below_minimum = _as_bool(payload.get("work_hours_below_minimum"))
+    if "header_note_work_hours_below_minimum" in payload:
+        work_hours_below_minimum = _as_bool(payload.get("header_note_work_hours_below_minimum"))
+    else:
+        work_hours_below_minimum = _as_bool(payload.get("work_hours_below_minimum"))
     checked_out_early = _as_bool(payload.get("checked_out_early"))
 
     check_in_block_reason = (_clean_text(payload.get("check_in_block_reason")) or "").upper()
@@ -129,22 +132,25 @@ def build_mobile_header_state(payload: Mapping[str, Any]) -> dict[str, str | Non
         ).as_payload()
 
     if has_check_in and has_check_out:
-        if checked_out_early:
-            return MobileAttendanceHeaderState(
-                code=CHECKED_OUT_EARLY,
-                message="Checked Out early",
-            ).as_payload()
-
         if work_hours_below_minimum:
-            detail_message = None
+            detail_parts: list[str] = []
             if shortfall:
-                detail_message = f"Short by {shortfall}"
+                detail_parts.append(f"Short by {shortfall}")
             elif minimum_hour:
-                detail_message = f"Minimum required {minimum_hour}"
+                detail_parts.append(f"Expected work session {minimum_hour}")
+            if checked_out_early:
+                detail_parts.append("Checked out early")
+            detail_message = " • ".join(detail_parts) if detail_parts else None
             return MobileAttendanceHeaderState(
                 code=BELOW_MINIMUM_HOURS,
                 message="Below minimum hours",
                 detail_message=detail_message,
+            ).as_payload()
+
+        if checked_out_early:
+            return MobileAttendanceHeaderState(
+                code=CHECKED_OUT_EARLY,
+                message="Checked Out early",
             ).as_payload()
 
         return MobileAttendanceHeaderState(
