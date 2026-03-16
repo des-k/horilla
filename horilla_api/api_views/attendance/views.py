@@ -72,6 +72,7 @@ from attendance.services.punching_history import (
     update_punch_history,
 )
 from attendance.services.request_audit import log_request_action
+from attendance.services.attendance_access import evaluate_attendance_access
 from attendance.services.reconciliation import recompute_attendance, recompute_attendance_range
 from attendance.services.request_override_recompute import clear_request_override_and_recompute
 from attendance.services.month_params import normalize_month_yyyy_mm, require_month_yyyy_mm
@@ -599,9 +600,10 @@ class ClockInAPIView(APIView):
         if not employee or work_info is None:
             return _reject("Missing work information or employee details.", status.HTTP_400_BAD_REQUEST)
 
-        if _is_attendance_exempt_manager(employee):
+        access = evaluate_attendance_access(employee=employee, user=getattr(request, "user", None))
+        if not access.allowed:
             update_punch_history(punch_log, attendance_date=dt_now.date())
-            return _reject("Attendance is disabled for reporting managers (approver-only).", status.HTTP_403_FORBIDDEN)
+            return _reject(access.message or "Attendance is disabled for this employee.", status.HTTP_403_FORBIDDEN)
 
         shift = work_info.shift_id
         date_today = _api_today(request, dt_now)
@@ -757,6 +759,11 @@ class ClockOutAPIView(APIView):
 
         if not employee or work_info is None:
             return _reject("Missing work information or employee details.", status.HTTP_400_BAD_REQUEST)
+
+        access = evaluate_attendance_access(employee=employee, user=getattr(request, "user", None))
+        if not access.allowed:
+            update_punch_history(punch_log, attendance_date=dt_now.date())
+            return _reject(access.message or "Attendance is disabled for this employee.", status.HTTP_403_FORBIDDEN)
 
         shift = work_info.shift_id
         attendance_date, day, minimum_hour, start_time_sec, end_time_sec, _, now_sec = _api_resolve_attendance_date_and_day(shift, dt_now)
@@ -2654,16 +2661,26 @@ class CheckingStatus(APIView):
             except Exception:
                 pass
 
-        # Approver-only managers (reporting managers) are excluded from attendance.
-        # They can still approve requests, but must not clock-in/out in Horilla.
-        if _is_attendance_exempt_manager(employee):
+        access = evaluate_attendance_access(employee=employee, user=getattr(request, "user", None))
+        if not access.allowed:
             attendance_date = dt_now.date()
             return Response(
                 {
                     "status": True,
                     "attendance_enabled": False,
-                    "attendance_exempt_reason": "REPORTING_MANAGER",
-                    "message": "Attendance is disabled for reporting managers (approver-only).",
+                    "attendance_exempt_reason": access.reason_code,
+                    "attendance_disabled_reason": access.reason_code,
+                    "attendance_disabled_message": access.message,
+                    "blocked_roles": list(access.blocked_roles),
+                    "role_flags": {
+                        "is_reporting_manager": access.is_reporting_manager,
+                        "is_admin": access.is_admin,
+                    },
+                    "attendance_role_settings": {
+                        "allow_reporting_manager_attendance": access.allow_reporting_manager_attendance,
+                        "allow_admin_attendance": access.allow_admin_attendance,
+                    },
+                    "message": access.message,
 
                     "has_attendance": False,
                     "attendance_date": attendance_date.strftime("%Y-%m-%d"),
@@ -2764,6 +2781,17 @@ class CheckingStatus(APIView):
                     "status": False,
                     "attendance_enabled": True,
                     "attendance_exempt_reason": None,
+                    "attendance_disabled_reason": None,
+                    "attendance_disabled_message": None,
+                    "blocked_roles": [],
+                    "role_flags": {
+                        "is_reporting_manager": access.is_reporting_manager,
+                        "is_admin": access.is_admin,
+                    },
+                    "attendance_role_settings": {
+                        "allow_reporting_manager_attendance": access.allow_reporting_manager_attendance,
+                        "allow_admin_attendance": access.allow_admin_attendance,
+                    },
                     "has_attendance": False,
                     "attendance_date": attendance_date.strftime("%Y-%m-%d"),
                     "first_check_in": None,
@@ -3231,6 +3259,17 @@ class CheckingStatus(APIView):
             "status": (False if is_presensi_only else bool(is_working)),
             "attendance_enabled": True,
             "attendance_exempt_reason": None,
+            "attendance_disabled_reason": None,
+            "attendance_disabled_message": None,
+            "blocked_roles": [],
+            "role_flags": {
+                "is_reporting_manager": access.is_reporting_manager,
+                "is_admin": access.is_admin,
+            },
+            "attendance_role_settings": {
+                "allow_reporting_manager_attendance": access.allow_reporting_manager_attendance,
+                "allow_admin_attendance": access.allow_admin_attendance,
+            },
             "has_attendance": bool(attendance),
             "attendance_date": attendance_date.strftime("%Y-%m-%d"),
 
