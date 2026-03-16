@@ -62,6 +62,7 @@ from attendance.services.punching_history import (
     canonical_punch_image_reference,
 )
 from attendance.services.reconciliation import recompute_attendance
+from attendance.services.attendance_access import evaluate_attendance_access
 from base.context_processors import (
     enable_late_come_early_out_tracking,
     timerunner_enabled,
@@ -1118,19 +1119,9 @@ def clock_in(request):
             _("You Don't have work information filled or your employee detail neither entered ")
         )
 
-    # Customization: reporting managers are approver-only and must not punch attendance.
-    try:
-        if EmployeeWorkInformation.objects.filter(reporting_manager_id=employee).only("id").exists():
-            return HttpResponse(_("Attendance is disabled for reporting managers (approver-only)."))
-    except Exception:
-        pass
-
-    # Customization: reporting managers are approver-only and must not punch attendance.
-    try:
-        if EmployeeWorkInformation.objects.filter(reporting_manager_id=employee).only("id").exists():
-            return HttpResponse(_("Attendance is disabled for reporting managers (approver-only)."))
-    except Exception:
-        pass
+    access = evaluate_attendance_access(employee=employee, user=getattr(request, "user", None))
+    if not access.allowed:
+        return HttpResponse(_(access.message or "Attendance is disabled for this employee."))
 
     shift = work_info.shift_id
     datetime_now = _get_request_datetime(request)
@@ -1257,6 +1248,10 @@ def clock_out(request):
         return HttpResponse(
             _("You Don't have work information filled or your employee detail neither entered ")
         )
+
+    access = evaluate_attendance_access(employee=employee, user=getattr(request, "user", None))
+    if not access.allowed:
+        return HttpResponse(_(access.message or "Attendance is disabled for this employee."))
 
     shift = work_info.shift_id
     datetime_now = _get_request_datetime(request)
