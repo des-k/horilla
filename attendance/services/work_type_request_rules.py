@@ -61,12 +61,11 @@ def _normalize(s: str) -> str:
     return (s or "").strip().lower().replace("-", " ").replace("_", " ")
 
 
-def scheduled_attendance_mode(employee, target_date: date) -> str:
-    """Resolve scheduled attendance mode.
+def _scheduled_attendance_mode_or_none(employee, target_date: date) -> Optional[str]:
+    """Resolve scheduled/default work mode without forcing WFO on unknown data.
 
-    Requirement: default derived from ``employee.employee_work_info.work_type_id``.
-
-    NOTE: ``target_date`` is kept for future schedule-per-date support.
+    ``target_date`` is currently informational; the deployment still derives the
+    default work type from ``employee.employee_work_info.work_type_id``.
     """
 
     wt_obj = None
@@ -96,11 +95,16 @@ def scheduled_attendance_mode(employee, target_date: date) -> str:
     if "wfo" in n or "office" in n:
         return AttendanceWorkMode.WFO
 
-    # If WorkType names are exactly enum values
     if n in (AttendanceWorkMode.WFO, AttendanceWorkMode.WFA, AttendanceWorkMode.ON_DUTY):
         return n
 
-    return AttendanceWorkMode.WFO
+    return None
+
+
+def scheduled_attendance_mode(employee, target_date: date) -> str:
+    """Resolve scheduled attendance mode with legacy WFO fallback."""
+
+    return _scheduled_attendance_mode_or_none(employee, target_date) or AttendanceWorkMode.WFO
 
 
 # -----------------------------------------------------------------------------
@@ -161,6 +165,39 @@ def effective_work_type(employee, target_date: date, want: str) -> EffectiveWork
 
     sched = scheduled_attendance_mode(employee, target_date)
     return EffectiveWorkType(mode=sched, source="schedule", request=None)
+
+
+def resolve_biometric_work_mode(employee, target_date: date) -> EffectiveWorkType:
+    """Resolve work mode for biometric punches.
+
+    Priority:
+    1. approved WorkModeRequest covering the date
+    2. scheduled/default work type for that date
+    3. WFO only when no business truth can be resolved
+    """
+
+    approved_request = (
+        WorkModeRequest.objects.filter(
+            employee_id=employee,
+            start_date__lte=target_date,
+            end_date__gte=target_date,
+            status=WorkModeRequestStatus.APPROVED,
+        )
+        .order_by("-id")
+        .first()
+    )
+    if approved_request is not None:
+        return EffectiveWorkType(
+            mode=approved_request.mode,
+            source="approved_request",
+            request=approved_request,
+        )
+
+    scheduled_mode = _scheduled_attendance_mode_or_none(employee, target_date)
+    if scheduled_mode:
+        return EffectiveWorkType(mode=scheduled_mode, source="schedule", request=None)
+
+    return EffectiveWorkType(mode=AttendanceWorkMode.WFO, source="fallback_wfo", request=None)
 
 
 def punch_allowed(eff: EffectiveWorkType) -> bool:
