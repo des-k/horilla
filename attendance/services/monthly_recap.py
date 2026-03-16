@@ -42,7 +42,7 @@ from attendance.services.monthly_recap_note import (
     localize_on_duty_work_type,
     seconds_to_hhmm,
 )
-from attendance.services.work_type_request_rules import scheduled_attendance_mode
+from attendance.services.work_type_request_rules import is_active_work_mode_request_status, scheduled_attendance_mode
 # NOTE: Do NOT import from attendance.views.clock_in_out at module import time.
 # That module imports attendance.views.views, which imports this service.
 # Import lazily inside build_employee_monthly_recap() to avoid circular imports.
@@ -1206,7 +1206,7 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
     requests = [
         r
         for r in all_requests
-        if r.status not in [WorkModeRequestStatus.REJECTED, WorkModeRequestStatus.CANCELED]
+        if is_active_work_mode_request_status(getattr(r, "status", None))
     ]
     request_status_by_id = {
         getattr(r, "id", None): getattr(r, "status", None)
