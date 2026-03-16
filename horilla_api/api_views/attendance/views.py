@@ -808,8 +808,10 @@ class ClockInAPIView(APIView):
             "first_check_in": attendance.attendance_clock_in.strftime("%I:%M %p") if attendance and getattr(attendance, "attendance_clock_in", None) else None,
             "last_check_out": attendance.attendance_clock_out.strftime("%I:%M %p") if attendance and getattr(attendance, "attendance_clock_out", None) else None,
             "missing_check_in": False,
+            "late_by": None,
             "work_hours_below_minimum": False,
             "checked_out_early": False,
+            "checked_out_early_by": None,
             "in_mode": in_mode,
             "out_mode": out_mode,
             "work_mode_request_id": getattr(in_req, "id", None),
@@ -961,8 +963,25 @@ class ClockOutAPIView(APIView):
 
         worked_below_minimum = False
         checked_out_early = False
+        checked_out_early_by = None
         first_check_in = attendance.attendance_clock_in.strftime("%I:%M %p") if attendance and getattr(attendance, "attendance_clock_in", None) else None
         last_check_out = attendance.attendance_clock_out.strftime("%I:%M %p") if attendance and getattr(attendance, "attendance_clock_out", None) else None
+        late_by_hhmm = None
+
+        try:
+            if attendance and getattr(attendance, "attendance_clock_in", None) and start_time_sec is not None:
+                planned_in_hhmm = f"{(int(start_time_sec) // 3600) % 24:02d}:{(int(start_time_sec) % 3600) // 60:02d}"
+                planned_in_time = datetime.strptime(planned_in_hhmm, "%H:%M").time()
+                planned_in_dt = _coerce_datetime_like(datetime.combine(attendance_date, planned_in_time), dt_now)
+                actual_in_date = getattr(attendance, "attendance_clock_in_date", None) or attendance_date
+                actual_in_dt = _coerce_datetime_like(datetime.combine(actual_in_date, attendance.attendance_clock_in), dt_now)
+                grace_dt = planned_in_dt + timedelta(seconds=int(grace_seconds or 0)) if planned_in_dt else None
+                if actual_in_dt and grace_dt and actual_in_dt > grace_dt:
+                    late_s = int((actual_in_dt - grace_dt).total_seconds())
+                    if late_s > 0:
+                        late_by_hhmm = f"{late_s // 3600:02d}:{(late_s % 3600) // 60:02d}"
+        except Exception:
+            late_by_hhmm = None
 
         try:
             min_formatted = _format_minimum_hour(minimum_hour)
@@ -982,8 +1001,13 @@ class ClockOutAPIView(APIView):
                 actual_out_date = getattr(attendance, "attendance_clock_out_date", None) or attendance_date
                 actual_out_dt = _coerce_datetime_like(datetime.combine(actual_out_date, attendance.attendance_clock_out), dt_now)
                 checked_out_early = bool(actual_out_dt and planned_out_dt and actual_out_dt < planned_out_dt)
+                if checked_out_early:
+                    early_s = int((planned_out_dt - actual_out_dt).total_seconds())
+                    if early_s > 0:
+                        checked_out_early_by = f"{early_s // 3600:02d}:{(early_s % 3600) // 60:02d}"
         except Exception:
             checked_out_early = False
+            checked_out_early_by = None
 
         note_context = _build_mobile_header_note_context(
             employee=employee,
@@ -1017,8 +1041,10 @@ class ClockOutAPIView(APIView):
             "last_check_out": last_check_out,
             "missing_check_in": bool(missing_check_in),
             "updated": bool(allow_update),
+            "late_by": late_by_hhmm,
             "work_hours_below_minimum": bool(worked_below_minimum),
             "checked_out_early": bool(checked_out_early),
+            "checked_out_early_by": checked_out_early_by,
             "work_hours_shortfall": None,
             "in_mode": in_mode,
             "out_mode": out_mode,
@@ -2859,6 +2885,7 @@ class CheckingStatus(APIView):
                 "work_hours_below_minimum": False,
                 "work_hours_shortfall": None,
                 "checked_out_early": False,
+                "checked_out_early_by": None,
                 "worked_hours": "00:00",
                 "worked_seconds": 0,
                 "is_working": False,
@@ -2958,6 +2985,7 @@ class CheckingStatus(APIView):
                 "work_hours_below_minimum": False,
                 "work_hours_shortfall": None,
                 "checked_out_early": False,
+                "checked_out_early_by": None,
                 "worked_hours": "00:00",
                 "worked_seconds": 0,
                 "is_working": False,
@@ -3346,6 +3374,7 @@ class CheckingStatus(APIView):
         work_hours_below_minimum = False
         work_hours_shortfall_hhmm = None
         checked_out_early = False
+        checked_out_early_by_hhmm = None
 
         if attendance and not is_presensi_only:
             try:
@@ -3399,8 +3428,12 @@ class CheckingStatus(APIView):
 
                     if out_dt and planned_out_dt and out_dt < planned_out_dt:
                         checked_out_early = True
+                        early_s = int((planned_out_dt - out_dt).total_seconds())
+                        if early_s > 0:
+                            checked_out_early_by_hhmm = f"{early_s // 3600:02d}:{(early_s % 3600) // 60:02d}"
                 except Exception:
                     checked_out_early = False
+                    checked_out_early_by_hhmm = None
 
         note_context = _build_mobile_header_note_context(
             employee=employee,
@@ -3529,6 +3562,7 @@ class CheckingStatus(APIView):
                 "work_hours_below_minimum": bool(work_hours_below_minimum),
                 "work_hours_shortfall": work_hours_shortfall_hhmm,
                 "checked_out_early": bool(checked_out_early),
+                "checked_out_early_by": checked_out_early_by_hhmm,
                 "header_note_work_hours_below_minimum": bool(note_work_hours_below_minimum),
                 "header_note_work_hours_shortfall": note_work_hours_shortfall_hhmm,
             }
