@@ -1,39 +1,52 @@
-{% extends 'settings.html' %}{% block settings %}{% load static %}{% load widget_tweaks %}{% load i18n %}
-
+{% extends 'settings.html' %}{% block settings %}{% load i18n %}
 
 <div class="oh-inner-sidebar-content">
     <div class="oh-inner-sidebar-content__header d-flex justify-content-between align-items-center">
-        <h2 class="oh-inner-sidebar-content__title">{% trans 'Enable Check In/Check out' %}</h2>
+        <h2 class="oh-inner-sidebar-content__title">{% trans 'Attendance Access Settings' %}</h2>
     </div>
     <div class="oh-sticky-table">
         <div class="oh-sticky-table__table oh-table--sortable">
             <div class="oh-sticky-table__thead">
                 <div class="oh-sticky-table__tr">
-                    <div class="oh-sticky-table__th">
-                        {% trans 'Company' %}
-                    </div>
-                    <div class="oh-sticky-table__th">
-                        {% trans 'Check in/Check out' %}
-                    </div>
+                    <div class="oh-sticky-table__th">{% trans 'Company' %}</div>
+                    <div class="oh-sticky-table__th">{% trans 'Check in/Check out' %}</div>
+                    <div class="oh-sticky-table__th">{% trans 'Allow Reporting Manager Attendance' %}</div>
+                    <div class="oh-sticky-table__th">{% trans 'Allow Admin Attendance' %}</div>
+                    <div class="oh-sticky-table__th">{% trans 'Action' %}</div>
                 </div>
             </div>
             <div class="oh-sticky-table__tbody">
                 {% for att_setting in attendance_settings %}
-                <div class="oh-sticky-table__tr" draggable="true">
+                <form method="post" action="{% url 'enable-disable-check-in' %}" class="oh-sticky-table__tr">
+                    {% csrf_token %}
+                    <input type="hidden" name="setting_Id" value="{{ att_setting.id }}">
                     <div class="oh-sticky-table__td">
                         {% if att_setting.company_id %}
-                            {{att_setting.company_id}}
+                            {{ att_setting.company_id }}
                         {% else %}
                             {% trans "All company" %}
                         {% endif %}
                     </div>
                     <div class="oh-sticky-table__td">
                         <div class="oh-switch" title="Check In/Check Out is locked in disabled state">
-                            <input type="checkbox" name="isChecked" class="oh-switch__checkbox" disabled>
+                            <input type="checkbox" class="oh-switch__checkbox" disabled>
                         </div>
                         <small class="text-muted d-block mt-1">{% trans 'Locked as disabled' %}</small>
                     </div>
-                </div>
+                    <div class="oh-sticky-table__td">
+                        <div class="oh-switch">
+                            <input type="checkbox" name="allow_reporting_manager_attendance" class="oh-switch__checkbox" {% if att_setting.allow_reporting_manager_attendance %}checked{% endif %}>
+                        </div>
+                    </div>
+                    <div class="oh-sticky-table__td">
+                        <div class="oh-switch">
+                            <input type="checkbox" name="allow_admin_attendance" class="oh-switch__checkbox" {% if att_setting.allow_admin_attendance %}checked{% endif %}>
+                        </div>
+                    </div>
+                    <div class="oh-sticky-table__td">
+                        <button type="submit" class="oh-btn oh-btn--secondary-outline">{% trans 'Save' %}</button>
+                    </div>
+                </form>
                 {% endfor %}
             </div>
         </div>
