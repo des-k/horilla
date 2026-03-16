@@ -91,6 +91,7 @@ class WorkModeRequestActionType(models.TextChoices):
     """Audit action applied to a work-mode request."""
     APPROVED = "APPROVED", _("Approved")
     REJECTED = "REJECTED", _("Rejected")
+    DOCUMENT_REJECTED = "DOCUMENT_REJECTED", _("Document Rejected")
     VERIFIED = "VERIFIED", _("Verified")
     REVOKED = "REVOKED", _("Revoked")
     REOPENED = "REOPENED", _("Reopened")
@@ -511,8 +512,12 @@ class WorkModeRequest(HorillaModel):
         return self.mode == AttendanceWorkMode.WFA
 
     def is_active_for_date(self, target_date: date) -> bool:
-        """Returns True if the request covers the date and is not canceled."""
-        if self.status == WorkModeRequestStatus.CANCELED:
+        """Returns True if the request covers the date and is not in a terminal inactive state."""
+        if self.status in {
+            WorkModeRequestStatus.REJECTED,
+            WorkModeRequestStatus.CANCELED,
+            WorkModeRequestStatus.REVOKED,
+        }:
             return False
         return self.start_date <= target_date <= self.end_date
 
@@ -525,6 +530,54 @@ class WorkModeRequest(HorillaModel):
     @property
     def is_document_locked(self) -> bool:
         return self.document_status == WorkModeRequestDocumentStatus.VERIFIED
+
+    @staticmethod
+    def _employee_display_name(employee) -> str | None:
+        if not employee:
+            return None
+        try:
+            full_name = f"{employee.employee_first_name} {employee.employee_last_name}".strip()
+            return full_name or str(employee)
+        except Exception:
+            return str(employee)
+
+    @staticmethod
+    def _user_display_name(user) -> str | None:
+        if not user:
+            return None
+        full_name = f"{getattr(user, 'first_name', '')} {getattr(user, 'last_name', '')}".strip()
+        return full_name or getattr(user, 'username', None) or getattr(user, 'email', None) or str(user)
+
+    def _latest_action_log(self, *, action_type: str | None = None):
+        logs = self.action_logs.select_related("actor", "created_by")
+        if action_type:
+            logs = logs.filter(action_type=action_type)
+        return logs.order_by("-acted_at", "-id").first()
+
+    @property
+    def action_actor_display(self) -> str | None:
+        if self.action_by_id:
+            return self._employee_display_name(self.action_by)
+        log = self._latest_action_log()
+        if log is None:
+            return None
+        return self._employee_display_name(getattr(log, "actor", None)) or self._user_display_name(getattr(log, "created_by", None))
+
+    @property
+    def approved_actor_display(self) -> str | None:
+        if self.approved_by_id:
+            return self._employee_display_name(self.approved_by)
+        log = self._latest_action_log(action_type=WorkModeRequestActionType.APPROVED)
+        if log is None:
+            return None
+        return self._employee_display_name(getattr(log, "actor", None)) or self._user_display_name(getattr(log, "created_by", None))
+
+    @property
+    def action_effective_at(self):
+        if self.action_at:
+            return self.action_at
+        log = self._latest_action_log()
+        return getattr(log, "acted_at", None) if log else self.approved_at
 
     def clean(self):
         super().clean()
