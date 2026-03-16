@@ -3166,8 +3166,9 @@ def check_in_check_out_setting(request):
     """
     Check in check out setting
     """
+    AttendanceGeneralSetting.objects.get_or_create(company_id=None)
     AttendanceGeneralSetting.objects.all().update(enable_check_in=False)
-    attendance_settings = AttendanceGeneralSetting.objects.all()
+    attendance_settings = AttendanceGeneralSetting.objects.all().order_by("company_id__company")
     return render(
         request,
         "attendance/settings/check_in_check_out_enable_form.html",
@@ -3176,23 +3177,27 @@ def check_in_check_out_setting(request):
 
 
 @login_required
-@hx_request_required
 @permission_required("attendance.change_attendancegeneralsetting")
 def enable_disable_check_in(request):
     """
-    Check-in/check-out is locked in disabled state and cannot be enabled.
+    Persist role-based attendance eligibility while keeping web Check-In/Check-Out locked.
     """
     if request.method == "POST":
         setting_id = request.POST.get("setting_Id")
-        AttendanceGeneralSetting.objects.filter(id=setting_id).update(
-            enable_check_in=False
-        )
-        messages.error(
-            request,
-            _("Check In/Check Out is locked as disabled and cannot be changed."),
-        )
-
-    return HttpResponse("")
+        setting = AttendanceGeneralSetting.objects.filter(id=setting_id).first()
+        if setting is not None:
+            setting.enable_check_in = False
+            setting.allow_reporting_manager_attendance = (
+                request.POST.get("allow_reporting_manager_attendance") == "on"
+            )
+            setting.allow_admin_attendance = (
+                request.POST.get("allow_admin_attendance") == "on"
+            )
+            setting.save()
+            messages.success(request, _("Attendance access settings updated successfully."))
+        else:
+            messages.error(request, _("Attendance setting was not found."))
+    return redirect("check-in-check-out-setting")
 
 
 @login_required
