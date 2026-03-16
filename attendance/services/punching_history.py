@@ -204,7 +204,11 @@ def humanize_mobile_error(message: Optional[str], *, direction: str) -> str:
         return _clean_reason_text("Outside Check-In Window")
     if "window" in lower and "check-out" in lower:
         return _clean_reason_text("Outside Check-Out Window")
-    if "disabled for reporting managers" in lower:
+    if (
+        "attendance is disabled" in lower
+        or "disabled for reporting managers" in lower
+        or "disabled for admin users" in lower
+    ):
         return _clean_reason_text("Attendance Disabled")
     if "request is required" in lower or "not approved" in lower:
         return _clean_reason_text("Rejected by Work Type Rule")
