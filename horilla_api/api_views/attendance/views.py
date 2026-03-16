@@ -75,6 +75,7 @@ from attendance.services.punching_history import (
 from attendance.services.request_audit import log_request_action
 from attendance.services.attendance_access import evaluate_attendance_access
 from attendance.services.reconciliation import recompute_attendance, recompute_attendance_range
+from attendance.services.mobile_status_note import build_mobile_header_state
 from attendance.services.request_override_recompute import clear_request_override_and_recompute
 from attendance.services.month_params import normalize_month_yyyy_mm, require_month_yyyy_mm
 
@@ -691,33 +692,38 @@ class ClockInAPIView(APIView):
         update_punch_history(punch_log, attendance=attendance, attendance_date=attendance_date, work_mode=in_mode, related_work_mode_request=in_req, decision_source=getattr(attendance, "reconciliation_source", None) if attendance else None)
         reconcile_attendance_punches(employee=employee, attendance_date=attendance_date)
 
-        return Response(
-            {
-                "message": "Clocked-In",
-                "attendance_date": str(attendance_date),
-                "in_mode": in_mode,
-                "out_mode": out_mode,
-                "work_mode_request_id": getattr(in_req, "id", None),
-                "in_work_type": in_mode,
-                "out_work_type": out_mode,
-                "in_work_type_source": in_source,
-                "out_work_type_source": out_source,
-                "in_work_type_request_id": getattr(in_req, "id", None),
-                "out_work_type_request_id": getattr(out_req, "id", None),
-                "in_work_type_request_status": getattr(in_req, "status", None),
-                "out_work_type_request_status": getattr(out_req, "status", None),
-                "in_attendance_status": getattr(attendance, "in_attendance_status", None) if attendance else None,
-                "out_attendance_status": getattr(attendance, "out_attendance_status", None) if attendance else None,
-                "in_attendance_reject_reason_code": getattr(attendance, "in_attendance_reject_reason_code", None) if attendance else None,
-                "out_attendance_reject_reason_code": getattr(attendance, "out_attendance_reject_reason_code", None) if attendance else None,
-                "in_related_work_type_request_id": getattr(attendance, "in_related_work_type_request_id", None) if attendance else None,
-                "out_related_work_type_request_id": getattr(attendance, "out_related_work_type_request_id", None) if attendance else None,
-                "minimum_working_hour": _format_minimum_hour(minimum_hour),
-                "server_now": dt_now.isoformat(),
-                "server_time": dt_now.strftime("%H:%M"),
-            },
-            status=status.HTTP_200_OK,
-        )
+        response_payload = {
+            "message": "Clocked-In",
+            "attendance_date": str(attendance_date),
+            "has_attendance": bool(attendance),
+            "first_check_in": attendance.attendance_clock_in.strftime("%I:%M %p") if attendance and getattr(attendance, "attendance_clock_in", None) else None,
+            "last_check_out": attendance.attendance_clock_out.strftime("%I:%M %p") if attendance and getattr(attendance, "attendance_clock_out", None) else None,
+            "missing_check_in": False,
+            "work_hours_below_minimum": False,
+            "checked_out_early": False,
+            "in_mode": in_mode,
+            "out_mode": out_mode,
+            "work_mode_request_id": getattr(in_req, "id", None),
+            "in_work_type": in_mode,
+            "out_work_type": out_mode,
+            "in_work_type_source": in_source,
+            "out_work_type_source": out_source,
+            "in_work_type_request_id": getattr(in_req, "id", None),
+            "out_work_type_request_id": getattr(out_req, "id", None),
+            "in_work_type_request_status": getattr(in_req, "status", None),
+            "out_work_type_request_status": getattr(out_req, "status", None),
+            "in_attendance_status": getattr(attendance, "in_attendance_status", None) if attendance else None,
+            "out_attendance_status": getattr(attendance, "out_attendance_status", None) if attendance else None,
+            "in_attendance_reject_reason_code": getattr(attendance, "in_attendance_reject_reason_code", None) if attendance else None,
+            "out_attendance_reject_reason_code": getattr(attendance, "out_attendance_reject_reason_code", None) if attendance else None,
+            "in_related_work_type_request_id": getattr(attendance, "in_related_work_type_request_id", None) if attendance else None,
+            "out_related_work_type_request_id": getattr(attendance, "out_related_work_type_request_id", None) if attendance else None,
+            "minimum_working_hour": _format_minimum_hour(minimum_hour),
+            "server_now": dt_now.isoformat(),
+            "server_time": dt_now.strftime("%H:%M"),
+        }
+        response_payload.update(build_mobile_header_state(response_payload))
+        return Response(response_payload, status=status.HTTP_200_OK)
 
 
 class ClockOutAPIView(APIView):
@@ -844,35 +850,66 @@ class ClockOutAPIView(APIView):
         update_punch_history(punch_log, attendance=attendance, attendance_date=attendance_date, work_mode=out_mode, related_work_mode_request=out_req, decision_source=getattr(attendance, "reconciliation_source", None) if attendance else None)
         reconcile_attendance_punches(employee=employee, attendance_date=attendance_date)
 
-        return Response(
-            {
-                "message": "Clocked-Out",
-                "attendance_date": str(attendance_date),
-                "in_mode": in_mode,
-                "out_mode": out_mode,
-                "work_mode_request_id": getattr(out_req, "id", None),
-                "in_work_type": in_mode,
-                "out_work_type": out_mode,
-                "in_work_type_source": in_source,
-                "out_work_type_source": out_source,
-                "in_work_type_request_id": getattr(in_req, "id", None),
-                "out_work_type_request_id": getattr(out_req, "id", None),
-                "in_work_type_request_status": getattr(in_req, "status", None),
-                "out_work_type_request_status": getattr(out_req, "status", None),
-                "in_attendance_status": getattr(attendance, "in_attendance_status", None) if attendance else None,
-                "out_attendance_status": getattr(attendance, "out_attendance_status", None) if attendance else None,
-                "in_attendance_reject_reason_code": getattr(attendance, "in_attendance_reject_reason_code", None) if attendance else None,
-                "out_attendance_reject_reason_code": getattr(attendance, "out_attendance_reject_reason_code", None) if attendance else None,
-                "in_related_work_type_request_id": getattr(attendance, "in_related_work_type_request_id", None) if attendance else None,
-                "out_related_work_type_request_id": getattr(attendance, "out_related_work_type_request_id", None) if attendance else None,
-                "missing_check_in": bool(missing_check_in),
-                "updated": bool(allow_update),
-                "minimum_working_hour": _format_minimum_hour(minimum_hour),
-                "server_now": dt_now.isoformat(),
-                "server_time": dt_now.strftime("%H:%M"),
-            },
-            status=status.HTTP_200_OK,
-        )
+        worked_below_minimum = False
+        checked_out_early = False
+        first_check_in = attendance.attendance_clock_in.strftime("%I:%M %p") if attendance and getattr(attendance, "attendance_clock_in", None) else None
+        last_check_out = attendance.attendance_clock_out.strftime("%I:%M %p") if attendance and getattr(attendance, "attendance_clock_out", None) else None
+
+        try:
+            min_formatted = _format_minimum_hour(minimum_hour)
+            worked_hour_value = getattr(attendance, "attendance_worked_hour", None) or "00:00"
+            if attendance and getattr(attendance, "attendance_clock_in", None) and getattr(attendance, "attendance_clock_out", None) and min_formatted:
+                worked_below_minimum = strtime_seconds(worked_hour_value) < strtime_seconds(min_formatted)
+        except Exception:
+            worked_below_minimum = False
+
+        try:
+            if attendance and getattr(attendance, "attendance_clock_out", None) and end_time_sec is not None:
+                is_night_shift = start_time_sec > end_time_sec and start_time_sec != end_time_sec
+                planned_out_hhmm = f"{(int(end_time_sec) // 3600) % 24:02d}:{(int(end_time_sec) % 3600) // 60:02d}"
+                planned_out_time = datetime.strptime(planned_out_hhmm, "%H:%M").time()
+                planned_out_date = attendance_date + timedelta(days=1) if is_night_shift else attendance_date
+                planned_out_dt = _coerce_datetime_like(datetime.combine(planned_out_date, planned_out_time), dt_now)
+                actual_out_date = getattr(attendance, "attendance_clock_out_date", None) or attendance_date
+                actual_out_dt = _coerce_datetime_like(datetime.combine(actual_out_date, attendance.attendance_clock_out), dt_now)
+                checked_out_early = bool(actual_out_dt and planned_out_dt and actual_out_dt < planned_out_dt)
+        except Exception:
+            checked_out_early = False
+
+        response_payload = {
+            "message": "Clocked-Out",
+            "attendance_date": str(attendance_date),
+            "has_attendance": bool(attendance),
+            "first_check_in": first_check_in,
+            "last_check_out": last_check_out,
+            "missing_check_in": bool(missing_check_in),
+            "updated": bool(allow_update),
+            "work_hours_below_minimum": bool(worked_below_minimum),
+            "checked_out_early": bool(checked_out_early),
+            "work_hours_shortfall": None,
+            "in_mode": in_mode,
+            "out_mode": out_mode,
+            "work_mode_request_id": getattr(out_req, "id", None),
+            "in_work_type": in_mode,
+            "out_work_type": out_mode,
+            "in_work_type_source": in_source,
+            "out_work_type_source": out_source,
+            "in_work_type_request_id": getattr(in_req, "id", None),
+            "out_work_type_request_id": getattr(out_req, "id", None),
+            "in_work_type_request_status": getattr(in_req, "status", None),
+            "out_work_type_request_status": getattr(out_req, "status", None),
+            "in_attendance_status": getattr(attendance, "in_attendance_status", None) if attendance else None,
+            "out_attendance_status": getattr(attendance, "out_attendance_status", None) if attendance else None,
+            "in_attendance_reject_reason_code": getattr(attendance, "in_attendance_reject_reason_code", None) if attendance else None,
+            "out_attendance_reject_reason_code": getattr(attendance, "out_attendance_reject_reason_code", None) if attendance else None,
+            "in_related_work_type_request_id": getattr(attendance, "in_related_work_type_request_id", None) if attendance else None,
+            "out_related_work_type_request_id": getattr(attendance, "out_related_work_type_request_id", None) if attendance else None,
+            "minimum_working_hour": _format_minimum_hour(minimum_hour),
+            "server_now": dt_now.isoformat(),
+            "server_time": dt_now.strftime("%H:%M"),
+        }
+        response_payload.update(build_mobile_header_state(response_payload))
+        return Response(response_payload, status=status.HTTP_200_OK)
 
 
 class AttendanceView(APIView):
@@ -2661,98 +2698,86 @@ class CheckingStatus(APIView):
         access = evaluate_attendance_access(employee=employee, user=getattr(request, "user", None))
         if not access.allowed:
             attendance_date = dt_now.date()
-            return Response(
-                {
-                    "status": True,
-                    "attendance_enabled": False,
-                    "attendance_exempt_reason": access.reason_code,
-                    "attendance_disabled_reason": access.reason_code,
-                    "attendance_disabled_message": access.message,
-                    "blocked_roles": list(access.blocked_roles),
-                    "role_flags": {
-                        "is_reporting_manager": access.is_reporting_manager,
-                        "is_admin": access.is_admin,
-                    },
-                    "attendance_role_settings": {
-                        "allow_reporting_manager_attendance": access.allow_reporting_manager_attendance,
-                        "allow_admin_attendance": access.allow_admin_attendance,
-                    },
-                    "message": access.message,
-
-                    "has_attendance": False,
-                    "attendance_date": attendance_date.strftime("%Y-%m-%d"),
-                    "first_check_in": None,
-                    "last_check_out": None,
-                    "late_by": None,
-                    "planned_check_out": None,
-                    "work_hours_below_minimum": False,
-                    "work_hours_shortfall": None,
-                    "checked_out_early": False,
-                    "worked_hours": "00:00",
-                    "worked_seconds": 0,
-                    "is_working": False,
-                    "missing_check_in": False,
-                    "check_in_cutoff_has_passed": False,
-                    "check_out_cutoff_has_passed": False,
-                    "can_clock_in": False,
-                    "can_clock_out": False,
-                    "can_update_clock_out": False,
-
-                    "can_check_in": False,
-                    "can_check_out": False,
-                    "check_in_window_start": None,
-                    "check_in_window_end": None,
-                    "check_out_window_start": None,
-                    "check_out_window_end": None,
-                    "check_in_block_reason": "ATTENDANCE_DISABLED",
-                    "check_out_block_reason": "ATTENDANCE_DISABLED",
-
-                    # Legacy work-mode
-                    "in_mode": AttendanceWorkMode.WFO,
-                    "out_mode": AttendanceWorkMode.WFO,
-
-                    # Work Type Request (Attendance) fields
-                    "in_work_type": AttendanceWorkMode.WFO,
-                    "out_work_type": AttendanceWorkMode.WFO,
-                    "in_work_type_source": "schedule",
-                    "out_work_type_source": "schedule",
-                    "in_work_type_request_id": None,
-                    "out_work_type_request_id": None,
-                    "in_work_type_request_status": None,
-                    "out_work_type_request_status": None,
-
-                    # Legacy request keys
-                    "in_request_status": None,
-                    "out_request_status": None,
-                    "in_request_scope": None,
-                    "out_request_scope": None,
-                    "in_work_mode_request_id": None,
-                    "out_work_mode_request_id": None,
-
-                    # Option B (audit fields)
-                    "in_attendance_status": None,
-                    "out_attendance_status": None,
-                    "in_attendance_reject_reason_code": None,
-                    "out_attendance_reject_reason_code": None,
-                    "in_related_work_type_request_id": None,
-                    "out_related_work_type_request_id": None,
-
-                    "shift_start": None,
-                    "shift_end": None,
-                    "grace_time": 0,
-                    "minimum_working_hour": None,
-                    "check_in_cutoff_time": None,
-                    "check_out_cutoff_time": None,
-                    "requires_photo_in": False,
-                    "requires_location_in": False,
-                    "requires_photo_out": False,
-                    "requires_location_out": False,
-                    "is_presensi_only": False,
-                    "server_now": server_now_iso,
-                    "server_time": server_time_hhmm,
+            payload = {
+                "status": True,
+                "attendance_enabled": False,
+                "attendance_exempt_reason": access.reason_code,
+                "attendance_disabled_reason": access.reason_code,
+                "attendance_disabled_message": access.message,
+                "blocked_roles": list(access.blocked_roles),
+                "role_flags": {
+                    "is_reporting_manager": access.is_reporting_manager,
+                    "is_admin": access.is_admin,
                 },
-                status=status.HTTP_200_OK,
-            )
+                "attendance_role_settings": {
+                    "allow_reporting_manager_attendance": access.allow_reporting_manager_attendance,
+                    "allow_admin_attendance": access.allow_admin_attendance,
+                },
+                "message": access.message,
+                "has_attendance": False,
+                "attendance_date": attendance_date.strftime("%Y-%m-%d"),
+                "first_check_in": None,
+                "last_check_out": None,
+                "late_by": None,
+                "planned_check_out": None,
+                "work_hours_below_minimum": False,
+                "work_hours_shortfall": None,
+                "checked_out_early": False,
+                "worked_hours": "00:00",
+                "worked_seconds": 0,
+                "is_working": False,
+                "missing_check_in": False,
+                "check_in_cutoff_has_passed": False,
+                "check_out_cutoff_has_passed": False,
+                "can_clock_in": False,
+                "can_clock_out": False,
+                "can_update_clock_out": False,
+                "can_check_in": False,
+                "can_check_out": False,
+                "check_in_window_start": None,
+                "check_in_window_end": None,
+                "check_out_window_start": None,
+                "check_out_window_end": None,
+                "check_in_block_reason": "ATTENDANCE_DISABLED",
+                "check_out_block_reason": "ATTENDANCE_DISABLED",
+                "in_mode": AttendanceWorkMode.WFO,
+                "out_mode": AttendanceWorkMode.WFO,
+                "in_work_type": AttendanceWorkMode.WFO,
+                "out_work_type": AttendanceWorkMode.WFO,
+                "in_work_type_source": "schedule",
+                "out_work_type_source": "schedule",
+                "in_work_type_request_id": None,
+                "out_work_type_request_id": None,
+                "in_work_type_request_status": None,
+                "out_work_type_request_status": None,
+                "in_request_status": None,
+                "out_request_status": None,
+                "in_request_scope": None,
+                "out_request_scope": None,
+                "in_work_mode_request_id": None,
+                "out_work_mode_request_id": None,
+                "in_attendance_status": None,
+                "out_attendance_status": None,
+                "in_attendance_reject_reason_code": None,
+                "out_attendance_reject_reason_code": None,
+                "in_related_work_type_request_id": None,
+                "out_related_work_type_request_id": None,
+                "shift_start": None,
+                "shift_end": None,
+                "grace_time": 0,
+                "minimum_working_hour": None,
+                "check_in_cutoff_time": None,
+                "check_out_cutoff_time": None,
+                "requires_photo_in": False,
+                "requires_location_in": False,
+                "requires_photo_out": False,
+                "requires_location_out": False,
+                "is_presensi_only": False,
+                "server_now": server_now_iso,
+                "server_time": server_time_hhmm,
+            }
+            payload.update(build_mobile_header_state(payload))
+            return Response(payload, status=status.HTTP_200_OK)
 
         # Resolve shift
         shift = None
@@ -2773,96 +2798,85 @@ class CheckingStatus(APIView):
                 in_mode, in_source, in_req = (AttendanceWorkMode.WFO, "schedule", None)
                 out_mode, out_source, out_req = (AttendanceWorkMode.WFO, "schedule", None)
 
-            return Response(
-                {
-                    "status": False,
-                    "attendance_enabled": True,
-                    "attendance_exempt_reason": None,
-                    "attendance_disabled_reason": None,
-                    "attendance_disabled_message": None,
-                    "blocked_roles": [],
-                    "role_flags": {
-                        "is_reporting_manager": access.is_reporting_manager,
-                        "is_admin": access.is_admin,
-                    },
-                    "attendance_role_settings": {
-                        "allow_reporting_manager_attendance": access.allow_reporting_manager_attendance,
-                        "allow_admin_attendance": access.allow_admin_attendance,
-                    },
-                    "has_attendance": False,
-                    "attendance_date": attendance_date.strftime("%Y-%m-%d"),
-                    "first_check_in": None,
-                    "last_check_out": None,
-                    "late_by": None,
-                    "planned_check_out": None,
-                    "work_hours_below_minimum": False,
-                    "work_hours_shortfall": None,
-                    "checked_out_early": False,
-                    "worked_hours": "00:00",
-                    "worked_seconds": 0,
-                    "is_working": False,
-                    "missing_check_in": False,
-                    "check_in_cutoff_has_passed": False,
-                    "check_out_cutoff_has_passed": False,
-                    "can_clock_in": False,
-                    "can_clock_out": False,
-                    "can_update_clock_out": False,
-
-                    "can_check_in": False,
-                    "can_check_out": False,
-                    "check_in_window_start": None,
-                    "check_in_window_end": None,
-                    "check_out_window_start": None,
-                    "check_out_window_end": None,
-                    "check_in_block_reason": "SHIFT_NOT_ASSIGNED",
-                    "check_out_block_reason": "SHIFT_NOT_ASSIGNED",
-
-                    # Legacy work-mode
-                    "in_mode": in_mode,
-                    "out_mode": out_mode,
-
-                    # Work Type Request (Attendance) fields
-                    "in_work_type": in_mode,
-                    "out_work_type": out_mode,
-                    "in_work_type_source": in_source,
-                    "out_work_type_source": out_source,
-                    "in_work_type_request_id": getattr(in_req, "id", None),
-                    "out_work_type_request_id": getattr(out_req, "id", None),
-                    "in_work_type_request_status": getattr(in_req, "status", None),
-                    "out_work_type_request_status": getattr(out_req, "status", None),
-
-                    # Legacy request keys (still used by some clients)
-                    "in_request_status": getattr(in_req, "status", None),
-                    "out_request_status": getattr(out_req, "status", None),
-                    "in_request_scope": getattr(in_req, "scope", None),
-                    "out_request_scope": getattr(out_req, "scope", None),
-                    "in_work_mode_request_id": getattr(in_req, "id", None),
-                    "out_work_mode_request_id": getattr(out_req, "id", None),
-
-                    # Option B (audit fields)
-                    "in_attendance_status": None,
-                    "out_attendance_status": None,
-                    "in_attendance_reject_reason_code": None,
-                    "out_attendance_reject_reason_code": None,
-                    "in_related_work_type_request_id": None,
-                    "out_related_work_type_request_id": None,
-
-                    "shift_start": None,
-                    "shift_end": None,
-                    "grace_time": 0,
-                    "minimum_working_hour": None,
-                    "check_in_cutoff_time": None,
-                    "check_out_cutoff_time": None,
-                    "requires_photo_in": False,
-                    "requires_location_in": False,
-                    "requires_photo_out": False,
-                    "requires_location_out": False,
-                    "is_presensi_only": False,
-                    "server_now": server_now_iso,
-                    "server_time": server_time_hhmm,
+            payload = {
+                "status": False,
+                "attendance_enabled": True,
+                "attendance_exempt_reason": None,
+                "attendance_disabled_reason": None,
+                "attendance_disabled_message": None,
+                "blocked_roles": [],
+                "role_flags": {
+                    "is_reporting_manager": access.is_reporting_manager,
+                    "is_admin": access.is_admin,
                 },
-                status=status.HTTP_200_OK,
-            )
+                "attendance_role_settings": {
+                    "allow_reporting_manager_attendance": access.allow_reporting_manager_attendance,
+                    "allow_admin_attendance": access.allow_admin_attendance,
+                },
+                "has_attendance": False,
+                "attendance_date": attendance_date.strftime("%Y-%m-%d"),
+                "first_check_in": None,
+                "last_check_out": None,
+                "late_by": None,
+                "planned_check_out": None,
+                "work_hours_below_minimum": False,
+                "work_hours_shortfall": None,
+                "checked_out_early": False,
+                "worked_hours": "00:00",
+                "worked_seconds": 0,
+                "is_working": False,
+                "missing_check_in": False,
+                "check_in_cutoff_has_passed": False,
+                "check_out_cutoff_has_passed": False,
+                "can_clock_in": False,
+                "can_clock_out": False,
+                "can_update_clock_out": False,
+                "can_check_in": False,
+                "can_check_out": False,
+                "check_in_window_start": None,
+                "check_in_window_end": None,
+                "check_out_window_start": None,
+                "check_out_window_end": None,
+                "check_in_block_reason": "SHIFT_NOT_ASSIGNED",
+                "check_out_block_reason": "SHIFT_NOT_ASSIGNED",
+                "in_mode": in_mode,
+                "out_mode": out_mode,
+                "in_work_type": in_mode,
+                "out_work_type": out_mode,
+                "in_work_type_source": in_source,
+                "out_work_type_source": out_source,
+                "in_work_type_request_id": getattr(in_req, "id", None),
+                "out_work_type_request_id": getattr(out_req, "id", None),
+                "in_work_type_request_status": getattr(in_req, "status", None),
+                "out_work_type_request_status": getattr(out_req, "status", None),
+                "in_request_status": getattr(in_req, "status", None),
+                "out_request_status": getattr(out_req, "status", None),
+                "in_request_scope": getattr(in_req, "scope", None),
+                "out_request_scope": getattr(out_req, "scope", None),
+                "in_work_mode_request_id": getattr(in_req, "id", None),
+                "out_work_mode_request_id": getattr(out_req, "id", None),
+                "in_attendance_status": None,
+                "out_attendance_status": None,
+                "in_attendance_reject_reason_code": None,
+                "out_attendance_reject_reason_code": None,
+                "in_related_work_type_request_id": None,
+                "out_related_work_type_request_id": None,
+                "shift_start": None,
+                "shift_end": None,
+                "grace_time": 0,
+                "minimum_working_hour": None,
+                "check_in_cutoff_time": None,
+                "check_out_cutoff_time": None,
+                "requires_photo_in": False,
+                "requires_location_in": False,
+                "requires_photo_out": False,
+                "requires_location_out": False,
+                "is_presensi_only": False,
+                "server_now": server_now_iso,
+                "server_time": server_time_hhmm,
+            }
+            payload.update(build_mobile_header_state(payload))
+            return Response(payload, status=status.HTTP_200_OK)
 
         # Resolve attendance_date + day (night shift aware)
         (
@@ -3383,6 +3397,7 @@ class CheckingStatus(APIView):
                 payload["clock_out_location"] = getattr(attendance, "attendance_clock_out_location", None)
             except Exception:
                 pass
+        payload.update(build_mobile_header_state(payload))
         return Response(payload, status=status.HTTP_200_OK)
 
 class MailTemplateView(APIView):
