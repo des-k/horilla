@@ -233,3 +233,162 @@ class StartupSafetyBugfixTests(SimpleTestCase):
         config = HorillaAutomationConfig("horilla_automations", horilla_automations)
         with patch("horilla_automations.apps.sys.argv", ["manage.py", "runserver"]),              patch.object(HorillaAutomationConfig, "_table_exists", return_value=False),              patch("horilla_automations.signals.start_automation", side_effect=AssertionError("must not start")):
             config.ready()
+
+
+class BiometricWorkModeBugfixTests(SimpleTestCase):
+    def test_resolve_biometric_work_mode_prefers_approved_request(self):
+        from attendance.services.work_type_request_rules import resolve_biometric_work_mode
+
+        employee = SimpleNamespace(employee_work_info=SimpleNamespace(work_type_id=SimpleNamespace(work_type="WFO")))
+        approved_request = SimpleNamespace(mode="wfa")
+        manager = MagicMock()
+        qs = MagicMock()
+        qs.order_by.return_value.first.return_value = approved_request
+        manager.filter.return_value = qs
+
+        with patch("attendance.services.work_type_request_rules.WorkModeRequest.objects", manager):
+            resolved = resolve_biometric_work_mode(employee, date(2026, 3, 14))
+
+        self.assertEqual(resolved.mode, "wfa")
+        self.assertEqual(resolved.source, "approved_request")
+        self.assertIs(resolved.request, approved_request)
+
+    def test_resolve_biometric_work_mode_uses_schedule_without_request(self):
+        from attendance.services.work_type_request_rules import resolve_biometric_work_mode
+
+        employee = SimpleNamespace(employee_work_info=SimpleNamespace(work_type_id=SimpleNamespace(work_type="Work From Anywhere")))
+        manager = MagicMock()
+        qs = MagicMock()
+        qs.order_by.return_value.first.return_value = None
+        manager.filter.return_value = qs
+
+        with patch("attendance.services.work_type_request_rules.WorkModeRequest.objects", manager):
+            resolved = resolve_biometric_work_mode(employee, date(2026, 3, 14))
+
+        self.assertEqual(resolved.mode, "wfa")
+        self.assertEqual(resolved.source, "schedule")
+        self.assertIsNone(resolved.request)
+
+    def test_resolve_biometric_work_mode_falls_back_to_wfo_only_when_unknown(self):
+        from attendance.services.work_type_request_rules import resolve_biometric_work_mode
+
+        employee = SimpleNamespace(employee_work_info=SimpleNamespace(work_type_id=SimpleNamespace(work_type="Mystery")))
+        manager = MagicMock()
+        qs = MagicMock()
+        qs.order_by.return_value.first.return_value = None
+        manager.filter.return_value = qs
+
+        with patch("attendance.services.work_type_request_rules.WorkModeRequest.objects", manager):
+            resolved = resolve_biometric_work_mode(employee, date(2026, 3, 14))
+
+        self.assertEqual(resolved.mode, "wfo")
+        self.assertEqual(resolved.source, "fallback_wfo")
+
+    def test_clock_in_biometric_resolves_schedule_mode_and_updates_raw_punch(self):
+        raw_punch = SimpleNamespace(source="biometric")
+        request = SimpleNamespace(raw_punch_history=raw_punch)
+        employee = SimpleNamespace()
+        update_calls = []
+        resolved = SimpleNamespace(mode="wfa", request=None)
+
+        with patch("attendance.views.clock_in_out.resolve_biometric_work_mode", return_value=resolved),              patch("attendance.views.clock_in_out.update_punch_history", side_effect=lambda *args, **kwargs: update_calls.append(kwargs)):
+            mode, req = clock_in_out._resolve_biometric_mode_context(request, employee, date(2026, 3, 14))
+
+        self.assertEqual(mode, "wfa")
+        self.assertIsNone(req)
+        self.assertEqual(update_calls[-1]["attendance_date"], date(2026, 3, 14))
+        self.assertEqual(update_calls[-1]["work_mode"], "wfa")
+        self.assertIsNone(update_calls[-1]["related_work_mode_request"])
+
+    def test_clock_out_biometric_resolves_approved_request_and_updates_raw_punch(self):
+        work_request = SimpleNamespace(id=91, mode="on_duty")
+        raw_punch = SimpleNamespace(source="biometric")
+        request = SimpleNamespace(raw_punch_history=raw_punch)
+        employee = SimpleNamespace()
+        update_calls = []
+        resolved = SimpleNamespace(mode="on_duty", request=work_request)
+
+        with patch("attendance.views.clock_in_out.resolve_biometric_work_mode", return_value=resolved),              patch("attendance.views.clock_in_out.update_punch_history", side_effect=lambda *args, **kwargs: update_calls.append(kwargs)):
+            mode, req = clock_in_out._resolve_biometric_mode_context(request, employee, date(2026, 3, 14))
+
+        self.assertEqual(mode, "on_duty")
+        self.assertIs(req, work_request)
+        self.assertEqual(update_calls[-1]["work_mode"], "on_duty")
+        self.assertIs(update_calls[-1]["related_work_mode_request"], work_request)
+
+    def test_reconciliation_prefers_approved_work_request_mode(self):
+        from attendance.services import reconciliation
+
+        mode = reconciliation._resolve_final_work_mode(
+            employee="EMP",
+            attendance_date=date(2026, 3, 14),
+            approved_work_request=SimpleNamespace(mode="wfa"),
+            accepted_in_punch=SimpleNamespace(work_mode="on_duty"),
+        )
+
+        self.assertEqual(mode, "wfa")
+
+    def test_reconciliation_uses_raw_punch_mode_before_schedule(self):
+        from attendance.services import reconciliation
+
+        with patch("attendance.services.reconciliation.resolve_biometric_work_mode", return_value=SimpleNamespace(mode="wfa")):
+            mode = reconciliation._resolve_final_work_mode(
+                employee="EMP",
+                attendance_date=date(2026, 3, 14),
+                accepted_in_punch=SimpleNamespace(work_mode="on_duty"),
+                accepted_out_punch=SimpleNamespace(work_mode=None),
+            )
+
+        self.assertEqual(mode, "on_duty")
+
+    def test_reconciliation_uses_schedule_when_raw_mode_missing(self):
+        from attendance.services import reconciliation
+
+        with patch("attendance.services.reconciliation.resolve_biometric_work_mode", return_value=SimpleNamespace(mode="wfa")):
+            mode = reconciliation._resolve_final_work_mode(
+                employee="EMP",
+                attendance_date=date(2026, 3, 14),
+                accepted_in_punch=SimpleNamespace(work_mode=None),
+                accepted_out_punch=SimpleNamespace(work_mode=None),
+            )
+
+        self.assertEqual(mode, "wfa")
+
+    def test_reconciliation_request_override_mode_has_highest_priority(self):
+        from attendance.services import reconciliation
+
+        with patch("attendance.services.reconciliation.resolve_biometric_work_mode", return_value=SimpleNamespace(mode="wfo")):
+            mode = reconciliation._resolve_final_work_mode(
+                employee="EMP",
+                attendance_date=date(2026, 3, 14),
+                request_override_mode="on_duty",
+                approved_work_request=SimpleNamespace(mode="wfa"),
+                accepted_in_punch=SimpleNamespace(work_mode="wfa"),
+            )
+
+        self.assertEqual(mode, "on_duty")
+
+    def test_helper_source_uses_biometric_mode_resolver_instead_of_hardcoded_wfo(self):
+        source = inspect.getsource(clock_in_out.clock_in)
+        self.assertIn('_resolve_biometric_mode_context(request, employee, attendance_date)', source)
+        self.assertIn('work_mode_request=biometric_request', source)
+
+        source_out = inspect.getsource(clock_in_out.clock_out)
+        self.assertIn('_resolve_biometric_mode_context(request, employee, attendance_date)', source_out)
+        self.assertIn('work_mode_request=biometric_request', source_out)
+
+    def test_clock_in_enriches_biometric_raw_punch_before_access_and_cutoff_returns(self):
+        source = inspect.getsource(clock_in_out.clock_in)
+        resolver_pos = source.index('_resolve_biometric_mode_context(request, employee, attendance_date)')
+        access_pos = source.index('access = evaluate_attendance_access')
+        cutoff_pos = source.index('cutoff_in_dt = _calc_cutoff_in_dt')
+        self.assertLess(resolver_pos, access_pos)
+        self.assertLess(resolver_pos, cutoff_pos)
+
+    def test_clock_out_enriches_biometric_raw_punch_before_access_and_cutoff_returns(self):
+        source = inspect.getsource(clock_in_out.clock_out)
+        resolver_pos = source.index('_resolve_biometric_mode_context(request, employee, attendance_date)')
+        access_pos = source.index('access = evaluate_attendance_access')
+        cutoff_pos = source.index('cutoff_out_dt = _calc_cutoff_out_dt')
+        self.assertLess(resolver_pos, access_pos)
+        self.assertLess(resolver_pos, cutoff_pos)
