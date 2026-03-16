@@ -1,4 +1,4 @@
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone, time
 import calendar
 import io
 import json
@@ -76,6 +76,11 @@ from attendance.services.request_audit import log_request_action
 from attendance.services.attendance_access import evaluate_attendance_access
 from attendance.services.reconciliation import recompute_attendance, recompute_attendance_range
 from attendance.services.mobile_status_note import build_mobile_header_state
+
+try:
+    from leave.half_day_rules import leave_breakdown_for_attendance_date
+except Exception:
+    leave_breakdown_for_attendance_date = None  # type: ignore
 from attendance.services.request_override_recompute import clear_request_override_and_recompute
 from attendance.services.month_params import normalize_month_yyyy_mm, require_month_yyyy_mm
 
@@ -521,6 +526,110 @@ def _api_resolve_attendance_date_and_day(shift, dt_now: datetime):
 
     return attendance_date, day, minimum_hour, start_time_sec, end_time_sec, now_hhmm, now_sec
 
+def _seconds_to_hhmm(total_seconds: int | None) -> str | None:
+    try:
+        seconds = max(0, int(total_seconds or 0))
+    except Exception:
+        return None
+    hours = (seconds // 3600) % 24
+    minutes = (seconds % 3600) // 60
+    return f"{hours:02d}:{minutes:02d}"
+
+
+def _shift_bounds_for_note_context(attendance_date: date, start_time_sec, end_time_sec):
+    try:
+        start_hhmm = _seconds_to_hhmm(int(start_time_sec))
+        end_hhmm = _seconds_to_hhmm(int(end_time_sec))
+        if not start_hhmm or not end_hhmm:
+            return None, None
+        shift_start_dt = datetime.combine(attendance_date, datetime.strptime(start_hhmm, "%H:%M").time())
+        shift_end_dt = datetime.combine(attendance_date, datetime.strptime(end_hhmm, "%H:%M").time())
+        if int(start_time_sec) > int(end_time_sec) and int(start_time_sec) != int(end_time_sec):
+            shift_end_dt = shift_end_dt + timedelta(days=1)
+        return shift_start_dt, shift_end_dt
+    except Exception:
+        return None, None
+
+
+def _note_time_to_shift_instance_dt(
+    threshold_time: time | None,
+    *,
+    shift_start_dt: datetime | None,
+    shift_end_dt: datetime | None,
+):
+    if not (threshold_time and shift_start_dt and shift_end_dt):
+        return None
+
+    candidate = datetime.combine(shift_start_dt.date(), threshold_time)
+    if candidate < shift_start_dt and shift_end_dt.date() > shift_start_dt.date():
+        candidate = candidate + timedelta(days=1)
+    return candidate
+
+
+def _build_mobile_header_note_context(employee, shift, attendance_date: date, day, start_time_sec, end_time_sec) -> dict:
+    payload = {
+        "header_note_leave_breakdown": None,
+        "header_note_effective_minimum_hour": None,
+        "header_note_effective_duration_seconds": None,
+    }
+
+    shift_start_dt, shift_end_dt = _shift_bounds_for_note_context(attendance_date, start_time_sec, end_time_sec)
+    if not (shift_start_dt and shift_end_dt):
+        return payload
+
+    leave_breakdown = None
+    if leave_breakdown_for_attendance_date is not None:
+        try:
+            leave_breakdown = leave_breakdown_for_attendance_date(employee, attendance_date) or None
+        except Exception:
+            leave_breakdown = None
+
+    payload["header_note_leave_breakdown"] = leave_breakdown
+
+    if leave_breakdown == "full_day":
+        payload["header_note_effective_minimum_hour"] = "00:00"
+        payload["header_note_effective_duration_seconds"] = 0
+        return payload
+
+    effective_start_dt = shift_start_dt
+    effective_end_dt = shift_end_dt
+
+    schedule = None
+    try:
+        weekday = day.day if getattr(day, "day", None) else attendance_date.strftime("%A").lower()
+        schedule = cio.EmployeeShiftSchedule.objects.filter(
+            shift_id=shift, day__day=weekday
+        ).select_related("day").first()
+    except Exception:
+        schedule = None
+
+    midpoint_dt = shift_start_dt + ((shift_end_dt - shift_start_dt) / 2)
+
+    if leave_breakdown == "first_half":
+        threshold_dt = None
+        if schedule and getattr(schedule, "enable_first_half_leave_rule", False):
+            threshold_dt = _note_time_to_shift_instance_dt(
+                getattr(schedule, "first_half_leave_latest_check_in_time", None),
+                shift_start_dt=shift_start_dt,
+                shift_end_dt=shift_end_dt,
+            )
+        effective_start_dt = threshold_dt or midpoint_dt
+    elif leave_breakdown == "second_half":
+        threshold_dt = None
+        if schedule and getattr(schedule, "enable_second_half_leave_rule", False):
+            threshold_dt = _note_time_to_shift_instance_dt(
+                getattr(schedule, "second_half_leave_earliest_check_out_time", None),
+                shift_start_dt=shift_start_dt,
+                shift_end_dt=shift_end_dt,
+            )
+        effective_end_dt = threshold_dt or midpoint_dt
+
+    duration_seconds = max(0, int((effective_end_dt - effective_start_dt).total_seconds()))
+    payload["header_note_effective_duration_seconds"] = duration_seconds
+    payload["header_note_effective_minimum_hour"] = _seconds_to_hhmm(duration_seconds)
+    return payload
+
+
 def _ensure_single_session_activity(attendance: Attendance, prev_attendance_date: date | None = None) -> AttendanceActivity:
     """Delegate single-session activity sync to the centralized null-safe helper."""
 
@@ -876,6 +985,30 @@ class ClockOutAPIView(APIView):
         except Exception:
             checked_out_early = False
 
+        note_context = _build_mobile_header_note_context(
+            employee=employee,
+            shift=shift,
+            attendance_date=attendance_date,
+            day=day,
+            start_time_sec=start_time_sec,
+            end_time_sec=end_time_sec,
+        )
+        note_effective_seconds = note_context.get("header_note_effective_duration_seconds")
+        note_work_hours_below_minimum = False
+        note_work_hours_shortfall = None
+        try:
+            worked_seconds_value = strtime_seconds(getattr(attendance, "attendance_worked_hour", None) or "00:00")
+        except Exception:
+            worked_seconds_value = 0
+        if attendance and getattr(attendance, "attendance_clock_in", None) and getattr(attendance, "attendance_clock_out", None) and note_effective_seconds is not None and int(note_effective_seconds) > 0:
+            try:
+                if int(worked_seconds_value) < int(note_effective_seconds):
+                    note_work_hours_below_minimum = True
+                    short_s = int(note_effective_seconds) - int(worked_seconds_value)
+                    note_work_hours_shortfall = f"{short_s // 3600:02d}:{(short_s % 3600) // 60:02d}"
+            except Exception:
+                note_work_hours_below_minimum = False
+
         response_payload = {
             "message": "Clocked-Out",
             "attendance_date": str(attendance_date),
@@ -905,9 +1038,12 @@ class ClockOutAPIView(APIView):
             "in_related_work_type_request_id": getattr(attendance, "in_related_work_type_request_id", None) if attendance else None,
             "out_related_work_type_request_id": getattr(attendance, "out_related_work_type_request_id", None) if attendance else None,
             "minimum_working_hour": _format_minimum_hour(minimum_hour),
+            "header_note_work_hours_below_minimum": bool(note_work_hours_below_minimum),
+            "header_note_work_hours_shortfall": note_work_hours_shortfall,
             "server_now": dt_now.isoformat(),
             "server_time": dt_now.strftime("%H:%M"),
         }
+        response_payload.update(note_context)
         response_payload.update(build_mobile_header_state(response_payload))
         return Response(response_payload, status=status.HTTP_200_OK)
 
@@ -3266,6 +3402,26 @@ class CheckingStatus(APIView):
                 except Exception:
                     checked_out_early = False
 
+        note_context = _build_mobile_header_note_context(
+            employee=employee,
+            shift=shift,
+            attendance_date=attendance_date,
+            day=day,
+            start_time_sec=start_time_sec,
+            end_time_sec=end_time_sec,
+        )
+        note_effective_seconds = note_context.get("header_note_effective_duration_seconds")
+        note_work_hours_below_minimum = False
+        note_work_hours_shortfall_hhmm = None
+        if clock_in_t and clock_out_t and note_effective_seconds is not None and int(note_effective_seconds) > 0:
+            try:
+                if int(worked_seconds) < int(note_effective_seconds):
+                    note_work_hours_below_minimum = True
+                    short_s = int(note_effective_seconds) - int(worked_seconds)
+                    note_work_hours_shortfall_hhmm = f"{short_s // 3600:02d}:{(short_s % 3600) // 60:02d}"
+            except Exception:
+                note_work_hours_below_minimum = False
+
         payload = {
             "status": (False if is_presensi_only else bool(is_working)),
             "attendance_enabled": True,
@@ -3373,8 +3529,11 @@ class CheckingStatus(APIView):
                 "work_hours_below_minimum": bool(work_hours_below_minimum),
                 "work_hours_shortfall": work_hours_shortfall_hhmm,
                 "checked_out_early": bool(checked_out_early),
+                "header_note_work_hours_below_minimum": bool(note_work_hours_below_minimum),
+                "header_note_work_hours_shortfall": note_work_hours_shortfall_hhmm,
             }
         )
+        payload.update(note_context)
 
         # Attach proof URLs & locations (audit)
         if attendance:
