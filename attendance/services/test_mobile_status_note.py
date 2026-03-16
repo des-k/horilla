@@ -43,6 +43,20 @@ class MobileAttendanceHeaderStateTests(SimpleTestCase):
         self.assertEqual(header["header_state_code"], CHECKED_IN)
         self.assertEqual(header["header_state_message"], "Checked In • Don’t forget to Check Out")
 
+
+    def test_checked_in_can_surface_late_by_in_detail(self):
+        payload = {
+            "has_attendance": True,
+            "first_check_in": "08:20 AM",
+            "last_check_out": None,
+            "late_by": "00:15",
+        }
+
+        header = build_mobile_header_state(payload)
+
+        self.assertEqual(header["header_state_code"], CHECKED_IN)
+        self.assertEqual(header["header_detail_message"], "Late by 00:15")
+
     def test_missing_check_in_state_is_canonical(self):
         payload = {
             "has_attendance": False,
@@ -116,6 +130,26 @@ class MobileAttendanceHeaderStateTests(SimpleTestCase):
         self.assertEqual(header["header_state_code"], CHECKED_OUT_EARLY)
         self.assertEqual(header["header_state_message"], "Checked Out early")
 
+
+    def test_checked_out_early_can_surface_duration_and_late_detail(self):
+        payload = {
+            "has_attendance": True,
+            "first_check_in": "08:20 AM",
+            "last_check_out": "03:45 PM",
+            "checked_out_early": True,
+            "checked_out_early_by": "00:30",
+            "late_by": "00:15",
+            "header_note_work_hours_below_minimum": False,
+        }
+
+        header = build_mobile_header_state(payload)
+
+        self.assertEqual(header["header_state_code"], CHECKED_OUT_EARLY)
+        self.assertEqual(
+            header["header_detail_message"],
+            "Checked out early by 00:30 • Late by 00:15",
+        )
+
     def test_check_out_request_required_after_cutoff_uses_canonical_message(self):
         payload = {
             "has_attendance": True,
@@ -132,6 +166,21 @@ class MobileAttendanceHeaderStateTests(SimpleTestCase):
             header["header_state_message"],
             "Check Out cutoff passed • Please submit an attendance request",
         )
+
+    def test_attendance_recorded_can_still_surface_late_detail(self):
+        payload = {
+            "has_attendance": True,
+            "first_check_in": "08:16 AM",
+            "last_check_out": "05:16 PM",
+            "late_by": "00:10",
+            "work_hours_below_minimum": False,
+            "checked_out_early": False,
+        }
+
+        header = build_mobile_header_state(payload)
+
+        self.assertEqual(header["header_state_code"], ATTENDANCE_RECORDED)
+        self.assertEqual(header["header_detail_message"], "Late by 00:10")
 
     def test_biometric_created_attendance_is_rendered_from_same_final_truth(self):
         payload = {
@@ -169,4 +218,6 @@ class MobileAttendanceHeaderSourceIntegrationTests(SimpleTestCase):
         self.assertIn("response_payload.update(build_mobile_header_state(response_payload))", in_source)
         self.assertIn('"message": "Clocked-Out"', out_source)
         self.assertIn("header_note_work_hours_below_minimum", out_source)
+        self.assertIn('"late_by": late_by_hhmm', out_source)
+        self.assertIn('"checked_out_early_by": checked_out_early_by', out_source)
         self.assertIn("response_payload.update(build_mobile_header_state(response_payload))", out_source)
