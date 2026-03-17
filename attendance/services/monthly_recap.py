@@ -213,7 +213,7 @@ def _localize_shift_information(text: str, language: str) -> str:
     if not lang.startswith("id"):
         return text
     return (
-        text.replace("Flexi In", "Waktu Fleksibel")
+        text.replace("Flexi In", "Waktu Fleksibel").replace("Flex In", "Waktu Fleksibel")
         .replace("Holiday/Off", "Libur")
         .replace("Holiday / Off", "Libur")
         .replace("Holiday", "Libur")
@@ -1487,12 +1487,16 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
 
         grace_in_sec = int(rules.get("grace_seconds") or 0)
         grace_out_sec = 0
+        grace_clock_in_type = str(rules.get("clock_in_type") or "after")
         try:
             grace_time = _resolve_grace_time(rules.get("schedule"), shift)
             if grace_time and getattr(grace_time, "allowed_clock_out", False):
                 grace_out_sec = int(getattr(grace_time, "allowed_time_in_secs", 0) or 0)
+            if grace_time and (getattr(grace_time, "allowed_clock_in", True) or grace_in_sec > 0):
+                grace_clock_in_type = getattr(grace_time, "clock_in_type", "after") or "after"
         except Exception:
             grace_out_sec = 0
+            grace_clock_in_type = str(rules.get("clock_in_type") or "after")
 
         baseline_mode = _attendance_level_mode(best_att) or scheduled_attendance_mode(employee, d)
 
@@ -1583,14 +1587,43 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
                     tzinfo=tzinfo,
                 )
 
+        late_reference_dt = None
+        late_grace_seconds = 0
+        if shift_start_dt and cutoff_in_dt:
+            if half_day_kind == "first_half":
+                late_reference_dt = first_half_threshold_dt or shift_start_dt
+            else:
+                late_reference_dt = shift_start_dt
+                if half_day_kind not in {"first_half", "second_half"}:
+                    late_grace_seconds = int(grace_in_sec or 0)
+
+        early_reference_dt = None
+        if shift_end_dt and cutoff_in_dt:
+            if half_day_kind == "second_half":
+                early_reference_dt = second_half_threshold_dt or (shift_end_dt - timedelta(seconds=grace_out_sec))
+            else:
+                early_reference_dt = shift_end_dt - timedelta(seconds=grace_out_sec)
+
+        credit_seconds = 0.0
+        if (
+            final_in_dt
+            and late_reference_dt
+            and grace_clock_in_type == "before_after"
+            and final_in_dt < late_reference_dt
+        ):
+            credit_seconds = max(0.0, (late_reference_dt - final_in_dt).total_seconds())
+
+        adjusted_early_reference_dt = early_reference_dt
+        if adjusted_early_reference_dt and credit_seconds > 0:
+            adjusted_early_reference_dt = adjusted_early_reference_dt - timedelta(seconds=credit_seconds)
+
         if shift_start_dt and cutoff_in_dt:
             if half_day_kind == "first_half":
                 if final_in_dt:
                     if eff_in_mode == AttendanceWorkMode.ON_DUTY:
                         late_sec = 0.0
                     else:
-                        ref = first_half_threshold_dt or (shift_start_dt + timedelta(seconds=grace_in_sec))
-                        late_sec = max(0.0, (final_in_dt - ref).total_seconds())
+                        late_sec = max(0.0, (final_in_dt - late_reference_dt).total_seconds() - late_grace_seconds)
                 else:
                     late_sec = 0.0
                 leave_note_suffixes.append(_localize_half_day_leave_note("first_half", language))
@@ -1599,8 +1632,7 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
                     if eff_in_mode == AttendanceWorkMode.ON_DUTY:
                         late_sec = 0.0
                     else:
-                        ref = shift_start_dt + timedelta(seconds=grace_in_sec)
-                        late_sec = max(0.0, (final_in_dt - ref).total_seconds())
+                        late_sec = max(0.0, (final_in_dt - late_reference_dt).total_seconds() - late_grace_seconds)
                 else:
                     late_sec = max(0.0, (cutoff_in_dt - shift_start_dt).total_seconds())
 
@@ -1610,8 +1642,7 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
                     if eff_out_mode == AttendanceWorkMode.ON_DUTY:
                         early_sec = 0.0
                     else:
-                        ref = second_half_threshold_dt or (shift_end_dt - timedelta(seconds=grace_out_sec))
-                        early_sec = max(0.0, (ref - final_out_dt).total_seconds())
+                        early_sec = max(0.0, (adjusted_early_reference_dt - final_out_dt).total_seconds())
                 else:
                     early_sec = 0.0
                 leave_note_suffixes.append(_localize_half_day_leave_note("second_half", language))
@@ -1620,8 +1651,7 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
                     if eff_out_mode == AttendanceWorkMode.ON_DUTY:
                         early_sec = 0.0
                     else:
-                        ref = shift_end_dt - timedelta(seconds=grace_out_sec)
-                        early_sec = max(0.0, (ref - final_out_dt).total_seconds())
+                        early_sec = max(0.0, (adjusted_early_reference_dt - final_out_dt).total_seconds())
                 else:
                     early_sec = 0.0
             else:
@@ -1629,8 +1659,7 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
                     if eff_out_mode == AttendanceWorkMode.ON_DUTY:
                         early_sec = 0.0
                     else:
-                        ref = shift_end_dt - timedelta(seconds=grace_out_sec)
-                        early_sec = max(0.0, (ref - final_out_dt).total_seconds())
+                        early_sec = max(0.0, (adjusted_early_reference_dt - final_out_dt).total_seconds())
                 else:
                     early_sec = max(0.0, (shift_end_dt - cutoff_in_dt).total_seconds())
 
@@ -1646,7 +1675,9 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
             if st and et:
                 shift_info = f"{st.strftime('%H:%M')} - {et.strftime('%H:%M')}"
                 flexi_min = int((grace_in_sec or 0) // 60)
-                shift_info += f" • Flexi In: {flexi_min}m"
+                if flexi_min > 0:
+                    flex_symbol = "±" if grace_clock_in_type == "before_after" else "+"
+                    shift_info += f" • Flex In {flex_symbol}{flexi_min}m"
         except Exception:
             shift_info = "—"
 
