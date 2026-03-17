@@ -82,8 +82,11 @@
             <div class="oh-sticky-table__td">
               {% if r.mode == 'on_duty' %}
                 <span class="oh-badge oh-badge--secondary oh-badge--small oh-badge--round">{{ r.get_document_status_display }}</span>
+                {% if r.current_document_version_number %}
+                  <div class="text-muted" style="font-size: 11px; margin-top: 4px;">{% trans "Current version" %}: v{{ r.current_document_version_number }}</div>
+                {% endif %}
                 {% if r.status == 'approved' and r.document_status != 'verified' %}
-                  <div class="text-muted" style="font-size: 11px; margin-top: 2px;">{% trans "Attendance effect is provisional until verification is completed." %}</div>
+                  <div class="text-muted" style="font-size: 11px; margin-top: 2px;">{% trans "Attendance effect is provisional until the current version is verified." %}</div>
                 {% elif r.status == 'approved' and r.document_status == 'verified' %}
                   <div class="text-muted" style="font-size: 11px; margin-top: 2px;">{% trans "Attendance effect is final." %}</div>
                 {% endif %}
@@ -92,25 +95,23 @@
               {% endif %}
             </div>
             <div class="oh-sticky-table__td">
-              {% with c=r.files.count %}
-                {% if c %}
-                  <div class="d-flex align-items-center gap-2">
-                    <span class="oh-badge oh-badge--secondary oh-badge--small oh-badge--round">{{ c }}</span>
-                    <button
-                      class="oh-btn oh-btn--light-bkg"
-                      title="{% trans 'View attachments' %}"
-                      data-toggle="oh-modal-toggle" data-target="#objectDetailsModal"
-                      hx-get="{% url 'attendance-work-type-request-attachments' r.id %}"
-                      hx-target="#objectDetailsModalTarget"
-                      onclick="event.preventDefault()"
-                    >
-                      <ion-icon name="document-attach-outline"></ion-icon>
-                    </button>
-                  </div>
-                {% else %}
-                  <span class="text-muted">-</span>
-                {% endif %}
-              {% endwith %}
+              {% if r.current_document_file_count %}
+                <div class="d-flex align-items-center gap-2">
+                  <span class="oh-badge oh-badge--secondary oh-badge--small oh-badge--round">{{ r.current_document_file_count }}</span>
+                  <button
+                    class="oh-btn oh-btn--light-bkg"
+                    title="{% trans 'View attachments' %}"
+                    data-toggle="oh-modal-toggle" data-target="#objectDetailsModal"
+                    hx-get="{% url 'attendance-work-type-request-attachments' r.id %}"
+                    hx-target="#objectDetailsModalTarget"
+                    onclick="event.preventDefault()"
+                  >
+                    <ion-icon name="document-attach-outline"></ion-icon>
+                  </button>
+                </div>
+              {% else %}
+                <span class="text-muted">-</span>
+              {% endif %}
             </div>
             <div class="oh-sticky-table__td">
               {% if r.reason %}
@@ -126,55 +127,48 @@
             </div>
             <div class="oh-sticky-table__td oh-sticky-table__right">
               <div class="d-flex gap-2 justify-content-end flex-wrap">
-                {% if r.employee_id.employee_user_id.id == current_user_id %}
-                  <button class="oh-btn oh-btn--success" disabled title="{% trans 'You cannot approve your own request' %}">
+                {% if r.can_reject %}
+                  <button class="oh-btn oh-btn--danger" data-toggle="oh-modal-toggle" data-target="#objectDetailsModal"
+                    hx-get="{% url 'attendance-work-type-request-reject' r.id %}" hx-target="#objectDetailsModalTarget" onclick="event.preventDefault()" title="{% trans 'Reject request' %}">
+                    <ion-icon name="close-circle-outline"></ion-icon>
+                  </button>
+                {% endif %}
+                {% if r.can_approve %}
+                  <button class="oh-btn oh-btn--success" hx-post="{% url 'attendance-work-type-request-approve' r.id %}" hx-target="#ohMessages" hx-swap="innerHTML" onclick="event.preventDefault()" title="{% trans 'Approve request' %}">
                     <ion-icon name="checkmark-circle-outline"></ion-icon>
                   </button>
-                {% else %}
-                  {% if r.status == 'waiting_for_approval' %}
-                    <button class="oh-btn oh-btn--success" hx-post="{% url 'attendance-work-type-request-approve' r.id %}" hx-target="#ohMessages" hx-swap="innerHTML" onclick="event.preventDefault()" title="{% trans 'Approve request' %}">
-                      <ion-icon name="checkmark-circle-outline"></ion-icon>
-                    </button>
-                    <button class="oh-btn oh-btn--danger" data-toggle="oh-modal-toggle" data-target="#objectDetailsModal"
-                      hx-get="{% url 'attendance-work-type-request-reject' r.id %}" hx-target="#objectDetailsModalTarget" onclick="event.preventDefault()" title="{% trans 'Reject request' %}">
-                      <ion-icon name="close-circle-outline"></ion-icon>
-                    </button>
-                  {% endif %}
-
-                  {% if r.mode == 'on_duty' and r.status == 'approved' and r.document_status == 'verified' %}
-                    <button class="oh-btn oh-btn--secondary"
-                      hx-post="{% url 'attendance-work-type-request-document-action' r.id 'reopen' %}"
-                      hx-vals='js:{remark: prompt("{% trans "Enter reopen remark (optional):" %}") || ""}'
-                      hx-target="#ohMessages" hx-swap="innerHTML" onclick="event.preventDefault()" title="{% trans 'Reopen verification' %}">
-                      <ion-icon name="refresh-outline"></ion-icon>
-                    </button>
-                  {% elif r.mode == 'on_duty' and r.status == 'approved' and r.document_status == 'rejected' %}
-                    <button class="oh-btn oh-btn--secondary"
-                      hx-post="{% url 'attendance-work-type-request-document-action' r.id 'reopen' %}"
-                      hx-vals='js:{remark: prompt("{% trans "Enter reopen remark (optional):" %}") || ""}'
-                      hx-target="#ohMessages" hx-swap="innerHTML" onclick="event.preventDefault()" title="{% trans 'Reopen document review' %}">
-                      <ion-icon name="refresh-outline"></ion-icon>
-                    </button>
-                  {% elif r.mode == 'on_duty' and r.status == 'approved' and r.document_status != 'not_uploaded' %}
-                    <button class="oh-btn oh-btn--success" hx-post="{% url 'attendance-work-type-request-document-action' r.id 'verify' %}" hx-target="#ohMessages" hx-swap="innerHTML" onclick="event.preventDefault()" title="{% trans 'Verify document' %}">
-                      <ion-icon name="shield-checkmark-outline"></ion-icon>
-                    </button>
-                    <button class="oh-btn oh-btn--danger"
-                      hx-post="{% url 'attendance-work-type-request-document-action' r.id 'reject' %}"
-                      hx-vals='js:{remark: prompt("{% trans "Enter document rejection remark:" %}") || ""}'
-                      hx-target="#ohMessages" hx-swap="innerHTML" onclick="event.preventDefault()" title="{% trans 'Reject document' %}">
-                      <ion-icon name="close-circle-outline"></ion-icon>
-                    </button>
-                  {% endif %}
-
-                  {% if r.status == 'approved' %}
-                    <button class="oh-btn oh-btn--warning"
-                      hx-post="{% url 'attendance-work-type-request-revoke' r.id %}"
-                      hx-vals='js:{reason: prompt("{% trans "Enter revoke reason (optional):" %}") || ""}'
-                      hx-target="#ohMessages" hx-swap="innerHTML" onclick="event.preventDefault()" title="{% trans 'Revoke request' %}">
-                      <ion-icon name="ban-outline"></ion-icon>
-                    </button>
-                  {% endif %}
+                {% endif %}
+                {% if r.can_verify_document %}
+                  <button class="oh-btn oh-btn--success" hx-post="{% url 'attendance-work-type-request-document-action' r.id 'verify' %}" hx-target="#ohMessages" hx-swap="innerHTML" onclick="event.preventDefault()" title="{% trans 'Verify current document version' %}">
+                    <ion-icon name="shield-checkmark-outline"></ion-icon>
+                  </button>
+                {% endif %}
+                {% if r.can_reject_document %}
+                  <button class="oh-btn oh-btn--danger"
+                    hx-post="{% url 'attendance-work-type-request-document-action' r.id 'reject' %}"
+                    hx-vals='js:{remark: prompt("{% trans "Enter document rejection remark:" %}") || ""}'
+                    hx-target="#ohMessages" hx-swap="innerHTML" onclick="event.preventDefault()" title="{% trans 'Reject current document version' %}">
+                    <ion-icon name="close-circle-outline"></ion-icon>
+                  </button>
+                {% endif %}
+                {% if r.can_reopen_document %}
+                  <button class="oh-btn oh-btn--secondary"
+                    hx-post="{% url 'attendance-work-type-request-document-action' r.id 'reopen' %}"
+                    hx-vals='js:{remark: prompt("{% trans "Enter reopen remark (optional):" %}") || ""}'
+                    hx-target="#ohMessages" hx-swap="innerHTML" onclick="event.preventDefault()" title="{% trans 'Reopen current document review' %}">
+                    <ion-icon name="refresh-outline"></ion-icon>
+                  </button>
+                {% endif %}
+                {% if r.can_revoke %}
+                  <button class="oh-btn oh-btn--warning"
+                    hx-post="{% url 'attendance-work-type-request-revoke' r.id %}"
+                    hx-vals='js:{reason: prompt("{% trans "Enter revoke reason (optional):" %}") || ""}'
+                    hx-target="#ohMessages" hx-swap="innerHTML" onclick="event.preventDefault()" title="{% trans 'Revoke request' %}">
+                    <ion-icon name="ban-outline"></ion-icon>
+                  </button>
+                {% endif %}
+                {% if not r.can_approve and not r.can_reject and not r.can_verify_document and not r.can_reject_document and not r.can_reopen_document and not r.can_revoke %}
+                  <span class="text-muted">-</span>
                 {% endif %}
               </div>
             </div>
