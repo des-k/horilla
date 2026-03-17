@@ -325,6 +325,11 @@ urlpatterns = [
         name="attendance-work-type-request-attachments",
     ),
     path(
+        "work-type-requests/attachments/<int:obj_id>/file/<int:file_id>/",
+        attendance.views.work_type_requests.work_type_request_attachment_download,
+        name="attendance-work-type-request-attachment-download",
+    ),
+    path(
         "request-attendance/<int:attendance_id>/",
         attendance.views.requests.attendance_request_changes,
         name="attendance-change",
