@@ -76,9 +76,8 @@ from attendance.services.punching_history import (
 from attendance.services.request_audit import log_request_action
 from attendance.services.attendance_access import evaluate_attendance_access
 from attendance.services.reconciliation import recompute_attendance, recompute_attendance_range
-from attendance.services.work_type_request_actions import WorkModeRequestActionError, WorkModeRequestActions
-from attendance.services.work_type_request_permissions import build_permission_flags
 from attendance.services.mobile_status_note import build_mobile_header_state
+from attendance.services.work_type_request_actions import WorkModeRequestActions
 
 try:
     from leave.half_day_rules import leave_breakdown_for_attendance_date
@@ -732,17 +731,6 @@ def _restore_request_back_to_raw(attendance: Attendance, *, include_in: bool, in
     )
 
 
-def _raw_presence_only_for_mobile_punch(mode: str | None, source: str | None, req) -> bool:
-    """Keep raw punch persistence neutral for request-based ON DUTY.
-
-    Final presence-only benefit for request-based ON DUTY must be decided by
-    reconciliation after considering document verification state. Only
-    schedule-based ON DUTY can be marked presence-only directly in the raw path.
-    """
-
-    return bool(mode == AttendanceWorkMode.ON_DUTY and source == "schedule" and req is None)
-
-
 class ClockInAPIView(APIView):
     """Mobile Clock-In (single-session + hybrid mode)."""
 
@@ -856,7 +844,7 @@ class ClockInAPIView(APIView):
                 clock_in_mode=in_mode,
                 clock_in_location=location,
                 work_mode_request=in_req,
-                is_presensi_only=_raw_presence_only_for_mobile_punch(in_mode, in_source, in_req),
+                is_presensi_only=(in_mode == AttendanceWorkMode.ON_DUTY),
                 clock_in_channel="mobile",
                 raw_punch_history=punch_log,
             )
@@ -1012,7 +1000,7 @@ class ClockOutAPIView(APIView):
                 clock_out_mode=out_mode,
                 clock_out_location=location,
                 work_mode_request=out_req,
-                is_presensi_only=_raw_presence_only_for_mobile_punch(out_mode, out_source, out_req),
+                is_presensi_only=(out_mode == AttendanceWorkMode.ON_DUTY),
                 allow_update_clock_out=allow_update,
                 raise_if_already_clocked_out=(not allow_update),
                 clock_out_channel="mobile",
@@ -2031,7 +2019,13 @@ def _work_mode_request_text(data, *keys):
 
 
 class WorkModeRequestView(APIView):
-    """CRUD for WorkModeRequest (WFA / ON_DUTY)."""
+    """CRUD for WorkModeRequest (WFA / ON_DUTY).
+
+    Final rules:
+    - WFA allows optional supporting documents with version history only.
+    - ON DUTY documents create reviewable versions.
+    - Owner-only update/cancel/upload rules are enforced by centralized action services.
+    """
 
     permission_classes = [IsAuthenticated]
     serializer_class = WorkModeRequestSerializer
@@ -2375,6 +2369,7 @@ class WorkModeRequestDocumentActionView(APIView):
         except ValidationError as exc:
             return Response({"error": exc.messages if hasattr(exc, "messages") else str(exc)}, status=400)
         return Response(self.serializer_class(obj, context={"request": request}).data, status=200)
+
 
 
 class AttendanceOverTimeView(APIView):
