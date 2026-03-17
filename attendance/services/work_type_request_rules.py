@@ -350,7 +350,8 @@ def coerce_work_type_payload(data: dict) -> Tuple[Optional[str], dict]:
 
 def has_attachments(req: WorkModeRequest) -> bool:
     try:
-        current = getattr(req, "current_document_version", None)
+        resolver = getattr(req, "resolve_current_document_version", None)
+        current = resolver() if callable(resolver) else getattr(req, "current_document_version", None)
         if current is not None:
             return current.file_links.exists()
     except Exception:
