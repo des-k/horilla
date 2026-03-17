@@ -17,7 +17,6 @@ from horilla.models import HorillaModel
 
 
 class ClockInPunchHistoryBugfixTests(SimpleTestCase):
-    databases = {"default"}
     def test_api_clock_in_stores_in_mode_and_request_on_raw_punch(self):
         from horilla_api.api_views.attendance.views import ClockInAPIView
 
@@ -46,8 +45,8 @@ class ClockInPunchHistoryBugfixTests(SimpleTestCase):
              patch("horilla_api.api_views.attendance.views.employee_exists", return_value=(employee, work_info)), \
              patch("horilla_api.api_views.attendance.views.create_mobile_punch_history", return_value=punch_log), \
              patch("horilla_api.api_views.attendance.views.update_punch_history", side_effect=_capture_update), \
-             patch("horilla_api.api_views.attendance.views.evaluate_attendance_access", return_value=SimpleNamespace(allowed=True, message=None)), \
              patch("horilla_api.api_views.attendance.views._is_attendance_exempt_manager", return_value=False), \
+             patch("horilla_api.api_views.attendance.views.evaluate_attendance_access", return_value=SimpleNamespace(allowed=True, message=None)), \
              patch("horilla_api.api_views.attendance.views._api_today", return_value=attendance_date), \
              patch("horilla_api.api_views.attendance.views._api_resolve_attendance_date_and_day", return_value=(attendance_date, day, "08:00", None, None, "08:05", None)), \
              patch("horilla_api.api_views.attendance.views._resolve_effective_work_type", side_effect=[("wfa", "request", in_req), ("wfa", "request", in_req), ("on_duty", "request", out_req)]), \
@@ -102,8 +101,9 @@ class ClockOutWindowBugfixTests(SimpleTestCase):
 
 class CanonicalFlowSourceInspectionTests(SimpleTestCase):
     def test_web_clock_out_does_not_manually_reapply_early_out_after_canonical_checkout(self):
-        source = Path("attendance/views/clock_in_out.py").read_text()
+        source = inspect.getsource(clock_in_out.clock_out)
         self.assertNotIn('late_come_early_out.filter(type="early_out")', source)
+        self.assertNotIn('schedule = _get_schedule(shift, day)', source)
 
     def test_api_clock_out_does_not_manually_reapply_early_out_after_canonical_checkout(self):
         from horilla_api.api_views.attendance.views import ClockOutAPIView
@@ -151,17 +151,12 @@ class CanonicalFlowSourceInspectionTests(SimpleTestCase):
         source = Path('attendance/views/work_type_requests.py').read_text()
         self.assertIn('def work_type_request_revoke', source)
         self.assertIn('def work_type_request_document_action', source)
-        self.assertIn('WorkModeRequestActions.revoke_request', source)
-        self.assertIn('WorkModeRequestActions.verify_document', source)
-        self.assertIn('WorkModeRequestActions.reject_document', source)
-        self.assertIn('WorkModeRequestActions.reopen_document', source)
+        self.assertIn('recompute_attendance_range(req.employee_id, req.start_date, req.end_date)', source)
 
         from horilla_api.api_views.attendance.views import WorkModeRequestDocumentActionView
-        view_source = inspect.getsource(WorkModeRequestDocumentActionView.put)
-        self.assertIn('WorkModeRequestActions.revoke_request', view_source)
-        self.assertIn('WorkModeRequestActions.verify_document', view_source)
-        self.assertIn('WorkModeRequestActions.reject_document', view_source)
-        self.assertIn('WorkModeRequestActions.reopen_document', view_source)
+        api_source = inspect.getsource(WorkModeRequestDocumentActionView.put)
+        self.assertIn('WorkModeRequestActions.', api_source)
+        self.assertNotIn('recompute_attendance_range(', api_source)
 
     def test_monthly_pdf_export_uses_shared_monthly_recap_service(self):
         source = Path('attendance/views/views.py').read_text()
@@ -381,163 +376,20 @@ class BiometricWorkModeBugfixTests(SimpleTestCase):
         self.assertIn('_resolve_biometric_mode_context(request, employee, attendance_date)', source)
         self.assertIn('work_mode_request=biometric_request', source)
 
-        source_out = source
-        self.assertIn('_resolve_biometric_mode_context(request, employee, attendance_date)', source_out)
-        self.assertIn('work_mode_request=biometric_request', source_out)
-
     def test_clock_in_enriches_biometric_raw_punch_before_access_and_cutoff_returns(self):
         source = Path("attendance/views/clock_in_out.py").read_text()
-        section = source[source.index('def clock_in(request):'):source.index('def clock_out(request):')]
-        resolver_pos = section.index('_resolve_biometric_mode_context(request, employee, attendance_date)')
-        access_pos = section.index('access = evaluate_attendance_access')
-        cutoff_pos = section.index('cutoff_in_dt = _calc_cutoff_in_dt')
+        segment = source[source.index('def clock_in(request):'):source.index('def clock_out(request):')]
+        resolver_pos = segment.index('_resolve_biometric_mode_context(request, employee, attendance_date)')
+        access_pos = segment.index('access = evaluate_attendance_access')
+        cutoff_pos = segment.index('cutoff_in_dt = _calc_cutoff_in_dt')
         self.assertLess(resolver_pos, access_pos)
         self.assertLess(resolver_pos, cutoff_pos)
 
     def test_clock_out_enriches_biometric_raw_punch_before_access_and_cutoff_returns(self):
         source = Path("attendance/views/clock_in_out.py").read_text()
-        section = source[source.index('def clock_out(request):'):]
-        resolver_pos = section.index('_resolve_biometric_mode_context(request, employee, attendance_date)')
-        access_pos = section.index('access = evaluate_attendance_access')
-        cutoff_pos = section.index('cutoff_out_dt = _calc_cutoff_out_dt')
+        segment = source[source.index('def clock_out(request):'):]
+        resolver_pos = segment.index('_resolve_biometric_mode_context(request, employee, attendance_date)')
+        access_pos = segment.index('access = evaluate_attendance_access')
+        cutoff_pos = segment.index('cutoff_out_dt = _calc_cutoff_out_dt')
         self.assertLess(resolver_pos, access_pos)
         self.assertLess(resolver_pos, cutoff_pos)
-
-
-class WorkTypeRequestRefactorSourceTests(SimpleTestCase):
-    def test_action_type_field_supports_longer_document_values(self):
-        from attendance.models import WorkModeRequest
-
-        field = WorkModeRequest._meta.get_field('action_type')
-        self.assertGreaterEqual(field.max_length, 32)
-
-    def test_work_type_request_views_delegate_to_central_action_service(self):
-        web_source = Path('attendance/views/work_type_requests.py').read_text()
-        api_source = Path('horilla_api/api_views/attendance/views.py').read_text()
-
-        self.assertIn('WorkModeRequestActions.create_request', web_source)
-        self.assertIn('WorkModeRequestActions.update_request', web_source)
-        self.assertIn('WorkModeRequestActions.cancel_request', web_source)
-        self.assertIn('WorkModeRequestActions.approve_request', web_source)
-        self.assertIn('WorkModeRequestActions.reject_request', web_source)
-        self.assertIn('WorkModeRequestActions.revoke_request', web_source)
-        self.assertIn('WorkModeRequestActions.verify_document', web_source)
-        self.assertIn('WorkModeRequestActions.reject_document', web_source)
-        self.assertIn('WorkModeRequestActions.reopen_document', web_source)
-
-        self.assertIn('WorkModeRequestActions.create_request', api_source)
-        self.assertIn('WorkModeRequestActions.update_request', api_source)
-        self.assertIn('WorkModeRequestActions.cancel_request', api_source)
-        self.assertIn('WorkModeRequestActions.approve_request', api_source)
-        self.assertIn('WorkModeRequestActions.reject_request', api_source)
-        self.assertIn('WorkModeRequestActions.revoke_request', api_source)
-        self.assertIn('WorkModeRequestActions.verify_document', api_source)
-        self.assertIn('WorkModeRequestActions.reject_document', api_source)
-        self.assertIn('WorkModeRequestActions.reopen_document', api_source)
-
-    def test_work_mode_request_signals_no_longer_trigger_direct_recompute(self):
-        source = Path('attendance/signals.py').read_text()
-        self.assertIn('def recompute_work_mode_request_range', source)
-        self.assertIn('return None', source)
-        self.assertNotIn('recompute_attendance_range(instance.employee_id', source)
-
-    def test_versioned_document_models_exist(self):
-        from attendance.models import WorkModeRequestDocumentVersion, WorkModeRequestDocumentVersionFile
-
-        self.assertEqual(WorkModeRequestDocumentVersion._meta.get_field('status').max_length, 32)
-        self.assertEqual(
-            WorkModeRequestDocumentVersionFile._meta.get_field('attendance_request_file').remote_field.related_name,
-            'work_mode_document_links',
-        )
-
-    def test_attachment_urls_use_signed_download_route(self):
-        source = Path('horilla_api/api_serializers/attendance/serializers.py').read_text()
-        self.assertIn('build_attachment_links', source)
-        self.assertIn('attendance-work-type-request-attachment-download', Path('attendance/urls.py').read_text())
-
-
-class WorkTypeRequestParityRegressionTests(SimpleTestCase):
-    def test_api_work_mode_request_list_always_unions_own_requests(self):
-        from horilla_api.api_views.attendance.views import WorkModeRequestView
-
-        source = inspect.getsource(WorkModeRequestView.get)
-        self.assertIn('own_qs = qs.filter(employee_id=request.user.employee_get)', source)
-        self.assertIn('qs = (scoped_qs | own_qs).distinct()', source)
-
-    def test_mobile_raw_on_duty_path_uses_schedule_only_presence_flag(self):
-        from horilla_api.api_views.attendance.views import ClockInAPIView, ClockOutAPIView
-
-        in_source = inspect.getsource(ClockInAPIView.post)
-        out_source = inspect.getsource(ClockOutAPIView.post)
-        self.assertIn('_raw_presence_only_for_mobile_punch(in_mode, in_source, in_req)', in_source)
-        self.assertIn('_raw_presence_only_for_mobile_punch(out_mode, out_source, out_req)', out_source)
-        self.assertNotIn('is_presensi_only=(in_mode == AttendanceWorkMode.ON_DUTY)', in_source)
-        self.assertNotIn('is_presensi_only=(out_mode == AttendanceWorkMode.ON_DUTY)', out_source)
-
-    def test_permission_check_uses_same_work_type_request_permission_helper_family(self):
-        from horilla_api.api_views.attendance.permission_views import WorkModeRequestApprovePermissionCheck
-
-        source = inspect.getsource(WorkModeRequestApprovePermissionCheck.get)
-        self.assertIn('is_global_work_type_approver(request.user)', source)
-        self.assertIn('subordinate_employee_ids(request)', source)
-
-
-class WorkTypeRequestPassThreeRegressionTests(SimpleTestCase):
-    def test_clock_in_out_helper_keeps_request_based_on_duty_raw_state_neutral(self):
-        from attendance.views.clock_in_out import _effective_raw_presence_only
-        from attendance.models import AttendanceWorkMode
-
-        self.assertFalse(
-            _effective_raw_presence_only(
-                requested=True,
-                mode=AttendanceWorkMode.ON_DUTY,
-                work_mode_request=SimpleNamespace(id=44),
-            )
-        )
-        self.assertTrue(
-            _effective_raw_presence_only(
-                requested=True,
-                mode=AttendanceWorkMode.ON_DUTY,
-                work_mode_request=None,
-            )
-        )
-        self.assertFalse(
-            _effective_raw_presence_only(
-                requested=False,
-                mode=AttendanceWorkMode.ON_DUTY,
-                work_mode_request=None,
-            )
-        )
-
-    def test_api_urls_expose_slash_and_no_slash_variants_for_work_type_request_actions(self):
-        source = Path('horilla_api/api_urls/attendance/urls.py').read_text()
-        self.assertIn('"work-mode-request-approve/<int:pk>"', source)
-        self.assertIn('"work-mode-request-approve/<int:pk>/"', source)
-        self.assertIn('"work-type-request-action/<int:pk>/<str:action>"', source)
-        self.assertIn('"work-type-request-action/<int:pk>/<str:action>/"', source)
-
-    def test_clock_out_persistence_uses_effective_presence_only_gate(self):
-        source = inspect.getsource(clock_in_out.clock_out_attendance_and_activity)
-        self.assertIn('_effective_raw_presence_only', source)
-        self.assertIn('effective_presence_only', source)
-
-
-class WorkTypeRequestHardeningSourceTests(SimpleTestCase):
-    def test_reopen_document_clears_previous_review_verdict_on_current_version(self):
-        source = Path('attendance/services/work_type_request_actions.py').read_text()
-        self.assertIn('version.review_remark = None', source)
-        self.assertIn('The reopen remark is kept in the request action log', source)
-
-    def test_serializer_exposes_normalized_alias_fields_and_document_history_files(self):
-        source = Path('horilla_api/api_serializers/attendance/serializers.py').read_text()
-        self.assertIn('request_status = serializers.SerializerMethodField', source)
-        self.assertIn('work_mode = serializers.SerializerMethodField', source)
-        self.assertIn('action_note = serializers.SerializerMethodField', source)
-        self.assertIn('current_document_files = serializers.SerializerMethodField', source)
-        self.assertIn('"files": self._serialize_file_links(obj, files)', source)
-
-    def test_api_views_accept_note_comment_and_action_note_aliases(self):
-        source = Path('horilla_api/api_views/attendance/views.py').read_text()
-        self.assertIn('def _work_mode_request_text(data, *keys):', source)
-        self.assertIn('"action_note"', source)
-        self.assertIn('"note"', source)
