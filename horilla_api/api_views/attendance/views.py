@@ -2696,6 +2696,7 @@ class CheckingStatus(APIView):
                 "shift_start": None,
                 "shift_end": None,
                 "grace_time": 0,
+                "clock_in_type": "after",
                 "minimum_working_hour": None,
                 "check_in_cutoff_time": None,
                 "check_out_cutoff_time": None,
@@ -2796,6 +2797,7 @@ class CheckingStatus(APIView):
                 "shift_start": None,
                 "shift_end": None,
                 "grace_time": 0,
+                "clock_in_type": "after",
                 "minimum_working_hour": None,
                 "check_in_cutoff_time": None,
                 "check_out_cutoff_time": None,
@@ -2878,6 +2880,13 @@ class CheckingStatus(APIView):
 
 
         grace_seconds = int(rules.get("grace_seconds") or 0)
+        clock_in_type = str(rules.get("clock_in_type") or "after")
+        try:
+            resolved_grace = cio._resolve_grace_time(schedule, shift)
+            if resolved_grace and (getattr(resolved_grace, "allowed_clock_in", True) or grace_seconds > 0):
+                clock_in_type = getattr(resolved_grace, "clock_in_type", "after") or "after"
+        except Exception:
+            clock_in_type = str(rules.get("clock_in_type") or "after")
 
 
         cutoff_in_dt = rules.get("cutoff_in_dt")
@@ -3256,6 +3265,7 @@ class CheckingStatus(APIView):
             "shift_start": _sec_to_hhmm(start_time_sec),
             "shift_end": _sec_to_hhmm(end_time_sec),
             "grace_time": int(grace_seconds),
+            "clock_in_type": clock_in_type,
             "minimum_working_hour": _format_minimum_hour(min_hour),
 
             "check_in_cutoff_time": cutoff_in_dt.strftime("%H:%M") if cutoff_in_dt else None,
