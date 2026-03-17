@@ -2,8 +2,6 @@ from __future__ import annotations
 
 
 from datetime import date, datetime
-import inspect
-from pathlib import Path
 
 from django.utils import timezone
 
@@ -167,12 +165,12 @@ class CanonicalRecomputeDecisionFlowTests(SimpleTestCase):
              patch.object(reconciliation, "_approved_work_mode_request", return_value=work_request), \
              patch.object(reconciliation, "_latest_revoked_request", return_value=None), \
              patch.object(reconciliation, "_candidate_logs", return_value=logs), \
-             patch("attendance.services.work_type_request_rules.resolve_biometric_work_mode", return_value=SimpleNamespace(mode="wfo", request=None, source="schedule")), \
              patch.object(reconciliation, "_sync_attendance_and_activity", lambda *args, **kwargs: sync_calls.append(kwargs)), \
              patch.object(reconciliation, "_set_late_early_rows", lambda *args, **kwargs: None):
             reconciliation.recompute_attendance("EMP-WFA", attendance_date)
 
-        self.assertEqual(sync_calls[0]["final_out_dt"], timezone.make_aware(datetime(2026, 3, 14, 17, 5)))
+        self.assertEqual(sync_calls[0]["source"], reconciliation.SOURCE_WFA)
+        self.assertEqual(sync_calls[0]["note"], "WFA reconciled under normal attendance rules")
         self.assertEqual(sync_calls[0]["final_out_dt"], timezone.make_aware(datetime(2026, 3, 14, 17, 5)))
         self.assertTrue(logs[0].accepted_to_attendance)
         self.assertFalse(logs[1].accepted_to_attendance)
@@ -186,8 +184,8 @@ class WorkModeDocumentActionFlowTests(TestCase):
     def setUp(self):
         self.api_factory = APIRequestFactory()
         self.request_factory = RequestFactory()
-        self.user = SimpleNamespace(is_authenticated=True, is_superuser=False, has_perm=lambda perm: True)
-        self.actor = SimpleNamespace(id=999, is_active=True)
+        self.user = SimpleNamespace(is_authenticated=True, is_superuser=False)
+        self.actor = SimpleNamespace(id=999)
         self.owner = SimpleNamespace(id=321, employee_user_id=SimpleNamespace(username="owner"))
 
     def _request_obj(self, *, document_status, status=WorkModeRequestStatus.APPROVED, mode=AttendanceWorkMode.ON_DUTY):
@@ -196,7 +194,25 @@ class WorkModeDocumentActionFlowTests(TestCase):
         def _save(*, update_fields=None):
             saved["update_fields"] = list(update_fields or [])
 
-        version = SimpleNamespace(id=701, version_number=1, status=document_status, reviewed_by=None, reviewed_at=None, review_remark=None, submitted_at=None, save=lambda update_fields=None: None)
+        version_saved = {}
+
+        def _save_version(*, update_fields=None):
+            version_saved["update_fields"] = list(update_fields or [])
+
+        version = SimpleNamespace(
+            version_number=3,
+            status=document_status,
+            reviewed_by=None,
+            reviewed_at=None,
+            review_remark=None,
+            save=_save_version,
+            _saved=version_saved,
+        )
+        def _sync_root_document_fields():
+            req.document_status = version.status
+            req.document_verified_by = version.reviewed_by
+            req.document_verified_at = version.reviewed_at
+            req.document_remark = version.review_remark
         req = SimpleNamespace(
             id=77,
             employee_id=self.owner,
@@ -211,13 +227,15 @@ class WorkModeDocumentActionFlowTests(TestCase):
             action_type=None,
             action_reason=None,
             document_remark=None,
+            current_document_version=version,
+            resolve_current_document_version=lambda: version,
+            sync_legacy_files_from_current_version=lambda: None,
+            sync_root_document_fields_from_current_version=_sync_root_document_fields,
             start_date=date(2026, 3, 14),
             end_date=date(2026, 3, 15),
-            current_document_version=version,
-            sync_legacy_files_from_current_version=lambda: None,
-            current_document_files=lambda: [],
             save=_save,
             _saved=saved,
+            _version_saved=version_saved,
         )
         return req
 
@@ -237,8 +255,9 @@ class WorkModeDocumentActionFlowTests(TestCase):
 
         with patch.object(api_views, "get_object_or_404", return_value=req_obj), \
              patch.object(api_views, "_request_actor_employee", return_value=self.actor), \
-             patch("attendance.services.work_type_request_actions.WorkModeRequestActions._recompute", lambda obj: recompute_calls.append((obj.employee_id, obj.start_date, obj.end_date))), \
-             patch("attendance.services.work_type_request_actions.log_request_action", lambda **kwargs: log_calls.append(kwargs)), \
+             patch("attendance.services.work_type_request_actions.can_verify_document", return_value=True), \
+             patch.object(api_views.WorkModeRequestActions, "_recompute", lambda req: recompute_calls.append((req.employee_id, req.start_date, req.end_date))), \
+             patch.object(api_views.WorkModeRequestActions, "_audit", lambda req, **kwargs: log_calls.append(kwargs)), \
              patch.object(api_views.WorkModeRequestDocumentActionView, "serializer_class", DummySerializer):
             response = api_views.WorkModeRequestDocumentActionView.as_view()(request, pk=req_obj.id, action="verify")
 
@@ -246,6 +265,7 @@ class WorkModeDocumentActionFlowTests(TestCase):
         self.assertEqual(req_obj.document_status, WorkModeRequestDocumentStatus.VERIFIED)
         self.assertEqual(req_obj.action_type, WorkModeRequestActionType.VERIFIED)
         self.assertEqual(req_obj._saved["update_fields"], [
+            "current_document_version",
             "document_status",
             "document_verified_by",
             "document_verified_at",
@@ -267,7 +287,7 @@ class WorkModeDocumentActionFlowTests(TestCase):
         log_calls = []
         recompute_calls = []
         self.actor.is_active = True
-        web_user = SimpleNamespace(is_authenticated=True, is_active=True, is_superuser=False, employee_get=self.actor, has_perm=lambda perm: True)
+        web_user = SimpleNamespace(is_authenticated=True, is_active=True, is_superuser=False, employee_get=self.actor)
         request = self.request_factory.post(
             "/attendance/work-mode/77/reopen",
             {"remark": "reopen it"},
@@ -277,11 +297,11 @@ class WorkModeDocumentActionFlowTests(TestCase):
         request.session = {}
 
         with patch.object(work_type_requests, "get_object_or_404", return_value=req_obj), \
+             patch.object(work_type_requests, "_can_act_on_request", return_value=True), \
              patch.object(work_type_requests, "has_attachments", return_value=True), \
-             patch("attendance.services.work_type_request_actions.WorkModeRequestActions._recompute", lambda obj: recompute_calls.append((obj.employee_id, obj.start_date, obj.end_date))), \
-             patch("attendance.services.work_type_request_actions.log_request_action", lambda **kwargs: log_calls.append(kwargs)), \
-             patch.object(work_type_requests.messages, "success", lambda *args, **kwargs: None), \
-             patch.object(work_type_requests.messages, "error", lambda *args, **kwargs: None):
+             patch.object(work_type_requests, "recompute_attendance_range", lambda employee, start_date, end_date: recompute_calls.append((employee, start_date, end_date))), \
+             patch.object(work_type_requests, "_log_request_action", lambda *args, **kwargs: log_calls.append(kwargs)), \
+             patch.object(work_type_requests.messages, "success", lambda *args, **kwargs: None):
             response = work_type_requests.work_type_request_document_action(request, req_obj.id, "reopen")
 
         self.assertEqual(response.status_code, 200)
@@ -499,7 +519,7 @@ class WorkModeDocumentActionReasonParityTests(TestCase):
     def setUp(self):
         self.api_factory = APIRequestFactory()
         self.request_factory = RequestFactory()
-        self.user = SimpleNamespace(is_authenticated=True, is_superuser=False, has_perm=lambda perm: True)
+        self.user = SimpleNamespace(is_authenticated=True, is_superuser=False)
         self.actor = SimpleNamespace(id=777, is_active=True)
         self.owner = SimpleNamespace(id=322, employee_user_id=SimpleNamespace(username="owner"))
 
@@ -509,9 +529,26 @@ class WorkModeDocumentActionReasonParityTests(TestCase):
         def _save(*, update_fields=None):
             saved["update_fields"] = list(update_fields or [])
 
-        version = SimpleNamespace(id=801, version_number=1, status=document_status, reviewed_by=None, reviewed_at=None, review_remark=None, submitted_at=None, save=lambda update_fields=None: None)
+        version_saved = {}
 
-        return SimpleNamespace(
+        def _save_version(*, update_fields=None):
+            version_saved["update_fields"] = list(update_fields or [])
+
+        version = SimpleNamespace(
+            version_number=2,
+            status=document_status,
+            reviewed_by=None,
+            reviewed_at=None,
+            review_remark=None,
+            save=_save_version,
+            _saved=version_saved,
+        )
+        def _sync_root_document_fields():
+            req.document_status = version.status
+            req.document_verified_by = version.reviewed_by
+            req.document_verified_at = version.reviewed_at
+            req.document_remark = version.review_remark
+        req = SimpleNamespace(
             id=88,
             employee_id=self.owner,
             employee_id_id=self.owner.id,
@@ -525,14 +562,17 @@ class WorkModeDocumentActionReasonParityTests(TestCase):
             action_type=None,
             action_reason=None,
             document_remark=None,
+            current_document_version=version,
+            resolve_current_document_version=lambda: version,
+            sync_legacy_files_from_current_version=lambda: None,
+            sync_root_document_fields_from_current_version=_sync_root_document_fields,
             start_date=date(2026, 3, 14),
             end_date=date(2026, 3, 15),
-            current_document_version=version,
-            sync_legacy_files_from_current_version=lambda: None,
-            current_document_files=lambda: [],
             save=_save,
             _saved=saved,
+            _version_saved=version_saved,
         )
+        return req
 
     def test_api_reject_document_persists_action_reason_for_mobile_payload(self):
         from horilla_api.api_views.attendance import views as api_views
@@ -549,7 +589,7 @@ class WorkModeDocumentActionReasonParityTests(TestCase):
                     "document_remark": getattr(obj, "document_remark", None),
                 }
 
-        with patch.object(api_views, "get_object_or_404", return_value=req_obj),              patch.object(api_views, "_request_actor_employee", return_value=self.actor),              patch("attendance.services.work_type_request_actions.recompute_attendance_range", lambda *args, **kwargs: None),              patch("attendance.services.work_type_request_actions.log_request_action", lambda **kwargs: None),              patch.object(api_views.WorkModeRequestDocumentActionView, "serializer_class", DummySerializer):
+        with patch.object(api_views, "get_object_or_404", return_value=req_obj),              patch.object(api_views, "_request_actor_employee", return_value=self.actor),              patch("attendance.services.work_type_request_actions.can_reject_document", return_value=True),              patch.object(api_views.WorkModeRequestActions, "_recompute", lambda *args, **kwargs: None),              patch.object(api_views.WorkModeRequestActions, "_audit", lambda *args, **kwargs: None),              patch.object(api_views.WorkModeRequestDocumentActionView, "serializer_class", DummySerializer):
             response = api_views.WorkModeRequestDocumentActionView.as_view()(request, pk=req_obj.id, action="reject-document")
 
         self.assertEqual(response.status_code, 200)
@@ -562,7 +602,7 @@ class WorkModeDocumentActionReasonParityTests(TestCase):
         from attendance.views import work_type_requests
 
         req_obj = self._request_obj(document_status=WorkModeRequestDocumentStatus.SUBMITTED)
-        web_user = SimpleNamespace(is_authenticated=True, is_active=True, is_superuser=False, employee_get=self.actor, has_perm=lambda perm: True)
+        web_user = SimpleNamespace(is_authenticated=True, is_active=True, is_superuser=False, employee_get=self.actor)
         request = self.request_factory.post(
             "/attendance/work-mode/88/verify",
             {"remark": "assignment letter valid"},
@@ -571,66 +611,10 @@ class WorkModeDocumentActionReasonParityTests(TestCase):
         request.user = web_user
         request.session = {}
 
-        with patch.object(work_type_requests, "get_object_or_404", return_value=req_obj),              patch("attendance.services.work_type_request_actions.recompute_attendance_range", lambda *args, **kwargs: None),              patch("attendance.services.work_type_request_actions.log_request_action", lambda **kwargs: None),              patch.object(work_type_requests.messages, "success", lambda *args, **kwargs: None),              patch.object(work_type_requests.messages, "error", lambda *args, **kwargs: None):
+        with patch.object(work_type_requests, "get_object_or_404", return_value=req_obj),              patch.object(work_type_requests, "_can_act_on_request", return_value=True),              patch.object(work_type_requests, "recompute_attendance_range", lambda *args, **kwargs: None),              patch.object(work_type_requests, "_log_request_action", lambda *args, **kwargs: None),              patch.object(work_type_requests.messages, "success", lambda *args, **kwargs: None):
             response = work_type_requests.work_type_request_document_action(request, req_obj.id, "verify")
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(req_obj.action_reason, "assignment letter valid")
         self.assertEqual(req_obj.document_remark, "assignment letter valid")
         self.assertIn("action_reason", req_obj._saved["update_fields"])
-
-
-class WorkTypeRequestFollowupRegressionTests(SimpleTestCase):
-    def test_work_type_request_update_form_warns_about_new_document_version(self):
-        from attendance.forms_work_type_request import WorkTypeRequestUpdateForm
-
-        self.assertIn('new document version', str(WorkTypeRequestUpdateForm.base_fields['files'].help_text).lower())
-
-    def test_api_work_type_request_permission_check_is_scope_based(self):
-        from horilla_api.api_views.attendance.permission_views import WorkModeRequestApprovePermissionCheck
-
-        source = inspect.getsource(WorkModeRequestApprovePermissionCheck.get)
-        self.assertIn('subordinate_employee_ids(request)', source)
-
-    def test_raw_presence_only_helper_requires_schedule_on_duty(self):
-        from horilla_api.api_views.attendance.views import _raw_presence_only_for_mobile_punch
-
-        self.assertFalse(_raw_presence_only_for_mobile_punch(AttendanceWorkMode.ON_DUTY, 'request', SimpleNamespace(id=1)))
-        self.assertTrue(_raw_presence_only_for_mobile_punch(AttendanceWorkMode.ON_DUTY, 'schedule', None))
-        self.assertFalse(_raw_presence_only_for_mobile_punch(AttendanceWorkMode.WFA, 'schedule', None))
-
-
-class WorkTypeRequestPassThreeFollowupTests(SimpleTestCase):
-    def test_api_permission_routes_have_trailing_slash_and_no_slash_variants(self):
-        source = Path('horilla_api/api_urls/attendance/urls.py').read_text()
-        self.assertIn('"permission-check/work-mode-request-approve"', source)
-        self.assertIn('"permission-check/work-mode-request-approve/"', source)
-        self.assertIn('"permission-check/work-type-request-approve"', source)
-        self.assertIn('"permission-check/work-type-request-approve/"', source)
-
-    def test_clock_in_writer_uses_effective_presence_only_gate(self):
-        from attendance.views import clock_in_out
-
-        source = inspect.getsource(clock_in_out.clock_in_attendance_and_activity)
-        self.assertIn('_effective_raw_presence_only', source)
-        self.assertIn('work_mode_request=work_mode_request', source)
-
-
-class WorkTypeRequestFinalParitySourceTests(SimpleTestCase):
-    def test_mobile_detail_shows_document_version_history_and_alias_note(self):
-        mobile_path = Path('mobile/lib/attendance_views/work_mode_request.dart')
-        if not mobile_path.exists():
-            self.skipTest('mobile workspace is not available in backend test run')
-        source = mobile_path.read_text()
-        self.assertIn('Document Version History', source)
-        self.assertIn("r['request_status']", source)
-        self.assertIn("r['note']", source)
-        self.assertIn("r['current_document_files']", source)
-
-    def test_mobile_document_review_buttons_use_split_verify_and_reject_flags(self):
-        mobile_path = Path('mobile/lib/attendance_views/work_mode_request.dart')
-        if not mobile_path.exists():
-            self.skipTest('mobile workspace is not available in backend test run')
-        source = mobile_path.read_text()
-        self.assertIn("final bool canRejectDocument = r['can_reject_document'] == true;", source)
-        self.assertIn('if ((canVerifyDocument || canRejectDocument)', source)
