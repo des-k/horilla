@@ -350,6 +350,12 @@ def coerce_work_type_payload(data: dict) -> Tuple[Optional[str], dict]:
 
 def has_attachments(req: WorkModeRequest) -> bool:
     try:
+        current = getattr(req, "current_document_version", None)
+        if current is not None:
+            return current.file_links.exists()
+    except Exception:
+        pass
+    try:
         return req.files.exists()
     except Exception:
         return False
@@ -400,11 +406,11 @@ def auto_reject_wfa_waiting_for_date(
             due_dt = cutoff_in_dt
 
         if due_dt and now_dt > due_dt:
-            req.status = WorkModeRequestStatus.REJECTED
-            req.reason_code = _reject_reason_for_scope(req.scope)
-            req.save(update_fields=["status", "reason_code"])
-            apply_rejection_to_attendance(req)
-            rejected += 1
+            from attendance.services.work_type_request_actions import WorkModeRequestActions
+
+            result = WorkModeRequestActions._auto_reject_for_cutoff(req, actor=None, now_dt=now_dt)
+            if result is not None:
+                rejected += 1
 
     return rejected
 
