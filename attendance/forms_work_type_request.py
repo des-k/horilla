@@ -99,6 +99,7 @@ class WorkTypeRequestCreateForm(forms.ModelForm):
     files = MultipleFileField(
         label="Attachments",
         required=False,
+        help_text="For ON DUTY, attachments can be uploaded now or later. Later uploads create a new document version for review.",
         widget=MultipleClearableFileInput(attrs={"multiple": True, "class": "oh-input w-100"}),
     )
 
@@ -200,6 +201,7 @@ class WorkTypeRequestUpdateForm(forms.Form):
     files = MultipleFileField(
         label="Attachments",
         required=False,
+        help_text="Uploading files here creates a new document version and sends it back for review. Old versions stay in history.",
         widget=MultipleClearableFileInput(attrs={"multiple": True, "class": "oh-input w-100"}),
     )
 
