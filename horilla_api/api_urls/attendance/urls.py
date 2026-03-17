@@ -66,14 +66,27 @@ urlpatterns = [
     path("today-attendance/", TodayAttendance.as_view(), name="api-"),
     path("offline-employees/count/", OfflineEmployeesCountView.as_view(), name="api-"),
     path("offline-employees/list/", OfflineEmployeesListView.as_view(), name="api-"),
-    path("permission-check/attendance", AttendancePermissionCheck.as_view()),
+    path("permission-check/attendance", AttendancePermissionCheck.as_view(), name="api-permission-check-attendance-noslash"),
+    path("permission-check/attendance/", AttendancePermissionCheck.as_view(), name="api-permission-check-attendance"),
     path(
         "permission-check/attendance-request-approve",
         AttendanceRequestApprovePermissionCheck.as_view(),
+        name="api-permission-check-attendance-request-approve-noslash",
+    ),
+    path(
+        "permission-check/attendance-request-approve/",
+        AttendanceRequestApprovePermissionCheck.as_view(),
+        name="api-permission-check-attendance-request-approve",
     ),
     path(
         "permission-check/work-mode-request-approve",
         WorkModeRequestApprovePermissionCheck.as_view(),
+        name="api-permission-check-work-mode-request-approve-noslash",
+    ),
+    path(
+        "permission-check/work-mode-request-approve/",
+        WorkModeRequestApprovePermissionCheck.as_view(),
+        name="api-permission-check-work-mode-request-approve",
     ),
 
     # Work mode requests (WFA / On Duty)
@@ -93,6 +106,11 @@ urlpatterns = [
         name="api-work-mode-request-detail",
     ),
     path(
+        "work-mode-request/<int:pk>/",
+        WorkModeRequestView.as_view(),
+        name="api-work-mode-request-detail-slash",
+    ),
+    path(
         "work-mode-request-approvals/",
         WorkModeRequestApprovalsView.as_view(),
         name="api-work-mode-request-approvals",
@@ -108,9 +126,19 @@ urlpatterns = [
         name="api-work-mode-request-approve",
     ),
     path(
+        "work-mode-request-approve/<int:pk>/",
+        WorkModeRequestApproveView.as_view(),
+        name="api-work-mode-request-approve-slash",
+    ),
+    path(
         "work-mode-request-reject/<int:pk>",
         WorkModeRequestRejectView.as_view(),
         name="api-work-mode-request-reject",
+    ),
+    path(
+        "work-mode-request-reject/<int:pk>/",
+        WorkModeRequestRejectView.as_view(),
+        name="api-work-mode-request-reject-slash",
     ),
     path(
         "work-mode-request-cancel/<int:pk>",
@@ -118,9 +146,19 @@ urlpatterns = [
         name="api-work-mode-request-cancel",
     ),
     path(
+        "work-mode-request-cancel/<int:pk>/",
+        WorkModeRequestCancelView.as_view(),
+        name="api-work-mode-request-cancel-slash",
+    ),
+    path(
         "work-mode-request-action/<int:pk>/<str:action>",
         WorkModeRequestDocumentActionView.as_view(),
         name="api-work-mode-request-action",
+    ),
+    path(
+        "work-mode-request-action/<int:pk>/<str:action>/",
+        WorkModeRequestDocumentActionView.as_view(),
+        name="api-work-mode-request-action-slash",
     ),
 
 
@@ -128,6 +166,12 @@ urlpatterns = [
     path(
         "permission-check/work-type-request-approve",
         WorkModeRequestApprovePermissionCheck.as_view(),
+        name="api-permission-check-work-type-request-approve-noslash",
+    ),
+    path(
+        "permission-check/work-type-request-approve/",
+        WorkModeRequestApprovePermissionCheck.as_view(),
+        name="api-permission-check-work-type-request-approve",
     ),
     path(
         "work-type-request/",
@@ -145,6 +189,11 @@ urlpatterns = [
         name="api-work-type-request-detail",
     ),
     path(
+        "work-type-request/<int:pk>/",
+        WorkModeRequestView.as_view(),
+        name="api-work-type-request-detail-slash",
+    ),
+    path(
         "work-type-request-approvals/",
         WorkModeRequestApprovalsView.as_view(),
         name="api-work-type-request-approvals",
@@ -160,9 +209,19 @@ urlpatterns = [
         name="api-work-type-request-approve",
     ),
     path(
+        "work-type-request-approve/<int:pk>/",
+        WorkModeRequestApproveView.as_view(),
+        name="api-work-type-request-approve-slash",
+    ),
+    path(
         "work-type-request-reject/<int:pk>",
         WorkModeRequestRejectView.as_view(),
         name="api-work-type-request-reject",
+    ),
+    path(
+        "work-type-request-reject/<int:pk>/",
+        WorkModeRequestRejectView.as_view(),
+        name="api-work-type-request-reject-slash",
     ),
     path(
         "work-type-request-cancel/<int:pk>",
@@ -170,9 +229,19 @@ urlpatterns = [
         name="api-work-type-request-cancel",
     ),
     path(
+        "work-type-request-cancel/<int:pk>/",
+        WorkModeRequestCancelView.as_view(),
+        name="api-work-type-request-cancel-slash",
+    ),
+    path(
         "work-type-request-action/<int:pk>/<str:action>",
         WorkModeRequestDocumentActionView.as_view(),
         name="api-work-type-request-action",
+    ),
+    path(
+        "work-type-request-action/<int:pk>/<str:action>/",
+        WorkModeRequestDocumentActionView.as_view(),
+        name="api-work-type-request-action-slash",
     ),
 
     path("mobile-attendance-settings/", MobileAttendanceSettingsAPIView.as_view(), name="api-mobile-attendance-settings"),
