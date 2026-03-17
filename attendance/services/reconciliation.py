@@ -768,7 +768,8 @@ def recompute_attendance(employee, attendance_date: date) -> ReconciliationResul
         for want, session_req in (("in", final_in_request), ("out", final_out_request)):
             if not session_req or source == SOURCE_ATTENDANCE_REQUEST or session_req.mode != AttendanceWorkMode.ON_DUTY:
                 continue
-            document_status = getattr(session_req, "document_status", None)
+            resolver = getattr(session_req, "effective_document_status", None)
+            document_status = resolver() if callable(resolver) else getattr(session_req, "document_status", None)
             if document_status == WorkModeRequestDocumentStatus.VERIFIED:
                 if want == "in":
                     grant_on_duty_in_final = True
