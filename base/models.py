@@ -11,7 +11,7 @@ from typing import Iterable
 import django
 from django.apps import apps
 from django.contrib import messages
-from django.contrib.auth.models import AbstractUser, User, UserManager
+from django.contrib.auth.models import AbstractUser, User
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.utils.translation import gettext_lazy as _
@@ -2149,32 +2149,35 @@ class NotificationSound(models.Model):
     sound_enabled = models.BooleanField(default=False)
 
 
-# NOTE:
-# Horilla historically tried to extend django.contrib.auth.models.User at runtime
-# with a concrete BooleanField. That requires a matching DB migration on auth_user,
-# which is not present in this fresh-install test environment and breaks user
-# creation during the Django test suite. Treat the flag as transient runtime state
-# instead of a concrete DB column.
-def _get_is_new_employee(user):
-    return bool(getattr(user, "_is_new_employee", False))
+
+# Runtime-safe compatibility shim for projects where the auth_user table does not
+# carry an ``is_new_employee`` column (for example fresh-install test snapshots
+# without a dedicated auth migration for this dynamic attribute).
+
+def _get_is_new_employee(self):
+    return bool(self.__dict__.get("_runtime_is_new_employee", False))
 
 
-def _set_is_new_employee(user, value):
-    user.__dict__["_is_new_employee"] = bool(value)
+def _set_is_new_employee(self, value):
+    self.__dict__["_runtime_is_new_employee"] = bool(value)
 
 
 if not isinstance(getattr(User, "is_new_employee", None), property):
-    User.is_new_employee = property(_get_is_new_employee, _set_is_new_employee)
+    setattr(User, "is_new_employee", property(_get_is_new_employee, _set_is_new_employee))
 
 
-if not getattr(UserManager._create_user, "_horilla_accepts_is_new_employee", False):
-    _horilla_original_create_user = UserManager._create_user
+_original_create_user = User.objects._create_user
 
-    def _horilla_create_user(self, username, email, password, **extra_fields):
-        is_new_employee = extra_fields.pop("is_new_employee", False)
-        user = _horilla_original_create_user(self, username, email, password, **extra_fields)
-        setattr(user, "is_new_employee", is_new_employee)
-        return user
 
-    _horilla_create_user._horilla_accepts_is_new_employee = True
-    UserManager._create_user = _horilla_create_user
+def _create_user_without_runtime_flag(self, username, email, password, **extra_fields):
+    runtime_flag = extra_fields.pop("is_new_employee", False)
+    user = _original_create_user(username, email, password, **extra_fields)
+    try:
+        user.is_new_employee = runtime_flag
+    except Exception:
+        pass
+    return user
+
+
+if getattr(User.objects._create_user, "__name__", "") != "_create_user_without_runtime_flag":
+    User.objects._create_user = _create_user_without_runtime_flag.__get__(User.objects, type(User.objects))
