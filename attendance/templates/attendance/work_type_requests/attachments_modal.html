@@ -20,17 +20,59 @@
     </small>
   </div>
 
-  {% if files %}
+  {% if versions %}
+    {% for item in versions %}
+      <div class="oh-card mb-2">
+        <div class="oh-card__body">
+          <div class="d-flex align-items-center justify-content-between mb-2">
+            <div>
+              <strong>{% trans "Document version" %} v{{ item.version.version_number }}</strong>
+              {% if item.version.is_current %}
+                <span class="oh-badge oh-badge--info oh-badge--small oh-badge--round ms-2">{% trans "Current" %}</span>
+              {% endif %}
+            </div>
+            <span class="oh-badge oh-badge--secondary oh-badge--small oh-badge--round">{{ item.version.get_status_display }}</span>
+          </div>
+          <div class="text-muted" style="font-size: 12px; margin-bottom: 8px;">
+            {% trans "Submitted" %}: {{ item.version.submitted_at|date:"Y-m-d H:i" }}
+            {% if item.version.reviewed_at %}
+              <br />{% trans "Reviewed" %}: {{ item.version.reviewed_at|date:"Y-m-d H:i" }}
+            {% endif %}
+            {% if item.version.review_remark %}
+              <br />{% trans "Remark" %}: {{ item.version.review_remark }}
+            {% endif %}
+          </div>
+          {% if item.links %}
+            <ul class="list-unstyled mb-0">
+              {% for file in item.links %}
+                <li class="d-flex align-items-center justify-content-between py-2" style="border-bottom: 1px solid rgba(0,0,0,.06);">
+                  <div class="d-flex align-items-center gap-2">
+                    <ion-icon name="document-attach-outline"></ion-icon>
+                    <span class="text-truncate" style="max-width: 360px;">{{ file.file_name }}</span>
+                  </div>
+                  <a class="oh-btn oh-btn--light-bkg" href="{{ file.url }}" target="_blank" rel="noopener">
+                    <ion-icon name="open-outline" class="me-1"></ion-icon>{% trans "Open" %}
+                  </a>
+                </li>
+              {% endfor %}
+            </ul>
+          {% else %}
+            <div class="text-muted">{% trans "No files in this version." %}</div>
+          {% endif %}
+        </div>
+      </div>
+    {% endfor %}
+  {% elif legacy_links %}
     <div class="oh-card">
       <div class="oh-card__body">
         <ul class="list-unstyled mb-0">
-          {% for f in files %}
+          {% for file in legacy_links %}
             <li class="d-flex align-items-center justify-content-between py-2" style="border-bottom: 1px solid rgba(0,0,0,.06);">
               <div class="d-flex align-items-center gap-2">
                 <ion-icon name="document-attach-outline"></ion-icon>
-                <span class="text-truncate" style="max-width: 360px;">{{ f.file.name|default:_('Attachment') }}</span>
+                <span class="text-truncate" style="max-width: 360px;">{{ file.file_name }}</span>
               </div>
-              <a class="oh-btn oh-btn--light-bkg" href="{{ f.file.url }}" target="_blank" rel="noopener">
+              <a class="oh-btn oh-btn--light-bkg" href="{{ file.url }}" target="_blank" rel="noopener">
                 <ion-icon name="open-outline" class="me-1"></ion-icon>{% trans "Open" %}
               </a>
             </li>
