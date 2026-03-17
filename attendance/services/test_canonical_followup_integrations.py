@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-
+from pathlib import Path
 from datetime import date, datetime
 
 from django.utils import timezone
@@ -126,11 +126,10 @@ class CanonicalRecomputeDecisionFlowTests(SimpleTestCase):
 
     def test_wfa_latest_checkout_wins_and_older_checkout_becomes_superseded(self):
         attendance_date = date(2026, 3, 14)
-        employee = SimpleNamespace(id=321, employee_work_info=SimpleNamespace())
         attendance = SimpleNamespace(attendance_date=attendance_date, save=lambda *args, **kwargs: None)
         activity = SimpleNamespace(save=lambda *args, **kwargs: None)
         ctx = reconciliation.ShiftContext(
-            employee=employee,
+            employee="EMP-WFA",
             attendance_date=attendance_date,
             day=None,
             shift=None,
@@ -164,12 +163,13 @@ class CanonicalRecomputeDecisionFlowTests(SimpleTestCase):
              patch.object(reconciliation, "_resolve_shift_context", return_value=ctx), \
              patch.object(reconciliation, "_resolve_leave_context", return_value=leave_ctx), \
              patch.object(reconciliation, "_approved_work_mode_request", return_value=work_request), \
-             patch.object(reconciliation, "_approved_work_mode_request_for_session", return_value=work_request), \
+             patch.object(reconciliation, "_approved_work_mode_request_for_session", side_effect=[work_request, work_request]), \
              patch.object(reconciliation, "_latest_revoked_request", return_value=None), \
              patch.object(reconciliation, "_candidate_logs", return_value=logs), \
              patch.object(reconciliation, "_sync_attendance_and_activity", lambda *args, **kwargs: sync_calls.append(kwargs)), \
-             patch.object(reconciliation, "_set_late_early_rows", lambda *args, **kwargs: None):
-            reconciliation.recompute_attendance(employee, attendance_date)
+             patch.object(reconciliation, "_set_late_early_rows", lambda *args, **kwargs: None), \
+             patch("attendance.services.work_type_request_rules.resolve_biometric_work_mode", return_value=SimpleNamespace(mode=AttendanceWorkMode.WFA)):
+            reconciliation.recompute_attendance("EMP-WFA", attendance_date)
 
         self.assertEqual(sync_calls[0]["source"], reconciliation.SOURCE_WFA)
         self.assertEqual(sync_calls[0]["note"], "WFA reconciled under normal attendance rules")
@@ -299,6 +299,7 @@ class WorkModeDocumentActionFlowTests(TestCase):
         request.session = {}
 
         with patch.object(work_type_requests, "get_object_or_404", return_value=req_obj), \
+             patch.object(work_type_requests, "_request_actor_employee", return_value=self.actor), \
              patch("attendance.services.work_type_request_actions.can_reopen_document", return_value=True), \
              patch.object(work_type_requests.WorkModeRequestActions, "_recompute", lambda req: recompute_calls.append((req.employee_id, req.start_date, req.end_date))), \
              patch.object(work_type_requests.WorkModeRequestActions, "_audit", lambda req, **kwargs: log_calls.append(kwargs)), \
@@ -612,10 +613,46 @@ class WorkModeDocumentActionReasonParityTests(TestCase):
         request.user = web_user
         request.session = {}
 
-        with patch.object(work_type_requests, "get_object_or_404", return_value=req_obj),              patch("attendance.services.work_type_request_actions.can_verify_document", return_value=True),              patch.object(work_type_requests.WorkModeRequestActions, "_recompute", lambda *args, **kwargs: None),              patch.object(work_type_requests.WorkModeRequestActions, "_audit", lambda *args, **kwargs: None),              patch.object(work_type_requests.messages, "success", lambda *args, **kwargs: None):
+        with patch.object(work_type_requests, "get_object_or_404", return_value=req_obj),              patch.object(work_type_requests, "_request_actor_employee", return_value=self.actor),              patch("attendance.services.work_type_request_actions.can_verify_document", return_value=True),              patch.object(work_type_requests.WorkModeRequestActions, "_recompute", lambda *args, **kwargs: None),              patch.object(work_type_requests.WorkModeRequestActions, "_audit", lambda *args, **kwargs: None),              patch.object(work_type_requests.messages, "success", lambda *args, **kwargs: None):
             response = work_type_requests.work_type_request_document_action(request, req_obj.id, "verify")
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(req_obj.action_reason, "assignment letter valid")
         self.assertEqual(req_obj.document_remark, "assignment letter valid")
         self.assertIn("action_reason", req_obj._saved["update_fields"])
+
+
+class WorkTypeRequestFocusedParityTests(TestCase):
+    def test_wfa_create_request_is_set_to_waiting_for_approval(self):
+        source = Path('attendance/services/work_type_request_actions.py').read_text()
+        self.assertIn('if mode == AttendanceWorkMode.WFA:', source)
+        self.assertIn('req.status = WorkModeRequestStatus.WAITING_FOR_APPROVAL', source)
+
+    def test_api_rejects_wfa_upload_after_approval_via_action_service_guard(self):
+        from horilla_api.api_views.attendance import views as api_views
+
+        req = SimpleNamespace(
+            id=55,
+            status=WorkModeRequestStatus.APPROVED,
+            mode=AttendanceWorkMode.WFA,
+            employee_id=SimpleNamespace(employee_user_id=SimpleNamespace(username='owner')),
+            employee_id_id=1,
+        )
+        request = APIRequestFactory().put('/api/work-mode/55', {}, format='multipart')
+        request.FILES['file'] = SimpleNamespace(name='evidence.pdf')
+        force_authenticate(request, user=SimpleNamespace(is_authenticated=True, username='owner'))
+
+        with patch.object(api_views, 'get_object_or_404', return_value=req), \
+             patch.object(api_views, '_request_actor_employee', return_value=SimpleNamespace(id=1)), \
+             patch.object(api_views.WorkModeRequestView, '_collect_uploaded_files', return_value=[SimpleNamespace(name='evidence.pdf')]):
+            response = api_views.WorkModeRequestView.as_view()(request, pk=req.id)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('cannot upload documents', str(response.data).lower())
+
+    def test_serializer_wfa_upload_flag_is_waiting_only(self):
+        source = Path('horilla_api/api_serializers/attendance/serializers.py').read_text()
+        self.assertIn('get_can_upload_document', source)
+        self.assertIn('WorkModeRequestStatus.WAITING_FOR_APPROVAL', source)
+        self.assertIn('get_can_verify_document', source)
+
