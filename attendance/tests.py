@@ -2,6 +2,7 @@ from io import BytesIO
 import datetime as dt
 import os
 import unittest
+from unittest import SkipTest
 
 from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -166,10 +167,10 @@ class AttendanceSaveUpdateFieldsTests(unittest.TestCase):
         super_save_mock.assert_called_once()
 
 from datetime import date
-from unittest import SkipTest
 from unittest.mock import patch
 
 from django.contrib.auth.models import User
+from django.db import connection
 from django.db import models as django_models
 from django.test import TestCase
 from rest_framework.test import APIRequestFactory, force_authenticate
@@ -182,11 +183,8 @@ from horilla_api.api_views.attendance.views import AttendanceRequestCancelView
 class AttendanceRequestCancelAuditLogTests(TestCase):
     @classmethod
     def setUpTestData(cls):
-        from django.db import connection
-        existing = set(connection.introspection.table_names())
-        required = {"auth_user", "employee_employee", "attendance_attendance"}
-        if not required.issubset(existing):
-            raise SkipTest("required attendance tables are not available in this test environment")
+        if "employee_employee" not in connection.introspection.table_names():
+            raise SkipTest("employee_employee table is unavailable in this test snapshot")
         cls.factory = APIRequestFactory()
         cls.view = AttendanceRequestCancelView.as_view()
         cls.owner_user = User.objects.create_user(
