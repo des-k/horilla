@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from django.test import SimpleTestCase
 
-from attendance.models import WorkModeRequestRejectReasonCode, WorkModeRequestStatus
+from attendance.models import WorkModeRequestDocumentStatus, WorkModeRequestRejectReasonCode, WorkModeRequestScope, WorkModeRequestStatus
 from attendance.services import work_type_request_rules
 
 
@@ -51,3 +51,42 @@ class WorkTypeRequestRuleTests(SimpleTestCase):
         eff = work_type_request_rules.EffectiveWorkType(mode="on_duty", source="schedule", request=None)
 
         self.assertTrue(work_type_request_rules.punch_allowed(eff))
+
+
+class WorkTypeRequestVersionedDocumentRuleTests(SimpleTestCase):
+    databases = {"default"}
+    def test_has_attachments_prefers_current_document_version(self):
+        version = SimpleNamespace(file_links=SimpleNamespace(exists=lambda: True))
+        req = SimpleNamespace(current_document_version=version, files=SimpleNamespace(exists=lambda: False))
+
+        self.assertTrue(work_type_request_rules.has_attachments(req))
+
+    def test_auto_reject_waiting_for_date_delegates_to_action_service(self):
+        req = SimpleNamespace(id=7, scope=WorkModeRequestScope.IN)
+        employee = SimpleNamespace(id=10)
+        from datetime import datetime
+        now_dt = datetime(2026, 3, 16, 9, 0)
+        cutoff = datetime(2026, 3, 16, 8, 0)
+        calls = []
+
+        def _capture(target_req, *, actor=None, now_dt=None):
+            calls.append((target_req, actor, now_dt))
+            return 'ok'
+
+        class FakeQS:
+            def __iter__(self):
+                return iter([req])
+
+        manager = SimpleNamespace(select_for_update=lambda: SimpleNamespace(filter=lambda **kwargs: FakeQS()))
+
+        with patch('attendance.models.WorkModeRequest.objects', manager),              patch('attendance.services.work_type_request_actions.WorkModeRequestActions._auto_reject_for_cutoff', side_effect=_capture):
+            result = work_type_request_rules.auto_reject_wfa_waiting_for_date(
+                employee=employee,
+                target_date=date(2026, 3, 16),
+                now_dt=now_dt,
+                cutoff_in_dt=cutoff,
+                cutoff_out_dt=None,
+            )
+
+        self.assertEqual(result, 1)
+        self.assertEqual(calls, [(req, None, now_dt)])
