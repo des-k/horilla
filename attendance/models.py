@@ -89,8 +89,12 @@ class GraceClockInType(models.TextChoices):
 
 class WorkModeRequestActionType(models.TextChoices):
     """Audit action applied to a work-mode request."""
+    CREATED = "CREATED", _("Created")
+    UPDATED = "UPDATED", _("Updated")
+    DOCUMENT_UPLOADED = "DOCUMENT_UPLOADED", _("Document Uploaded")
     APPROVED = "APPROVED", _("Approved")
     REJECTED = "REJECTED", _("Rejected")
+    AUTO_REJECTED = "AUTO_REJECTED", _("Auto Rejected")
     DOCUMENT_REJECTED = "DOCUMENT_REJECTED", _("Document Rejected")
     VERIFIED = "VERIFIED", _("Verified")
     REVOKED = "REVOKED", _("Revoked")
@@ -470,7 +474,7 @@ class WorkModeRequest(HorillaModel):
     )
     action_at = models.DateTimeField(null=True, blank=True, verbose_name=_("Action At"))
     action_type = models.CharField(
-        max_length=16,
+        max_length=32,
         null=True,
         blank=True,
         choices=WorkModeRequestActionType.choices,
@@ -531,6 +535,32 @@ class WorkModeRequest(HorillaModel):
     def is_document_locked(self) -> bool:
         return self.document_status == WorkModeRequestDocumentStatus.VERIFIED
 
+    @property
+    def current_document_version(self):
+        try:
+            return self.document_versions.filter(is_current=True).select_related(
+                "reviewed_by", "submitted_by"
+            ).prefetch_related("file_links__attendance_request_file").first()
+        except Exception:
+            return None
+
+    def current_document_files(self):
+        version = self.current_document_version
+        if version is None:
+            return []
+        try:
+            return [link.attendance_request_file for link in version.file_links.select_related("attendance_request_file")]
+        except Exception:
+            return []
+
+    def sync_legacy_files_from_current_version(self):
+        """Keep legacy M2M in sync with current version only for backwards compatibility."""
+        try:
+            current_ids = [obj.id for obj in self.current_document_files() if getattr(obj, "id", None)]
+            self.files.set(current_ids)
+        except Exception:
+            pass
+
     @staticmethod
     def _employee_display_name(employee) -> str | None:
         if not employee:
@@ -589,6 +619,74 @@ class WorkModeRequest(HorillaModel):
             raise ValidationError({"mode": _("WFO should not be requested. Use WFA or On Duty.")})
 
 
+class WorkModeRequestDocumentVersion(HorillaModel):
+    work_mode_request = models.ForeignKey(
+        "attendance.WorkModeRequest",
+        on_delete=models.CASCADE,
+        related_name="document_versions",
+        verbose_name=_("Work Mode Request"),
+    )
+    version_number = models.PositiveIntegerField(default=1, verbose_name=_("Version Number"))
+    is_current = models.BooleanField(default=False, verbose_name=_("Current Version"))
+    status = models.CharField(
+        max_length=32,
+        choices=WorkModeRequestDocumentStatus.choices,
+        default=WorkModeRequestDocumentStatus.SUBMITTED,
+        verbose_name=_("Review Status"),
+    )
+    submitted_by = models.ForeignKey(
+        Employee,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="submitted_work_mode_document_versions",
+        verbose_name=_("Submitted By"),
+    )
+    submitted_at = models.DateTimeField(default=timezone.now, verbose_name=_("Submitted At"))
+    reviewed_by = models.ForeignKey(
+        Employee,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="reviewed_work_mode_document_versions",
+        verbose_name=_("Reviewed By"),
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True, verbose_name=_("Reviewed At"))
+    review_remark = models.TextField(null=True, blank=True, verbose_name=_("Review Remark"))
+
+    class Meta:
+        ordering = ["-version_number", "-id"]
+        unique_together = (("work_mode_request", "version_number"),)
+        verbose_name = _("Work Mode Request Document Version")
+        verbose_name_plural = _("Work Mode Request Document Versions")
+
+    def __str__(self):
+        return f"{self.work_mode_request_id} - v{self.version_number}"
+
+
+class WorkModeRequestDocumentVersionFile(HorillaModel):
+    version = models.ForeignKey(
+        "attendance.WorkModeRequestDocumentVersion",
+        on_delete=models.CASCADE,
+        related_name="file_links",
+        verbose_name=_("Document Version"),
+    )
+    attendance_request_file = models.ForeignKey(
+        "attendance.AttendanceRequestFile",
+        on_delete=models.PROTECT,
+        related_name="work_mode_document_links",
+        verbose_name=_("Attachment"),
+    )
+
+    class Meta:
+        ordering = ["id"]
+        verbose_name = _("Work Mode Request Document File")
+        verbose_name_plural = _("Work Mode Request Document Files")
+
+    def __str__(self):
+        return f"{self.version_id} - {self.attendance_request_file_id}"
+
+
 class AttendanceRequestAuditLog(HorillaModel):
     attendance = models.ForeignKey(
         "attendance.Attendance",
@@ -618,6 +716,7 @@ class AttendanceRequestAuditLog(HorillaModel):
     old_status = models.CharField(max_length=64, null=True, blank=True, verbose_name=_("Old Status"))
     new_status = models.CharField(max_length=64, null=True, blank=True, verbose_name=_("New Status"))
     remark = models.TextField(null=True, blank=True, verbose_name=_("Remark"))
+    metadata = models.JSONField(null=True, blank=True, verbose_name=_("Metadata"))
     acted_at = models.DateTimeField(default=timezone.now, verbose_name=_("Acted At"))
 
     class Meta:
