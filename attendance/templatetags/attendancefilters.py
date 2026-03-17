@@ -241,3 +241,46 @@ def get_item(list, i):
         return list[i]
     except:
         return None
+
+
+@register.filter(name="attendance_flex_display")
+def attendance_flex_display(attendance):
+    """Return compact flex-in label for an Attendance row.
+
+    Output examples:
+      - Flex In +30m
+      - Flex In ±30m
+    """
+    try:
+        if not attendance:
+            return ""
+
+        shift = getattr(attendance, "shift_id", None)
+        if not shift:
+            return ""
+
+        day = getattr(attendance, "attendance_day", None)
+        attendance_date = getattr(attendance, "attendance_date", None)
+        schedule = None
+        if day is not None:
+            schedule = EmployeeShiftSchedule.objects.filter(shift_id=shift, day=day).first()
+        elif attendance_date is not None:
+            day_name = attendance_date.strftime("%A").lower()
+            schedule = EmployeeShiftSchedule.objects.filter(shift_id=shift, day__day=day_name).first()
+
+        from attendance.views import clock_in_out as cio
+
+        grace = cio._resolve_grace_time(schedule, shift)
+        if not grace or not getattr(grace, "allowed_clock_in", False):
+            return ""
+
+        seconds = int(getattr(grace, "allowed_time_in_secs", 0) or 0)
+        minutes = int(seconds // 60)
+        if minutes <= 0:
+            return ""
+
+        clock_in_type = str(getattr(grace, "clock_in_type", "after") or "after").strip().lower()
+        symbol = "±" if clock_in_type == "before_after" else "+"
+        return f"Flex In {symbol}{minutes}m"
+    except Exception:
+        return ""
