@@ -597,7 +597,7 @@ def attendance_request_shift_info(request):
                     shift_end = sched.end_time.strftime("%H:%M")
 
             # Flexi-in minutes from grace time (clock-in)
-            grace = getattr(shift, "grace_time_id", None)
+            grace = cio._resolve_grace_time(sched, shift)
             if grace and getattr(grace, "allowed_clock_in", False):
                 secs = int(getattr(grace, "allowed_time_in_secs", 0) or 0)
                 flexi_min = str(secs // 60)
