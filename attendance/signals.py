@@ -3,7 +3,7 @@
 from datetime import datetime, timedelta
 
 from django.apps import apps
-from django.db.models.signals import post_delete, post_migrate, post_save, pre_delete, pre_save
+from django.db.models.signals import post_delete, post_migrate, post_save, pre_delete
 from django.dispatch import receiver
 from django.utils.translation import gettext_lazy as _
 
@@ -11,7 +11,6 @@ from attendance.methods.utils import strtime_seconds
 from attendance.models import Attendance, AttendanceGeneralSetting, WorkModeRequest, WorkRecords
 from base.models import Company, PenaltyAccounts
 from employee.models import Employee
-from attendance.services.reconciliation import recompute_attendance_range
 from horilla.methods import get_horilla_model_class
 
 
@@ -220,27 +219,25 @@ def create_missing_work_records(sender, **kwargs):
                 )
 
 
-@receiver(pre_save, sender=WorkModeRequest)
-def capture_work_mode_request_previous_range(sender, instance, **kwargs):
-    instance._previous_recompute_window = None
-    if not getattr(instance, "pk", None):
-        return
-    previous = sender.objects.filter(pk=instance.pk).first()
-    if previous:
-        instance._previous_recompute_window = (previous.start_date, previous.end_date)
-
-
 @receiver(post_save, sender=WorkModeRequest)
-def recompute_work_mode_request_range(sender, instance, **kwargs):
-    """No-op on purpose.
-
-    Work Type Request recompute is now owned by the centralized action service so a
-    single business action produces only one synchronous recompute.
+def work_mode_request_post_save_noop(sender, instance, **kwargs):
     """
-    return None
+    WorkModeRequest attendance recompute is handled explicitly by the
+    work-type request service/action flow.
+
+    Keep this signal as a no-op so model saves do not trigger duplicate
+    recompute outside the business action layer.
+    """
+    return
 
 
 @receiver(post_delete, sender=WorkModeRequest)
-def recompute_deleted_work_mode_request_range(sender, instance, **kwargs):
-    """No-op on purpose; deletion-side recompute is handled explicitly by service actions."""
-    return None
+def work_mode_request_post_delete_noop(sender, instance, **kwargs):
+    """
+    WorkModeRequest attendance recompute is handled explicitly by the
+    work-type request service/action flow.
+
+    Deletions must not silently recompute from model signals because the
+    service/action layer owns recompute timing and scope.
+    """
+    return
