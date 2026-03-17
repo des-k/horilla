@@ -89,12 +89,8 @@ class GraceClockInType(models.TextChoices):
 
 class WorkModeRequestActionType(models.TextChoices):
     """Audit action applied to a work-mode request."""
-    CREATED = "CREATED", _("Created")
-    UPDATED = "UPDATED", _("Updated")
-    DOCUMENT_UPLOADED = "DOCUMENT_UPLOADED", _("Document Uploaded")
     APPROVED = "APPROVED", _("Approved")
     REJECTED = "REJECTED", _("Rejected")
-    AUTO_REJECTED = "AUTO_REJECTED", _("Auto Rejected")
     DOCUMENT_REJECTED = "DOCUMENT_REJECTED", _("Document Rejected")
     VERIFIED = "VERIFIED", _("Verified")
     REVOKED = "REVOKED", _("Revoked")
@@ -496,6 +492,14 @@ class WorkModeRequest(HorillaModel):
         verbose_name=_("Document Verified By"),
     )
     document_verified_at = models.DateTimeField(null=True, blank=True, verbose_name=_("Document Verified At"))
+    current_document_version = models.ForeignKey(
+        "attendance.WorkModeRequestDocumentVersion",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+        verbose_name=_("Current Document Version"),
+    )
     duty_destination_location = models.CharField(max_length=255, null=True, blank=True, verbose_name=_("Duty Destination Location"))
     duty_destination_detail = models.TextField(null=True, blank=True, verbose_name=_("Duty Destination Detail"))
 
@@ -533,10 +537,12 @@ class WorkModeRequest(HorillaModel):
 
     @property
     def is_document_locked(self) -> bool:
-        return self.document_status == WorkModeRequestDocumentStatus.VERIFIED
+        return self.effective_document_status() == WorkModeRequestDocumentStatus.VERIFIED
 
-    @property
-    def current_document_version(self):
+    def resolve_current_document_version(self):
+        version = getattr(self, "current_document_version", None)
+        if version is not None:
+            return version
         try:
             return self.document_versions.filter(is_current=True).select_related(
                 "reviewed_by", "submitted_by"
@@ -545,13 +551,85 @@ class WorkModeRequest(HorillaModel):
             return None
 
     def current_document_files(self):
-        version = self.current_document_version
+        version = self.resolve_current_document_version()
         if version is None:
             return []
         try:
-            return [link.attendance_request_file for link in version.file_links.select_related("attendance_request_file")]
+            return [
+                link.attendance_request_file
+                for link in version.file_links.select_related("attendance_request_file")
+                if getattr(link, "attendance_request_file", None)
+            ]
         except Exception:
             return []
+
+    def effective_document_status(self) -> str:
+        """Version-led document status.
+
+        Root request fields are kept as compatibility mirrors, but current behavior
+        should follow the current document version whenever it exists.
+        """
+        version = self.resolve_current_document_version()
+        if version is None:
+            return WorkModeRequestDocumentStatus.NOT_UPLOADED
+        if self.mode == AttendanceWorkMode.WFA:
+            return WorkModeRequestDocumentStatus.SUBMITTED
+        return getattr(version, "status", None) or WorkModeRequestDocumentStatus.NOT_UPLOADED
+
+    def effective_document_remark(self):
+        version = self.resolve_current_document_version()
+        if version is None or self.mode == AttendanceWorkMode.WFA:
+            return None
+        return getattr(version, "review_remark", None)
+
+    def effective_document_reviewed_by(self):
+        version = self.resolve_current_document_version()
+        if version is None or self.mode == AttendanceWorkMode.WFA:
+            return None
+        return getattr(version, "reviewed_by", None)
+
+    def effective_document_reviewed_at(self):
+        version = self.resolve_current_document_version()
+        if version is None or self.mode == AttendanceWorkMode.WFA:
+            return None
+        return getattr(version, "reviewed_at", None)
+
+    @property
+    def current_document_version_number(self):
+        version = self.resolve_current_document_version()
+        return getattr(version, "version_number", None) if version is not None else None
+
+    @property
+    def current_document_file_count(self) -> int:
+        try:
+            return len(self.current_document_files() or [])
+        except Exception:
+            return 0
+
+    @property
+    def effective_document_status_label(self) -> str:
+        raw = self.effective_document_status()
+        if self.mode == AttendanceWorkMode.WFA:
+            return _("Supporting Attachment Uploaded") if raw != WorkModeRequestDocumentStatus.NOT_UPLOADED else _("Not Uploaded")
+        mapping = {
+            WorkModeRequestDocumentStatus.NOT_UPLOADED: _("Not Uploaded"),
+            WorkModeRequestDocumentStatus.SUBMITTED: _("Submitted"),
+            WorkModeRequestDocumentStatus.PENDING_VERIFICATION: _("Pending Verification"),
+            WorkModeRequestDocumentStatus.VERIFIED: _("Verified"),
+            WorkModeRequestDocumentStatus.REJECTED: _("Rejected"),
+        }
+        return mapping.get(raw, raw)
+
+    def sync_root_document_fields_from_current_version(self):
+        """Keep legacy root fields aligned with the current version.
+
+        These root fields remain for backward compatibility with older callers and
+        queries, but the version entity is the source of truth.
+        """
+        self.document_status = self.effective_document_status()
+        self.document_remark = self.effective_document_remark()
+        self.document_verified_by = self.effective_document_reviewed_by()
+        self.document_verified_at = self.effective_document_reviewed_at()
 
     def sync_legacy_files_from_current_version(self):
         """Keep legacy M2M in sync with current version only for backwards compatibility."""
@@ -687,6 +765,7 @@ class WorkModeRequestDocumentVersionFile(HorillaModel):
         return f"{self.version_id} - {self.attendance_request_file_id}"
 
 
+
 class AttendanceRequestAuditLog(HorillaModel):
     attendance = models.ForeignKey(
         "attendance.Attendance",
@@ -716,7 +795,6 @@ class AttendanceRequestAuditLog(HorillaModel):
     old_status = models.CharField(max_length=64, null=True, blank=True, verbose_name=_("Old Status"))
     new_status = models.CharField(max_length=64, null=True, blank=True, verbose_name=_("New Status"))
     remark = models.TextField(null=True, blank=True, verbose_name=_("Remark"))
-    metadata = models.JSONField(null=True, blank=True, verbose_name=_("Metadata"))
     acted_at = models.DateTimeField(default=timezone.now, verbose_name=_("Acted At"))
 
     class Meta:
