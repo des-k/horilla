@@ -535,6 +535,7 @@ def get_shift_rules(
     # Grace time (for check-in)
     grace = _resolve_grace_time(schedule, shift)
     grace_seconds = int(grace.allowed_time_in_secs) if (grace and getattr(grace, "allowed_clock_in", False)) else 0
+    clock_in_type = getattr(grace, "clock_in_type", "after") if (grace and getattr(grace, "allowed_clock_in", False)) else "after"
 
     # Night shift detection:
     # - Prefer explicit schedule flag when available.
@@ -605,6 +606,7 @@ def get_shift_rules(
         "start_time": start_time,
         "end_time": end_time,
         "grace_seconds": grace_seconds,
+        "clock_in_type": clock_in_type,
         "cutoff_in_dt": cutoff_in_dt,
         "cutoff_out_dt": cutoff_out_dt,
         "is_night_shift": is_night_shift,
