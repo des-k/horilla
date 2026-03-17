@@ -122,6 +122,7 @@ from base.methods import (
 )
 from base.models import (
     AttendanceAllowedIP,
+    EmployeeShift,
     EmployeeShiftSchedule,
     TrackLateComeEarlyOut,
     WorkType,
@@ -143,6 +144,21 @@ from attendance.services.monthly_recap import (
     get_monthly_attendance_recap,
     get_monthly_attendance_rows,
 )
+
+
+def _sync_grace_time_shifts(grace_time, shifts):
+    """Keep shift assignments in sync with the selected Grace Time form values."""
+    selected_shifts = list(shifts or [])
+    selected_ids = [shift.id for shift in selected_shifts if getattr(shift, "id", None)]
+
+    EmployeeShift.objects.filter(grace_time_id=grace_time).exclude(id__in=selected_ids).update(
+        grace_time_id=None
+    )
+
+    for shift in selected_shifts:
+        if getattr(shift, "grace_time_id_id", None) != getattr(grace_time, "id", None):
+            shift.grace_time_id = grace_time
+            shift.save(update_fields=["grace_time_id"])
 
 
 def attendance_validate(attendance):
@@ -2619,9 +2635,7 @@ def create_grace_time(request):
             cleaned_data = form.cleaned_data
             gracetime = form.save()
             shifts = cleaned_data.get("shifts")
-            for shift in shifts:
-                shift.grace_time_id = gracetime
-                shift.save()
+            _sync_grace_time_shifts(gracetime, shifts)
             messages.success(request, _("Grace time created successfully."))
             return HttpResponse("<script>window.location.reload()</script>")
     return render(
@@ -2673,8 +2687,11 @@ def update_grace_time(request, grace_id):
     if request.method == "POST":
         form = GraceTimeForm(request.POST, instance=grace_time)
         if form.is_valid():
+            cleaned_data = form.cleaned_data
             instance = form.save(commit=False)
             instance.save()
+            form.save_m2m()
+            _sync_grace_time_shifts(instance, cleaned_data.get("shifts"))
             messages.success(request, _("Grace time updated successfully."))
             return HttpResponse("<script>window.location.reload()</script>")
     context = {
