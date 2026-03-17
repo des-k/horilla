@@ -678,6 +678,22 @@ def _get_session_channel(attendance, activity, session: str):
     )
 
 
+def _effective_raw_presence_only(*, requested: bool, mode: Optional[str], work_mode_request=None) -> bool:
+    """Keep raw punch persistence neutral for request-based On Duty.
+
+    Request-based ON DUTY must remain a raw punch fact until reconciliation
+    confirms whether the current document version is verified. Only schedule-based
+    ON DUTY (no related request) may be marked presence-only directly at raw
+    persistence time.
+    """
+
+    if not requested:
+        return False
+    if AttendanceWorkMode is None:
+        return bool(requested and work_mode_request is None)
+    return bool(mode == AttendanceWorkMode.ON_DUTY and work_mode_request is None)
+
+
 def _locked_attendance(employee, attendance_date: date, defaults: dict):
     attendance = (
         Attendance.objects.select_for_update()
@@ -793,6 +809,11 @@ def clock_in_attendance_and_activity(
     in_datetime = _ensure_local(in_datetime) if getattr(settings, "USE_TZ", False) else in_datetime
     in_date = in_datetime.date()
     in_time = in_datetime.time()
+    effective_presence_only = _effective_raw_presence_only(
+        requested=is_presensi_only,
+        mode=clock_in_mode,
+        work_mode_request=work_mode_request,
+    )
 
     attendance_defaults = {
         "shift_id": shift,
@@ -801,7 +822,7 @@ def clock_in_attendance_and_activity(
         "minimum_hour": minimum_hour,
         "attendance_validated": False,
     }
-    if is_presensi_only and _has_model_field(Attendance, "is_presensi_only"):
+    if effective_presence_only and _has_model_field(Attendance, "is_presensi_only"):
         attendance_defaults["is_presensi_only"] = True
 
     activity_defaults = {"shift_day": day}
@@ -826,7 +847,7 @@ def clock_in_attendance_and_activity(
     if not attendance.work_type_id:
         attendance.work_type_id = employee.employee_work_info.work_type_id
         att_updates.append("work_type_id")
-    if is_presensi_only and _has_model_field(Attendance, "is_presensi_only") and not getattr(attendance, "is_presensi_only", False):
+    if effective_presence_only and _has_model_field(Attendance, "is_presensi_only") and not getattr(attendance, "is_presensi_only", False):
         attendance.is_presensi_only = True
         att_updates.append("is_presensi_only")
 
@@ -960,7 +981,12 @@ def clock_out_attendance_and_activity(
 
     shift_start_dt = rules.get("shift_start_dt")
     cutoff_in_dt = rules.get("cutoff_in_dt")
-    if is_presensi_only:
+    effective_presence_only = _effective_raw_presence_only(
+        requested=is_presensi_only,
+        mode=clock_out_mode,
+        work_mode_request=work_mode_request,
+    )
+    if effective_presence_only:
         earliest_checkout_dt = (cutoff_in_dt + timedelta(minutes=1)) if cutoff_in_dt else None
     else:
         earliest_checkout_dt = rules.get("check_out_window_start_dt")
@@ -975,7 +1001,7 @@ def clock_out_attendance_and_activity(
         "attendance_day": day,
         "attendance_validated": False,
     }
-    if is_presensi_only and _has_model_field(Attendance, "is_presensi_only"):
+    if effective_presence_only and _has_model_field(Attendance, "is_presensi_only"):
         attendance_defaults["is_presensi_only"] = True
 
     activity_defaults = {"shift_day": day}
@@ -1058,7 +1084,7 @@ def clock_out_attendance_and_activity(
     if _has_model_field(Attendance, "out_attendance_reject_reason_code"):
         attendance.out_attendance_reject_reason_code = None
         updates.append("out_attendance_reject_reason_code")
-    if is_presensi_only and _has_model_field(Attendance, "is_presensi_only") and not getattr(attendance, "is_presensi_only", False):
+    if effective_presence_only and _has_model_field(Attendance, "is_presensi_only") and not getattr(attendance, "is_presensi_only", False):
         attendance.is_presensi_only = True
         updates.append("is_presensi_only")
 
