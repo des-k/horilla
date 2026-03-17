@@ -9,6 +9,8 @@ from attendance.services.work_type_request_rules import (
     coerce_work_type_payload,
     validate_work_type_request,
 )
+from attendance.services.work_type_request_permissions import build_permission_flags
+from attendance.services.work_type_request_files import build_attachment_links
 
 
 class AttendanceSerializer(serializers.ModelSerializer):
@@ -61,6 +63,88 @@ class AttendanceSerializer(serializers.ModelSerializer):
                 ("Attendance for this employee on the current date already exists.")
             )
         return data
+
+    def get_request_status(self, obj):
+        return getattr(obj, "status", None)
+
+    def get_status_label(self, obj):
+        try:
+            return obj.get_status_display()
+        except Exception:
+            return getattr(obj, "status", None)
+
+    def get_work_mode(self, obj):
+        return getattr(obj, "mode", None)
+
+    def get_mode_label(self, obj):
+        try:
+            return obj.get_mode_display()
+        except Exception:
+            return getattr(obj, "mode", None)
+
+    def get_scope_label(self, obj):
+        try:
+            return obj.get_scope_display()
+        except Exception:
+            return getattr(obj, "scope", None)
+
+    def get_note(self, obj):
+        return getattr(obj, "reason", None)
+
+    def get_comment(self, obj):
+        return getattr(obj, "action_reason", None) or getattr(obj, "document_remark", None)
+
+    def get_action_note(self, obj):
+        return getattr(obj, "action_reason", None) or getattr(obj, "document_remark", None)
+
+    def get_document_status_label(self, obj):
+        try:
+            return obj.get_document_status_display()
+        except Exception:
+            return getattr(obj, "document_status", None)
+
+    def _serialize_file_links(self, obj, files):
+        request = self._request()
+        if request is not None:
+            return [
+                {"id": link.file_id, "name": link.file_name, "url": link.url}
+                for link in build_attachment_links(request, obj, files)
+            ]
+        out = []
+        seen = set()
+        for f in files or []:
+            fid = getattr(f, "id", None)
+            if fid in seen:
+                continue
+            seen.add(fid)
+            out.append({
+                "id": fid,
+                "name": getattr(getattr(f, "file", None), "name", None),
+                "url": getattr(getattr(f, "file", None), "url", None),
+            })
+        return out
+
+    def get_current_document_version(self, obj):
+        current = getattr(obj, "current_document_version", None)
+        if current is None:
+            return None
+        files = obj.current_document_files() or []
+        return {
+            "id": current.id,
+            "version_number": current.version_number,
+            "status": current.status,
+            "status_label": getattr(current, "get_status_display", lambda: current.status)(),
+            "is_current": True,
+            "submitted_at": current.submitted_at,
+            "reviewed_at": current.reviewed_at,
+            "review_remark": current.review_remark,
+            "submitted_by_name": getattr(obj, "_employee_display_name", lambda employee: None)(getattr(current, "submitted_by", None)),
+            "reviewed_by_name": getattr(obj, "_employee_display_name", lambda employee: None)(getattr(current, "reviewed_by", None)),
+            "files": self._serialize_file_links(obj, files),
+        }
+
+    def get_current_document_files(self, obj):
+        return self._serialize_file_links(obj, obj.current_document_files() or [])
 
     def get_attachment_urls(self, obj):
         """Return list of attachment URLs for an attendance correction request.
@@ -411,12 +495,28 @@ class WorkModeRequestSerializer(serializers.ModelSerializer):
     approved_by_name = serializers.SerializerMethodField(read_only=True)
     action_by_name = serializers.SerializerMethodField(read_only=True)
     action_at = serializers.SerializerMethodField(read_only=True)
+    can_update = serializers.SerializerMethodField(read_only=True)
+    can_cancel = serializers.SerializerMethodField(read_only=True)
     can_approve = serializers.SerializerMethodField(read_only=True)
     can_reject = serializers.SerializerMethodField(read_only=True)
     can_revoke = serializers.SerializerMethodField(read_only=True)
     can_verify_document = serializers.SerializerMethodField(read_only=True)
+    can_reject_document = serializers.SerializerMethodField(read_only=True)
     can_reopen_document = serializers.SerializerMethodField(read_only=True)
     can_upload_document = serializers.SerializerMethodField(read_only=True)
+    current_document_version_number = serializers.SerializerMethodField(read_only=True)
+    document_versions = serializers.SerializerMethodField(read_only=True)
+    request_status = serializers.SerializerMethodField(read_only=True)
+    status_label = serializers.SerializerMethodField(read_only=True)
+    work_mode = serializers.SerializerMethodField(read_only=True)
+    mode_label = serializers.SerializerMethodField(read_only=True)
+    scope_label = serializers.SerializerMethodField(read_only=True)
+    note = serializers.SerializerMethodField(read_only=True)
+    comment = serializers.SerializerMethodField(read_only=True)
+    action_note = serializers.SerializerMethodField(read_only=True)
+    document_status_label = serializers.SerializerMethodField(read_only=True)
+    current_document_version = serializers.SerializerMethodField(read_only=True)
+    current_document_files = serializers.SerializerMethodField(read_only=True)
 
     work_type = serializers.CharField(source="mode", read_only=True)
 
@@ -434,34 +534,11 @@ class WorkModeRequestSerializer(serializers.ModelSerializer):
         except Exception:
             return None
 
-    def _is_admin(self, request):
-        try:
-            if getattr(request.user, "is_superuser", False):
-                return True
-            return bool(
-                request.user.has_perm("attendance.change_workmoderequest")
-                or request.user.has_perm("attendance.change_attendance")
-            )
-        except Exception:
-            return False
-
-    def _is_owner(self, obj, request):
-        try:
-            return obj.employee_id.employee_user_id == request.user
-        except Exception:
-            return False
-
-    def _can_manage(self, obj):
+    def _flags(self, obj):
         request = self._request()
         if not request:
-            return False
-        if self._is_admin(request):
-            return not self._is_owner(obj, request)
-        try:
-            subordinate_ids = set(get_subordinate_employee_ids(request) or [])
-        except Exception:
-            subordinate_ids = set()
-        return getattr(obj, "employee_id_id", None) in subordinate_ids and not self._is_owner(obj, request)
+            return {}
+        return build_permission_flags(request, obj)
 
     def to_internal_value(self, data):
         try:
@@ -478,6 +555,16 @@ class WorkModeRequestSerializer(serializers.ModelSerializer):
             fallback = (data.get("document_remark") or "").strip()
             if fallback:
                 data["action_reason"] = fallback
+        # Stable aliases for web/mobile clients during contract cleanup.
+        data.setdefault("request_status", data.get("status"))
+        data.setdefault("work_mode", data.get("mode"))
+        data.setdefault("work_type", data.get("mode"))
+        if not (data.get("note") or "").strip():
+            data["note"] = data.get("reason") or data.get("description") or ""
+        if not (data.get("comment") or "").strip():
+            data["comment"] = data.get("action_reason") or data.get("document_remark") or ""
+        if not (data.get("action_note") or "").strip():
+            data["action_note"] = data.get("action_reason") or data.get("comment") or ""
         return data
 
     def validate(self, attrs):
@@ -537,16 +624,113 @@ class WorkModeRequestSerializer(serializers.ModelSerializer):
 
         return attrs
 
+    def _employee_display_name(self, employee):
+        if not employee:
+            return None
+        first = getattr(employee, "employee_first_name", None) or ""
+        last = getattr(employee, "employee_last_name", None) or ""
+        full = f"{first} {last}".strip()
+        if full:
+            return full
+        try:
+            user = getattr(employee, "employee_user_id", None)
+            return getattr(user, "username", None)
+        except Exception:
+            return None
+
+    def get_request_status(self, obj):
+        return getattr(obj, "status", None)
+
+    def get_status_label(self, obj):
+        try:
+            return obj.get_status_display()
+        except Exception:
+            return getattr(obj, "status", None)
+
+    def get_work_mode(self, obj):
+        return getattr(obj, "mode", None)
+
+    def get_mode_label(self, obj):
+        try:
+            return obj.get_mode_display()
+        except Exception:
+            return getattr(obj, "mode", None)
+
+    def get_scope_label(self, obj):
+        try:
+            return obj.get_scope_display()
+        except Exception:
+            return getattr(obj, "scope", None)
+
+    def get_note(self, obj):
+        return getattr(obj, "reason", None) or getattr(obj, "description", None)
+
+    def get_comment(self, obj):
+        return getattr(obj, "action_reason", None) or getattr(obj, "document_remark", None)
+
+    def get_action_note(self, obj):
+        return getattr(obj, "action_reason", None) or getattr(obj, "document_remark", None)
+
+    def get_document_status_label(self, obj):
+        try:
+            return obj.get_document_status_display()
+        except Exception:
+            return getattr(obj, "document_status", None)
+
+    def get_current_document_version(self, obj):
+        current = getattr(obj, "current_document_version", None)
+        if current is None:
+            return None
+        files = []
+        try:
+            files = obj.current_document_files() or []
+        except Exception:
+            files = []
+        return {
+            "id": getattr(current, "id", None),
+            "version_number": getattr(current, "version_number", None),
+            "status": getattr(current, "status", None),
+            "status_label": getattr(current, "get_status_display", lambda: getattr(current, "status", None))(),
+            "is_current": True,
+            "submitted_at": getattr(current, "submitted_at", None),
+            "reviewed_at": getattr(current, "reviewed_at", None),
+            "review_remark": getattr(current, "review_remark", None),
+            "submitted_by_name": self._employee_display_name(getattr(current, "submitted_by", None)),
+            "reviewed_by_name": self._employee_display_name(getattr(current, "reviewed_by", None)),
+            "files": self._serialize_file_links(obj, files),
+        }
+
+    def get_current_document_files(self, obj):
+        try:
+            return self._serialize_file_links(obj, obj.current_document_files() or [])
+        except Exception:
+            return []
+
+    def _serialize_file_links(self, obj, files):
+        request = self._request()
+        if request is not None:
+            return [
+                {"id": link.file_id, "name": link.file_name, "url": link.url}
+                for link in build_attachment_links(request, obj, files)
+            ]
+        out = []
+        seen = set()
+        for f in files or []:
+            fid = getattr(f, "id", None)
+            if fid in seen:
+                continue
+            seen.add(fid)
+            out.append({
+                "id": fid,
+                "name": getattr(getattr(f, "file", None), "name", None),
+                "url": getattr(getattr(f, "file", None), "url", None),
+            })
+        return out
+
     def get_attachment_urls(self, obj):
         try:
-            urls = []
-            seen = set()
-            for f in obj.files.all():
-                u = getattr(getattr(f, "file", None), "url", None)
-                if u and u not in seen:
-                    seen.add(u)
-                    urls.append(u)
-            return urls
+            files = obj.current_document_files() or list(obj.files.all())
+            return [item.get("url") for item in self._serialize_file_links(obj, files) if item.get("url")]
         except Exception:
             return []
 
@@ -569,46 +753,60 @@ class WorkModeRequestSerializer(serializers.ModelSerializer):
     def get_approved_by_name(self, obj):
         return getattr(obj, "approved_actor_display", None)
 
+    def get_can_update(self, obj):
+        return bool(self._flags(obj).get("can_update"))
+
+    def get_can_cancel(self, obj):
+        return bool(self._flags(obj).get("can_cancel"))
+
     def get_can_approve(self, obj):
-        return bool(obj.status == WorkModeRequestStatus.WAITING_FOR_APPROVAL and self._can_manage(obj))
+        return bool(self._flags(obj).get("can_approve"))
 
     def get_can_reject(self, obj):
-        request = self._request()
-        if not request or not self._can_manage(obj):
-            return False
-        if obj.status == WorkModeRequestStatus.WAITING_FOR_APPROVAL:
-            return True
-        return bool(obj.status == WorkModeRequestStatus.PENDING and obj.mode == AttendanceWorkMode.ON_DUTY and self._is_admin(request))
+        return bool(self._flags(obj).get("can_reject"))
 
     def get_can_revoke(self, obj):
-        return bool(obj.status == WorkModeRequestStatus.APPROVED and self._can_manage(obj))
+        return bool(self._flags(obj).get("can_revoke"))
 
     def get_can_verify_document(self, obj):
-        return bool(
-            obj.mode == AttendanceWorkMode.ON_DUTY
-            and obj.status == WorkModeRequestStatus.APPROVED
-            and obj.document_status in {WorkModeRequestDocumentStatus.SUBMITTED, WorkModeRequestDocumentStatus.PENDING_VERIFICATION}
-            and self._can_manage(obj)
-        )
+        return bool(self._flags(obj).get("can_verify_document"))
+
+    def get_can_reject_document(self, obj):
+        return bool(self._flags(obj).get("can_reject_document"))
 
     def get_can_reopen_document(self, obj):
-        return bool(
-            obj.mode == AttendanceWorkMode.ON_DUTY
-            and obj.status == WorkModeRequestStatus.APPROVED
-            and obj.document_status in {WorkModeRequestDocumentStatus.VERIFIED, WorkModeRequestDocumentStatus.REJECTED}
-            and self._can_manage(obj)
-        )
+        return bool(self._flags(obj).get("can_reopen_document"))
 
     def get_can_upload_document(self, obj):
-        request = self._request()
-        if not request:
-            return False
-        return bool(
-            self._is_owner(obj, request)
-            and obj.mode == AttendanceWorkMode.ON_DUTY
-            and obj.status in {WorkModeRequestStatus.PENDING, WorkModeRequestStatus.WAITING_FOR_APPROVAL, WorkModeRequestStatus.APPROVED}
-            and obj.document_status != WorkModeRequestDocumentStatus.VERIFIED
-        )
+        return bool(self._flags(obj).get("can_upload_document"))
+
+    def get_current_document_version_number(self, obj):
+        current = getattr(obj, "current_document_version", None)
+        return getattr(current, "version_number", None) if current else None
+
+    def get_document_versions(self, obj):
+        out = []
+        try:
+            versions = obj.document_versions.all().select_related("submitted_by", "reviewed_by").prefetch_related("file_links__attendance_request_file")[:10]
+        except Exception:
+            versions = []
+        for version in versions:
+            files = [link.attendance_request_file for link in version.file_links.all() if getattr(link, "attendance_request_file", None)]
+            out.append({
+                "id": version.id,
+                "version_number": version.version_number,
+                "is_current": version.is_current,
+                "status": version.status,
+                "status_label": getattr(version, "get_status_display", lambda: version.status)(),
+                "review_remark": version.review_remark,
+                "submitted_at": version.submitted_at,
+                "reviewed_at": version.reviewed_at,
+                "file_count": version.file_links.count(),
+                "submitted_by_name": self._employee_display_name(getattr(version, "submitted_by", None)),
+                "reviewed_by_name": self._employee_display_name(getattr(version, "reviewed_by", None)),
+                "files": self._serialize_file_links(obj, files),
+            })
+        return out
 
 class MailTemplateSerializer(serializers.ModelSerializer):
     class Meta:
