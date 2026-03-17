@@ -719,16 +719,25 @@ class WorkModeRequestSerializer(serializers.ModelSerializer):
         return bool(self._flags(obj).get("can_revoke"))
 
     def get_can_verify_document(self, obj):
+        if getattr(obj, "mode", None) == AttendanceWorkMode.WFA:
+            return False
         return bool(self._flags(obj).get("can_verify_document"))
 
     def get_can_reject_document(self, obj):
+        if getattr(obj, "mode", None) == AttendanceWorkMode.WFA:
+            return False
         return bool(self._flags(obj).get("can_reject_document"))
 
     def get_can_reopen_document(self, obj):
+        if getattr(obj, "mode", None) == AttendanceWorkMode.WFA:
+            return False
         return bool(self._flags(obj).get("can_reopen_document"))
 
     def get_can_upload_document(self, obj):
-        return bool(self._flags(obj).get("can_upload_document"))
+        allowed = bool(self._flags(obj).get("can_upload_document"))
+        if getattr(obj, "mode", None) == AttendanceWorkMode.WFA:
+            return allowed and getattr(obj, "status", None) == WorkModeRequestStatus.WAITING_FOR_APPROVAL
+        return allowed
 
     def get_current_document_version_number(self, obj):
         current = self._current_document_obj(obj)
