@@ -148,10 +148,15 @@ class CanonicalFlowSourceInspectionTests(SimpleTestCase):
         self.assertIn('recompute_attendance_range', inspect.getsource(leave_signals._reconcile_leave_related_punches))
 
     def test_work_type_actions_recompute_canonical_range_for_revoke_and_document_transitions(self):
-        source = Path('attendance/views/work_type_requests.py').read_text()
-        self.assertIn('def work_type_request_revoke', source)
-        self.assertIn('def work_type_request_document_action', source)
-        self.assertIn('recompute_attendance_range(req.employee_id, req.start_date, req.end_date)', source)
+        view_source = Path('attendance/views/work_type_requests.py').read_text()
+        action_source = Path('attendance/services/work_type_request_actions.py').read_text()
+        self.assertIn('def work_type_request_revoke', view_source)
+        self.assertIn('def work_type_request_document_action', view_source)
+        self.assertIn('def revoke_request', action_source)
+        self.assertIn('def verify_document', action_source)
+        self.assertIn('def reject_document', action_source)
+        self.assertIn('def reopen_document', action_source)
+        self.assertIn('WorkModeRequestActions._recompute(req)', action_source)
 
         from horilla_api.api_views.attendance.views import WorkModeRequestDocumentActionView
         api_source = inspect.getsource(WorkModeRequestDocumentActionView.put)
@@ -393,3 +398,56 @@ class BiometricWorkModeBugfixTests(SimpleTestCase):
         cutoff_pos = segment.index('cutoff_out_dt = _calc_cutoff_out_dt')
         self.assertLess(resolver_pos, access_pos)
         self.assertLess(resolver_pos, cutoff_pos)
+
+
+class WorkTypeRequestWfaDocumentPolicyTests(SimpleTestCase):
+    def _request(self, username='owner'):
+        user = SimpleNamespace(username=username)
+        return SimpleNamespace(user=user)
+
+    def _req(self, *, status, mode='wfa'):
+        employee_user = SimpleNamespace(username='owner')
+        employee = SimpleNamespace(employee_user_id=employee_user)
+        return SimpleNamespace(status=status, mode=mode, employee_id=employee, employee_id_id=1)
+
+    def test_wfa_can_upload_only_while_waiting_for_approval(self):
+        from attendance.models import WorkModeRequestStatus
+        from attendance.services.work_type_request_permissions import can_upload_document
+
+        request = self._request()
+        self.assertTrue(can_upload_document(request, self._req(status=WorkModeRequestStatus.WAITING_FOR_APPROVAL)))
+        self.assertFalse(can_upload_document(request, self._req(status=WorkModeRequestStatus.APPROVED)))
+        self.assertFalse(can_upload_document(request, self._req(status=WorkModeRequestStatus.REJECTED)))
+        self.assertFalse(can_upload_document(request, self._req(status=WorkModeRequestStatus.REVOKED)))
+        self.assertFalse(can_upload_document(request, self._req(status=WorkModeRequestStatus.CANCELED)))
+
+    def test_on_duty_upload_rule_is_not_broken_by_wfa_patch(self):
+        from attendance.models import AttendanceWorkMode, WorkModeRequestStatus
+        from attendance.services.work_type_request_permissions import can_upload_document
+
+        request = self._request()
+        req = self._req(status=WorkModeRequestStatus.APPROVED, mode=AttendanceWorkMode.ON_DUTY)
+        req.document_status = 'submitted'
+        req.effective_document_status = lambda: 'submitted'
+        self.assertTrue(can_upload_document(request, req))
+
+    def test_serializer_for_wfa_never_exposes_document_review_actions(self):
+        from attendance.models import WorkModeRequestStatus
+        from horilla_api.api_serializers.attendance.serializers import WorkModeRequestSerializer
+
+        request = self._request()
+        req = self._req(status=WorkModeRequestStatus.APPROVED)
+        serializer = WorkModeRequestSerializer(context={'request': request})
+        self.assertFalse(serializer.get_can_verify_document(req))
+        self.assertFalse(serializer.get_can_reject_document(req))
+        self.assertFalse(serializer.get_can_reopen_document(req))
+        self.assertFalse(serializer.get_can_upload_document(req))
+
+    def test_legacy_destructive_helpers_are_removed_from_active_layers(self):
+        api_source = Path('horilla_api/api_views/attendance/views.py').read_text()
+        web_source = Path('attendance/views/work_type_requests.py').read_text()
+        self.assertNotIn('def _attach_files(', api_source)
+        self.assertNotIn('obj.files.clear()', api_source)
+        self.assertNotIn('def _save_on_duty_uploads(', web_source)
+        self.assertNotIn('req.files.clear()', web_source)
+
