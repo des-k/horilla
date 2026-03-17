@@ -12,10 +12,11 @@
 <div class="oh-modal__dialog-body">
   <div class="mb-2">
     <small class="text-muted">
-      {% trans "Allowed edit: update note, destination, detail, and replace attachments when the request is still editable." %}
+      {% trans "Allowed edit: update note, destination, detail, and upload a new document version while the request is still editable." %}
       <br />
       <strong>{% trans "Current status" %}:</strong> {{ req.status|upper }}<br/>
       <strong>{% trans "Document status" %}:</strong> {{ req.get_document_status_display }}
+      {% if req.current_document_version %}<br/><strong>{% trans "Current version" %}:</strong> v{{ req.current_document_version.version_number }}{% endif %}
     </small>
   </div>
 
@@ -45,7 +46,7 @@
       <label class="oh-label">{{ form.files.label }}</label>
       {{ form.files }}
       {% if form.files.errors %}<small class="text-danger">{{ form.files.errors|join:", " }}</small>{% endif %}
-      <small class="text-muted">{% trans "Uploading new files replaces the current On Duty document and moves it back into review until it is verified again." %}</small>
+      <small class="text-muted">{% trans "Uploading new files creates a new On Duty document version. The previous version remains in history, and the current version will go back into review until it is verified again." %}</small>
     </div>
 
     {% if form.non_field_errors %}
