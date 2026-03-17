@@ -72,8 +72,11 @@
           <label class="oh-label">{{ form.files.label }}</label>
           {{ form.files }}
           {% if form.files.errors %}<small class="text-danger">{{ form.files.errors|join:", " }}</small>{% endif %}
-          <small class="text-muted">
-            {% trans "ON DUTY requires an attachment (assignment letter), but you may submit without it and upload later while status is PENDING." %}
+          <small class="text-muted" id="workTypeFileHelpWfa">
+            {% trans "WFA documents are optional supporting attachments only. You may submit WFA with or without files. Uploaded files are kept as version history and do not use verify/reject/reopen workflow." %}
+          </small>
+          <small class="text-muted" id="workTypeFileHelpOnDuty" style="display:none;">
+            {% trans "ON DUTY documents may be uploaded now or later. Each upload creates a new document version and preserves prior history. After approval, the current ON DUTY document version uses verify/reject/reopen review workflow." %}
           </small>
         </div>
       </div>
@@ -96,10 +99,23 @@
 
 <script>
   (function() {
+    const mode = document.querySelector('#id_mode');
     const scope = document.querySelector('#id_scope');
     const start = document.querySelector('#id_start_date');
     const end = document.querySelector('#id_end_date');
     const endWrap = document.querySelector('#endDateWrap');
+    const dutyLocationWrap = document.querySelector('#id_duty_destination_location')?.closest('.col-md-6');
+    const dutyDetailWrap = document.querySelector('#id_duty_destination_detail')?.closest('.col-md-6');
+    const fileHelpWfa = document.querySelector('#workTypeFileHelpWfa');
+    const fileHelpOnDuty = document.querySelector('#workTypeFileHelpOnDuty');
+
+    function syncModeUi(){
+      const isOnDuty = ((mode && mode.value) || '').toLowerCase() === 'on_duty';
+      if (dutyLocationWrap) dutyLocationWrap.style.display = isOnDuty ? '' : 'none';
+      if (dutyDetailWrap) dutyDetailWrap.style.display = isOnDuty ? '' : 'none';
+      if (fileHelpWfa) fileHelpWfa.style.display = isOnDuty ? 'none' : '';
+      if (fileHelpOnDuty) fileHelpOnDuty.style.display = isOnDuty ? '' : 'none';
+    }
 
     function syncEndVisibility(){
       const v = (scope && scope.value) ? scope.value.toLowerCase() : 'full';
@@ -111,8 +127,10 @@
       }
     }
 
+    if (mode) mode.addEventListener('change', syncModeUi);
     if (scope) scope.addEventListener('change', syncEndVisibility);
     if (start) start.addEventListener('change', syncEndVisibility);
+    syncModeUi();
     syncEndVisibility();
   })();
 </script>
