@@ -42,7 +42,6 @@ from attendance.models import (
     WorkModeRequestScope,
     WorkModeRequestStatus,
     WorkModeRequestActionType,
-    WorkModeRequestDocumentStatus,
     WorkModeRequestRejectReasonCode,
 )
 from attendance.views.clock_in_out import *
@@ -138,18 +137,6 @@ def _request_actor_employee(request):
         return request.user.employee_get
     except Exception:
         return None
-
-
-def _set_on_duty_document_state(obj: WorkModeRequest, *, has_files: bool, approved: bool = False):
-    if obj.mode != AttendanceWorkMode.ON_DUTY:
-        return
-    if not has_files:
-        obj.document_status = WorkModeRequestDocumentStatus.NOT_UPLOADED
-        return
-    obj.document_status = (
-        WorkModeRequestDocumentStatus.PENDING_VERIFICATION
-        if approved else WorkModeRequestDocumentStatus.SUBMITTED
-    )
 
 
 def _log_work_mode_status_change(obj: WorkModeRequest, request, *, action_type: str, old_status: str = None, new_status: str = None, remark: str = None):
@@ -322,52 +309,6 @@ def _is_supervisor_of(request, employee_id: int) -> bool:
         return int(employee_id) in set(map(int, sub_ids or []))
     except Exception:
         return False
-
-
-def _work_mode_update_allowed(obj: WorkModeRequest) -> bool:
-    if obj.status in {
-        WorkModeRequestStatus.REJECTED,
-        WorkModeRequestStatus.CANCELED,
-        WorkModeRequestStatus.REVOKED,
-    }:
-        return False
-    if obj.mode != AttendanceWorkMode.ON_DUTY:
-        return obj.status in {
-            WorkModeRequestStatus.PENDING,
-            WorkModeRequestStatus.WAITING_FOR_APPROVAL,
-        }
-    if obj.status in {
-        WorkModeRequestStatus.PENDING,
-        WorkModeRequestStatus.WAITING_FOR_APPROVAL,
-    }:
-        return True
-    if obj.status != WorkModeRequestStatus.APPROVED:
-        return False
-    return obj.document_status != WorkModeRequestDocumentStatus.VERIFIED
-
-
-def _sync_on_duty_document_after_upload(obj: WorkModeRequest):
-    if obj.mode != AttendanceWorkMode.ON_DUTY:
-        return False
-
-    was_approved = obj.status == WorkModeRequestStatus.APPROVED
-    previous_document_status = obj.document_status
-    previous_verified_by = obj.document_verified_by_id
-    previous_verified_at = obj.document_verified_at
-
-    _set_on_duty_document_state(obj, has_files=has_attachments(obj), approved=was_approved)
-    if obj.status == WorkModeRequestStatus.PENDING and has_attachments(obj):
-        obj.status = WorkModeRequestStatus.WAITING_FOR_APPROVAL
-
-    if was_approved and obj.document_status != WorkModeRequestDocumentStatus.VERIFIED:
-        obj.document_verified_by = None
-        obj.document_verified_at = None
-
-    return bool(
-        previous_document_status != obj.document_status
-        or previous_verified_by != obj.document_verified_by_id
-        or previous_verified_at != obj.document_verified_at
-    )
 
 
 def _can_act_on_employee(request, employee_id: int, perm_codename: str, allow_owner: bool = False) -> bool:
@@ -2090,15 +2031,6 @@ class WorkModeRequestView(APIView):
                     uploaded = [f_single]
         validate_uploaded_files(uploaded)
         return uploaded
-
-    def _attach_files(self, obj: WorkModeRequest, uploaded_files, *, replace_existing: bool = False):
-        from attendance.models import AttendanceRequestFile
-
-        if replace_existing:
-            obj.files.clear()
-        for up in uploaded_files:
-            arf = AttendanceRequestFile.objects.create(file=up)
-            obj.files.add(arf)
 
     @transaction.atomic
     def post(self, request):
