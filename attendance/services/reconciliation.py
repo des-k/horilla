@@ -19,6 +19,7 @@ from attendance.models import (
     AttendancePunchStatus,
     AttendanceWorkMode,
     WorkModeRequest,
+    WorkModeRequestDocumentStatus,
     WorkModeRequestStatus,
 )
 from attendance.methods.utils import format_time, strtime_seconds, shift_schedule_today
@@ -341,6 +342,18 @@ def _approved_work_mode_request(employee, attendance_date: date) -> Optional[Wor
     )
 
 
+def _approved_work_mode_request_for_session(employee, attendance_date: date, want: str) -> Optional[WorkModeRequest]:
+    try:
+        from attendance.services.work_type_request_rules import pick_relevant_request
+
+        req = pick_relevant_request(employee, attendance_date, want)
+        if req and getattr(req, "status", None) == WorkModeRequestStatus.APPROVED:
+            return req
+    except Exception:
+        pass
+    return None
+
+
 def _latest_revoked_request(employee, attendance_date: date) -> Optional[WorkModeRequest]:
     return (
         WorkModeRequest.objects.filter(
@@ -550,7 +563,7 @@ def _work_hours(final_in_dt: Optional[datetime], final_out_dt: Optional[datetime
     return format_time(seconds)
 
 
-def _sync_attendance_and_activity(attendance: Attendance, activity: AttendanceActivity, *, final_in_dt: Optional[datetime], final_out_dt: Optional[datetime], final_in_punch: Optional[AttendancePunchingHistory], final_out_punch: Optional[AttendancePunchingHistory], source: str, note: str, final_mode: str, work_request: Optional[WorkModeRequest], ctx: ShiftContext, minimum_hour: str, is_presence_only: bool, late_minutes: int, early_minutes: int):
+def _sync_attendance_and_activity(attendance: Attendance, activity: AttendanceActivity, *, final_in_dt: Optional[datetime], final_out_dt: Optional[datetime], final_in_punch: Optional[AttendancePunchingHistory], final_out_punch: Optional[AttendancePunchingHistory], source: str, note: str, final_in_mode: str, final_out_mode: str, final_in_request: Optional[WorkModeRequest], final_out_request: Optional[WorkModeRequest], ctx: ShiftContext, minimum_hour: str, is_presence_only: bool, late_minutes: int, early_minutes: int):
     existing_in_channel = getattr(attendance, "attendance_clock_in_channel", None)
     existing_out_channel = getattr(attendance, "attendance_clock_out_channel", None)
     existing_in_mode = getattr(attendance, "attendance_clock_in_mode", None)
@@ -566,7 +579,9 @@ def _sync_attendance_and_activity(attendance: Attendance, activity: AttendanceAc
     attendance.attendance_day = ctx.day
     attendance.minimum_hour = minimum_hour
     attendance.is_presensi_only = is_presence_only
-    attendance.work_mode_request_id = work_request
+    attendance.work_mode_request_id = final_in_request if final_in_request and final_in_request == final_out_request else None
+    attendance.in_related_work_type_request_id = getattr(final_in_request, "id", None) if hasattr(attendance, "in_related_work_type_request_id") else None
+    attendance.out_related_work_type_request_id = getattr(final_out_request, "id", None) if hasattr(attendance, "out_related_work_type_request_id") else None
     if hasattr(attendance, "reconciliation_source"):
         attendance.reconciliation_source = source
     if hasattr(attendance, "reconciliation_note"):
@@ -586,13 +601,13 @@ def _sync_attendance_and_activity(attendance: Attendance, activity: AttendanceAc
         attendance.attendance_clock_in_channel = AttendanceChannel.MOBILE if final_in_punch.source == "mobile" else AttendanceChannel.BIOMETRIC if final_in_punch.source == "biometric" else AttendanceChannel.API
         attendance.attendance_clock_in_image = final_in_punch.photo if getattr(final_in_punch, "photo", None) else None
         attendance.attendance_clock_in_location = getattr(final_in_punch, "location", None)
-        attendance.attendance_clock_in_mode = final_mode
+        attendance.attendance_clock_in_mode = final_in_mode
         attendance.in_attendance_status = AttendancePunchStatus.VALID
         attendance.in_attendance_reject_reason_code = None
     elif _request_is_approved_request_override(attendance, AttendancePunchDirection.IN):
         attendance.attendance_clock_in_punch = None
         attendance.attendance_clock_in_channel = existing_in_channel
-        attendance.attendance_clock_in_mode = existing_in_mode or final_mode
+        attendance.attendance_clock_in_mode = existing_in_mode or final_in_mode
         attendance.attendance_clock_in_image = existing_in_image
         attendance.attendance_clock_in_location = existing_in_location
     else:
@@ -608,13 +623,13 @@ def _sync_attendance_and_activity(attendance: Attendance, activity: AttendanceAc
         attendance.attendance_clock_out_channel = AttendanceChannel.MOBILE if final_out_punch.source == "mobile" else AttendanceChannel.BIOMETRIC if final_out_punch.source == "biometric" else AttendanceChannel.API
         attendance.attendance_clock_out_image = final_out_punch.photo if getattr(final_out_punch, "photo", None) else None
         attendance.attendance_clock_out_location = getattr(final_out_punch, "location", None)
-        attendance.attendance_clock_out_mode = final_mode
+        attendance.attendance_clock_out_mode = final_out_mode
         attendance.out_attendance_status = AttendancePunchStatus.VALID
         attendance.out_attendance_reject_reason_code = None
     elif _request_is_approved_request_override(attendance, AttendancePunchDirection.OUT):
         attendance.attendance_clock_out_punch = None
         attendance.attendance_clock_out_channel = existing_out_channel
-        attendance.attendance_clock_out_mode = existing_out_mode or final_mode
+        attendance.attendance_clock_out_mode = existing_out_mode or final_out_mode
         attendance.attendance_clock_out_image = existing_out_image
         attendance.attendance_clock_out_location = existing_out_location
     else:
@@ -632,7 +647,7 @@ def _sync_attendance_and_activity(attendance: Attendance, activity: AttendanceAc
     activity.employee_id = ctx.employee
     activity.attendance_date = ctx.attendance_date
     activity.shift_day = ctx.day
-    activity.work_mode_request_id = work_request
+    activity.work_mode_request_id = final_in_request if final_in_request and final_in_request == final_out_request else (final_in_request or final_out_request)
     if hasattr(activity, "reconciliation_source"):
         activity.reconciliation_source = source
     if hasattr(activity, "reconciliation_note"):
@@ -677,6 +692,8 @@ def recompute_attendance(employee, attendance_date: date) -> ReconciliationResul
     ctx = _resolve_shift_context(employee, attendance_date)
     leave_ctx = _resolve_leave_context(employee, attendance_date, ctx)
     work_request = _approved_work_mode_request(employee, attendance_date)
+    work_request_in = _approved_work_mode_request_for_session(employee, attendance_date, "in")
+    work_request_out = _approved_work_mode_request_for_session(employee, attendance_date, "out")
     revoked_request = _latest_revoked_request(employee, attendance_date)
     logs = list(_candidate_logs(employee, attendance_date, ctx))
     raw = _pick_raw_sessions(logs, ctx)
@@ -685,11 +702,17 @@ def recompute_attendance(employee, attendance_date: date) -> ReconciliationResul
     final_out_dt = None
     final_in_punch = None
     final_out_punch = None
+    final_in_request = work_request_in
+    final_out_request = work_request_out
     source = SOURCE_NORMAL
     note = "Present"
-    final_mode = AttendanceWorkMode.WFO
+    final_in_mode = AttendanceWorkMode.WFO
+    final_out_mode = AttendanceWorkMode.WFO
     is_presence_only = False
-    request_override_mode = None
+    request_override_in_mode = None
+    request_override_out_mode = None
+    grant_on_duty_in_final = False
+    grant_on_duty_out_final = False
 
     if leave_ctx.is_full_day:
         source = SOURCE_LEAVE
@@ -699,7 +722,8 @@ def recompute_attendance(employee, attendance_date: date) -> ReconciliationResul
             final_in_dt = _session_dt_from_attendance(attendance, AttendancePunchDirection.IN)
             source = SOURCE_ATTENDANCE_REQUEST
             note = NOTE_APPROVED_ATTENDANCE_REQUEST
-            request_override_mode = _session_mode_from_attendance(attendance, AttendancePunchDirection.IN) or request_override_mode
+            request_override_in_mode = _session_mode_from_attendance(attendance, AttendancePunchDirection.IN)
+            final_in_request = None
         elif raw.get("final_in") is not None:
             final_in_punch = raw.get("final_in")
             final_in_dt = _localize(final_in_punch.punch_timestamp)
@@ -708,17 +732,26 @@ def recompute_attendance(employee, attendance_date: date) -> ReconciliationResul
             final_out_dt = _session_dt_from_attendance(attendance, AttendancePunchDirection.OUT)
             source = SOURCE_ATTENDANCE_REQUEST
             note = NOTE_APPROVED_ATTENDANCE_REQUEST
-            request_override_mode = _session_mode_from_attendance(attendance, AttendancePunchDirection.OUT) or request_override_mode
+            request_override_out_mode = _session_mode_from_attendance(attendance, AttendancePunchDirection.OUT)
+            final_out_request = None
         elif raw.get("final_out") is not None:
             final_out_punch = raw.get("final_out")
             final_out_dt = _localize(final_out_punch.punch_timestamp)
 
-        final_mode = _resolve_final_work_mode(
+        final_in_mode = _resolve_final_work_mode(
             employee,
             attendance_date,
-            request_override_mode=request_override_mode,
-            approved_work_request=work_request,
+            request_override_mode=request_override_in_mode,
+            approved_work_request=final_in_request,
             accepted_in_punch=final_in_punch,
+            accepted_out_punch=None,
+        )
+        final_out_mode = _resolve_final_work_mode(
+            employee,
+            attendance_date,
+            request_override_mode=request_override_out_mode,
+            approved_work_request=final_out_request,
+            accepted_in_punch=None,
             accepted_out_punch=final_out_punch,
         )
 
@@ -726,23 +759,32 @@ def recompute_attendance(employee, attendance_date: date) -> ReconciliationResul
             source = SOURCE_LEAVE if source == SOURCE_NORMAL else source
             note = NOTE_HALF_DAY_FIRST if leave_ctx.kind == "first_half" else NOTE_HALF_DAY_SECOND
 
-        if work_request and source != SOURCE_ATTENDANCE_REQUEST:
-            final_mode = work_request.mode or final_mode
-            if work_request.mode == AttendanceWorkMode.WFA and work_request.status == WorkModeRequestStatus.APPROVED:
+        for session_req in [final_in_request, final_out_request]:
+            if session_req and source != SOURCE_ATTENDANCE_REQUEST and session_req.mode == AttendanceWorkMode.WFA:
                 source = SOURCE_WFA
                 note = "WFA reconciled under normal attendance rules"
-            elif work_request.mode == AttendanceWorkMode.ON_DUTY:
-                document_status = getattr(work_request, "document_status", None)
-                if document_status == "verified":
-                    source = SOURCE_ON_DUTY
-                    note = NOTE_ON_DUTY_FINAL
-                    is_presence_only = True
-                elif document_status == "rejected":
-                    source = SOURCE_NORMAL
-                    note = NOTE_ON_DUTY_NOT_GRANTED
+                break
+
+        for want, session_req in (("in", final_in_request), ("out", final_out_request)):
+            if not session_req or source == SOURCE_ATTENDANCE_REQUEST or session_req.mode != AttendanceWorkMode.ON_DUTY:
+                continue
+            document_status = getattr(session_req, "document_status", None)
+            if document_status == WorkModeRequestDocumentStatus.VERIFIED:
+                if want == "in":
+                    grant_on_duty_in_final = True
                 else:
-                    source = SOURCE_PROVISIONAL_ON_DUTY
-                    note = NOTE_ON_DUTY_PROVISIONAL
+                    grant_on_duty_out_final = True
+            elif document_status == WorkModeRequestDocumentStatus.REJECTED:
+                source = SOURCE_NORMAL
+                note = NOTE_ON_DUTY_NOT_GRANTED
+            else:
+                source = SOURCE_PROVISIONAL_ON_DUTY
+                note = NOTE_ON_DUTY_PROVISIONAL
+
+        if grant_on_duty_in_final or grant_on_duty_out_final:
+            source = SOURCE_ON_DUTY
+            note = NOTE_ON_DUTY_FINAL
+            is_presence_only = bool(grant_on_duty_in_final and grant_on_duty_out_final)
 
         if revoked_request and not work_request and source == SOURCE_NORMAL:
             source = SOURCE_RECOMPUTED_AFTER_REVOKE
@@ -759,7 +801,7 @@ def recompute_attendance(employee, attendance_date: date) -> ReconciliationResul
     late_minutes = 0
     early_minutes = 0
 
-    if note == NOTE_ON_DUTY_FINAL or leave_ctx.is_full_day:
+    if leave_ctx.is_full_day:
         late_minutes = 0
         early_minutes = 0
     else:
@@ -772,6 +814,10 @@ def recompute_attendance(employee, attendance_date: date) -> ReconciliationResul
             ctx.grace_clock_in_type,
             apply_grace_to_late=not leave_ctx.is_half_day,
         )
+        if grant_on_duty_in_final:
+            late_minutes = 0
+        if grant_on_duty_out_final:
+            early_minutes = 0
 
     _sync_attendance_and_activity(
         attendance,
@@ -782,8 +828,10 @@ def recompute_attendance(employee, attendance_date: date) -> ReconciliationResul
         final_out_punch=final_out_punch,
         source=source,
         note=note,
-        final_mode=final_mode,
-        work_request=work_request,
+        final_in_mode=final_in_mode,
+        final_out_mode=final_out_mode,
+        final_in_request=final_in_request,
+        final_out_request=final_out_request,
         ctx=ctx,
         minimum_hour=minimum_hour,
         is_presence_only=is_presence_only,
