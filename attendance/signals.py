@@ -232,25 +232,15 @@ def capture_work_mode_request_previous_range(sender, instance, **kwargs):
 
 @receiver(post_save, sender=WorkModeRequest)
 def recompute_work_mode_request_range(sender, instance, **kwargs):
-    windows = []
-    previous = getattr(instance, "_previous_recompute_window", None)
-    if previous:
-        windows.append(previous)
-    windows.append((instance.start_date, instance.end_date))
-    for start_date, end_date in windows:
-        if not start_date or not end_date:
-            continue
-        try:
-            recompute_attendance_range(instance.employee_id, start_date, end_date)
-        except Exception:
-            continue
+    """No-op on purpose.
+
+    Work Type Request recompute is now owned by the centralized action service so a
+    single business action produces only one synchronous recompute.
+    """
+    return None
 
 
 @receiver(post_delete, sender=WorkModeRequest)
 def recompute_deleted_work_mode_request_range(sender, instance, **kwargs):
-    if not instance.start_date or not instance.end_date:
-        return
-    try:
-        recompute_attendance_range(instance.employee_id, instance.start_date, instance.end_date)
-    except Exception:
-        pass
+    """No-op on purpose; deletion-side recompute is handled explicitly by service actions."""
+    return None
