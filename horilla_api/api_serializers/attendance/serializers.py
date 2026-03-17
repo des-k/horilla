@@ -10,7 +10,6 @@ from attendance.services.work_type_request_rules import (
     validate_work_type_request,
 )
 from attendance.services.work_type_request_permissions import build_permission_flags
-from attendance.services.work_type_request_files import build_attachment_links
 
 
 class AttendanceSerializer(serializers.ModelSerializer):
@@ -63,88 +62,6 @@ class AttendanceSerializer(serializers.ModelSerializer):
                 ("Attendance for this employee on the current date already exists.")
             )
         return data
-
-    def get_request_status(self, obj):
-        return getattr(obj, "status", None)
-
-    def get_status_label(self, obj):
-        try:
-            return obj.get_status_display()
-        except Exception:
-            return getattr(obj, "status", None)
-
-    def get_work_mode(self, obj):
-        return getattr(obj, "mode", None)
-
-    def get_mode_label(self, obj):
-        try:
-            return obj.get_mode_display()
-        except Exception:
-            return getattr(obj, "mode", None)
-
-    def get_scope_label(self, obj):
-        try:
-            return obj.get_scope_display()
-        except Exception:
-            return getattr(obj, "scope", None)
-
-    def get_note(self, obj):
-        return getattr(obj, "reason", None)
-
-    def get_comment(self, obj):
-        return getattr(obj, "action_reason", None) or getattr(obj, "document_remark", None)
-
-    def get_action_note(self, obj):
-        return getattr(obj, "action_reason", None) or getattr(obj, "document_remark", None)
-
-    def get_document_status_label(self, obj):
-        try:
-            return obj.get_document_status_display()
-        except Exception:
-            return getattr(obj, "document_status", None)
-
-    def _serialize_file_links(self, obj, files):
-        request = self._request()
-        if request is not None:
-            return [
-                {"id": link.file_id, "name": link.file_name, "url": link.url}
-                for link in build_attachment_links(request, obj, files)
-            ]
-        out = []
-        seen = set()
-        for f in files or []:
-            fid = getattr(f, "id", None)
-            if fid in seen:
-                continue
-            seen.add(fid)
-            out.append({
-                "id": fid,
-                "name": getattr(getattr(f, "file", None), "name", None),
-                "url": getattr(getattr(f, "file", None), "url", None),
-            })
-        return out
-
-    def get_current_document_version(self, obj):
-        current = getattr(obj, "current_document_version", None)
-        if current is None:
-            return None
-        files = obj.current_document_files() or []
-        return {
-            "id": current.id,
-            "version_number": current.version_number,
-            "status": current.status,
-            "status_label": getattr(current, "get_status_display", lambda: current.status)(),
-            "is_current": True,
-            "submitted_at": current.submitted_at,
-            "reviewed_at": current.reviewed_at,
-            "review_remark": current.review_remark,
-            "submitted_by_name": getattr(obj, "_employee_display_name", lambda employee: None)(getattr(current, "submitted_by", None)),
-            "reviewed_by_name": getattr(obj, "_employee_display_name", lambda employee: None)(getattr(current, "reviewed_by", None)),
-            "files": self._serialize_file_links(obj, files),
-        }
-
-    def get_current_document_files(self, obj):
-        return self._serialize_file_links(obj, obj.current_document_files() or [])
 
     def get_attachment_urls(self, obj):
         """Return list of attachment URLs for an attendance correction request.
@@ -615,8 +532,11 @@ class WorkModeRequestSerializer(serializers.ModelSerializer):
                 instance_id=getattr(self.instance, "id", None),
             )
 
-        doc_status = attrs.get("document_status") or getattr(self.instance, "document_status", None)
-        if mode == AttendanceWorkMode.ON_DUTY and doc_status == WorkModeRequestDocumentStatus.VERIFIED and getattr(self.instance, "document_status", None) == WorkModeRequestDocumentStatus.VERIFIED:
+        effective_doc_status = None
+        if self.instance is not None:
+            resolver = getattr(self.instance, "effective_document_status", None)
+            effective_doc_status = resolver() if callable(resolver) else getattr(self.instance, "document_status", None)
+        if mode == AttendanceWorkMode.ON_DUTY and effective_doc_status == WorkModeRequestDocumentStatus.VERIFIED:
             immutable = {"reason", "start_date", "end_date", "scope", "mode", "duty_destination_location", "duty_destination_detail"}
             changed = [field for field in immutable if field in attrs]
             if changed:
@@ -671,14 +591,43 @@ class WorkModeRequestSerializer(serializers.ModelSerializer):
     def get_action_note(self, obj):
         return getattr(obj, "action_reason", None) or getattr(obj, "document_remark", None)
 
+    def _document_status_label_for_mode(self, obj, raw_status):
+        raw_status = (raw_status or "").strip()
+        if getattr(obj, "mode", None) == AttendanceWorkMode.WFA:
+            return "Supporting Attachment Uploaded" if raw_status and raw_status != WorkModeRequestDocumentStatus.NOT_UPLOADED else "Not Uploaded"
+        if not raw_status:
+            return None
+        mapping = {
+            WorkModeRequestDocumentStatus.NOT_UPLOADED: "Not Uploaded",
+            WorkModeRequestDocumentStatus.SUBMITTED: "Submitted",
+            WorkModeRequestDocumentStatus.PENDING_VERIFICATION: "Pending Verification",
+            WorkModeRequestDocumentStatus.VERIFIED: "Verified",
+            WorkModeRequestDocumentStatus.REJECTED: "Rejected",
+        }
+        return mapping.get(raw_status, raw_status)
+
+    def _current_document_obj(self, obj):
+        current = getattr(obj, "current_document_version", None)
+        if current is not None:
+            return current
+        resolver = getattr(obj, "resolve_current_document_version", None)
+        if callable(resolver):
+            return resolver()
+        return None
+
     def get_document_status_label(self, obj):
+        resolver = getattr(obj, "effective_document_status", None)
+        raw_status = resolver() if callable(resolver) else getattr(obj, "document_status", None)
+        label = self._document_status_label_for_mode(obj, raw_status)
+        if label:
+            return label
         try:
             return obj.get_document_status_display()
         except Exception:
-            return getattr(obj, "document_status", None)
+            return raw_status
 
     def get_current_document_version(self, obj):
-        current = getattr(obj, "current_document_version", None)
+        current = self._current_document_obj(obj)
         if current is None:
             return None
         files = []
@@ -690,7 +639,7 @@ class WorkModeRequestSerializer(serializers.ModelSerializer):
             "id": getattr(current, "id", None),
             "version_number": getattr(current, "version_number", None),
             "status": getattr(current, "status", None),
-            "status_label": getattr(current, "get_status_display", lambda: getattr(current, "status", None))(),
+            "status_label": self._document_status_label_for_mode(obj, getattr(current, "status", None)) or getattr(current, "get_status_display", lambda: getattr(current, "status", None))(),
             "is_current": True,
             "submitted_at": getattr(current, "submitted_at", None),
             "reviewed_at": getattr(current, "reviewed_at", None),
@@ -708,11 +657,6 @@ class WorkModeRequestSerializer(serializers.ModelSerializer):
 
     def _serialize_file_links(self, obj, files):
         request = self._request()
-        if request is not None:
-            return [
-                {"id": link.file_id, "name": link.file_name, "url": link.url}
-                for link in build_attachment_links(request, obj, files)
-            ]
         out = []
         seen = set()
         for f in files or []:
@@ -720,10 +664,16 @@ class WorkModeRequestSerializer(serializers.ModelSerializer):
             if fid in seen:
                 continue
             seen.add(fid)
+            url = getattr(getattr(f, "file", None), "url", None)
+            if request is not None and url:
+                try:
+                    url = request.build_absolute_uri(url)
+                except Exception:
+                    pass
             out.append({
                 "id": fid,
                 "name": getattr(getattr(f, "file", None), "name", None),
-                "url": getattr(getattr(f, "file", None), "url", None),
+                "url": url,
             })
         return out
 
@@ -781,7 +731,7 @@ class WorkModeRequestSerializer(serializers.ModelSerializer):
         return bool(self._flags(obj).get("can_upload_document"))
 
     def get_current_document_version_number(self, obj):
-        current = getattr(obj, "current_document_version", None)
+        current = self._current_document_obj(obj)
         return getattr(current, "version_number", None) if current else None
 
     def get_document_versions(self, obj):
@@ -797,7 +747,7 @@ class WorkModeRequestSerializer(serializers.ModelSerializer):
                 "version_number": version.version_number,
                 "is_current": version.is_current,
                 "status": version.status,
-                "status_label": getattr(version, "get_status_display", lambda: version.status)(),
+                "status_label": self._document_status_label_for_mode(obj, getattr(version, "status", None)) or getattr(version, "get_status_display", lambda: version.status)(),
                 "review_remark": version.review_remark,
                 "submitted_at": version.submitted_at,
                 "reviewed_at": version.reviewed_at,
@@ -807,6 +757,7 @@ class WorkModeRequestSerializer(serializers.ModelSerializer):
                 "files": self._serialize_file_links(obj, files),
             })
         return out
+
 
 class MailTemplateSerializer(serializers.ModelSerializer):
     class Meta:
