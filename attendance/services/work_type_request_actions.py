@@ -106,6 +106,8 @@ class WorkModeRequestActions:
 
     @staticmethod
     def _version_status_for_upload(req: WorkModeRequest) -> str:
+        if req.mode == AttendanceWorkMode.WFA:
+            return WorkModeRequestDocumentStatus.SUBMITTED
         return (
             WorkModeRequestDocumentStatus.PENDING_VERIFICATION
             if req.status == WorkModeRequestStatus.APPROVED
@@ -114,34 +116,33 @@ class WorkModeRequestActions:
 
     @staticmethod
     def _current_version(req: WorkModeRequest) -> Optional[WorkModeRequestDocumentVersion]:
-        return req.current_document_version
+        current = getattr(req, "current_document_version", None)
+        if current is not None:
+            return current
+        resolver = getattr(req, "resolve_current_document_version", None)
+        if callable(resolver):
+            return resolver()
+        return None
 
     @staticmethod
     def _apply_current_version_to_request(
         req: WorkModeRequest,
         version: Optional[WorkModeRequestDocumentVersion],
     ) -> None:
+        req.current_document_version = version
         req.sync_legacy_files_from_current_version()
-        if req.mode != AttendanceWorkMode.ON_DUTY:
-            req.document_status = WorkModeRequestDocumentStatus.NOT_UPLOADED
-            req.document_verified_by = None
-            req.document_verified_at = None
-            req.document_remark = None
-            return
 
         if version is None:
-            req.document_status = WorkModeRequestDocumentStatus.NOT_UPLOADED
-            req.document_verified_by = None
-            req.document_verified_at = None
-            req.document_remark = None
-            if req.status == WorkModeRequestStatus.WAITING_FOR_APPROVAL:
+            req.sync_root_document_fields_from_current_version()
+            if req.mode == AttendanceWorkMode.ON_DUTY and req.status == WorkModeRequestStatus.WAITING_FOR_APPROVAL:
                 req.status = WorkModeRequestStatus.PENDING
             return
 
-        req.document_status = version.status
-        req.document_verified_by = version.reviewed_by
-        req.document_verified_at = version.reviewed_at
-        req.document_remark = version.review_remark
+        if req.mode == AttendanceWorkMode.WFA:
+            req.sync_root_document_fields_from_current_version()
+            return
+
+        req.sync_root_document_fields_from_current_version()
         if req.status == WorkModeRequestStatus.PENDING and version.file_links.exists():
             req.status = WorkModeRequestStatus.WAITING_FOR_APPROVAL
 
@@ -176,7 +177,7 @@ class WorkModeRequestActions:
             status=WorkModeRequestActions._version_status_for_upload(req),
             submitted_by=actor,
             submitted_at=when,
-            review_remark=WorkModeRequestActions._remark(remark),
+            review_remark=None,
             reviewed_by=None,
             reviewed_at=None,
         )
@@ -291,7 +292,12 @@ class WorkModeRequestActions:
             old_status=old_status,
             new_status=req.status,
             remark=str(reason_code),
-            metadata={"cutoff_due_at": due_dt.isoformat() if due_dt else None},
+            metadata={
+                "cutoff_due_at": due_dt.isoformat() if due_dt else None,
+                "reason_code": reason_code,
+                "action_at": now_dt.isoformat(),
+                "action_reason": str(reason_code),
+            },
         )
         apply_rejection_to_attendance(req)
         return WorkModeRequestActionResult(request=req, recomputed=True, auto_rejected=True)
@@ -339,9 +345,15 @@ class WorkModeRequestActions:
         uploaded_files = list(uploaded_files or [])
         if mode == AttendanceWorkMode.WFA:
             req.status = WorkModeRequestStatus.WAITING_FOR_APPROVAL
+            if uploaded_files:
+                WorkModeRequestActions._create_document_version(req, actor=actor, uploaded_files=uploaded_files)
+            else:
+                req.current_document_version = None
+                req.document_status = WorkModeRequestDocumentStatus.NOT_UPLOADED
         elif mode == AttendanceWorkMode.ON_DUTY and uploaded_files:
             WorkModeRequestActions._create_document_version(req, actor=actor, uploaded_files=uploaded_files)
         else:
+            req.current_document_version = None
             req.document_status = WorkModeRequestDocumentStatus.NOT_UPLOADED
         WorkModeRequestActions._touch_action(req, actor=actor, action_type=WorkModeRequestActionType.CREATED)
         req.save()
@@ -373,9 +385,14 @@ class WorkModeRequestActions:
         remark: Optional[str] = None,
         request=None,
     ) -> WorkModeRequestActionResult:
-        if request is not None and not can_update_request(request, req):
+        uploaded_files = list(uploaded_files or [])
+        has_non_file_changes = any(
+            value is not None
+            for value in (reason, duty_destination_location, duty_destination_detail)
+        )
+        if request is not None and has_non_file_changes and not can_update_request(request, req):
             raise WorkModeRequestActionError("This request can no longer be updated.")
-        if req.mode == AttendanceWorkMode.ON_DUTY and request is not None and uploaded_files and not can_upload_document(request, req):
+        if request is not None and uploaded_files and not can_upload_document(request, req):
             raise WorkModeRequestActionError("You cannot upload documents for this request.")
 
         old_status = req.status
@@ -392,7 +409,6 @@ class WorkModeRequestActions:
             if not str(req.duty_destination_location or "").strip():
                 raise WorkModeRequestActionError("Destination location is required for ON DUTY requests.")
 
-        uploaded_files = list(uploaded_files or [])
         changed = False
         if uploaded_files:
             WorkModeRequestActions._create_document_version(
@@ -420,7 +436,7 @@ class WorkModeRequestActions:
                 "current_document_version": getattr(req.current_document_version, "version_number", None),
             },
         )
-        recomputed = bool(changed and req.status == WorkModeRequestStatus.APPROVED)
+        recomputed = bool(changed and req.mode == AttendanceWorkMode.ON_DUTY and req.status == WorkModeRequestStatus.APPROVED)
         if recomputed:
             WorkModeRequestActions._recompute(req)
         return WorkModeRequestActionResult(request=req, recomputed=recomputed)
@@ -526,6 +542,8 @@ class WorkModeRequestActions:
     @staticmethod
     @transaction.atomic
     def verify_document(req: WorkModeRequest, *, actor, request=None, remark: Optional[str] = None) -> WorkModeRequestActionResult:
+        if req.mode != AttendanceWorkMode.ON_DUTY:
+            raise WorkModeRequestActionError("WFA documents do not use document review workflow.")
         if request is not None and not can_verify_document(request, req):
             raise WorkModeRequestActionError("You do not have permission to verify this document.")
         version = WorkModeRequestActions._current_version(req)
@@ -541,6 +559,7 @@ class WorkModeRequestActions:
         WorkModeRequestActions._apply_current_version_to_request(req, version)
         WorkModeRequestActions._touch_action(req, actor=actor, action_type=WorkModeRequestActionType.VERIFIED, remark=remark, when=now_dt)
         req.save(update_fields=[
+            "current_document_version",
             "document_status",
             "document_verified_by",
             "document_verified_at",
@@ -557,6 +576,8 @@ class WorkModeRequestActions:
     @staticmethod
     @transaction.atomic
     def reject_document(req: WorkModeRequest, *, actor, request=None, remark: Optional[str] = None) -> WorkModeRequestActionResult:
+        if req.mode != AttendanceWorkMode.ON_DUTY:
+            raise WorkModeRequestActionError("WFA documents do not use document review workflow.")
         if request is not None and not can_reject_document(request, req):
             raise WorkModeRequestActionError("You do not have permission to reject this document.")
         version = WorkModeRequestActions._current_version(req)
@@ -570,7 +591,7 @@ class WorkModeRequestActions:
         version.save(update_fields=["status", "reviewed_by", "reviewed_at", "review_remark"])
         WorkModeRequestActions._apply_current_version_to_request(req, version)
         WorkModeRequestActions._touch_action(req, actor=actor, action_type=WorkModeRequestActionType.DOCUMENT_REJECTED, remark=remark)
-        req.save(update_fields=["document_status", "document_verified_by", "document_verified_at", "document_remark", "action_by", "action_at", "action_type", "action_reason"])
+        req.save(update_fields=["current_document_version", "document_status", "document_verified_by", "document_verified_at", "document_remark", "action_by", "action_at", "action_type", "action_reason"])
         WorkModeRequestActions._audit(req, actor=actor, action_type=WorkModeRequestActionType.DOCUMENT_REJECTED, old_status=f"document:{old_status}", new_status=f"document:{req.document_status}", remark=remark, metadata={"version_number": version.version_number})
         WorkModeRequestActions._recompute(req)
         return WorkModeRequestActionResult(request=req, recomputed=True)
@@ -578,6 +599,8 @@ class WorkModeRequestActions:
     @staticmethod
     @transaction.atomic
     def reopen_document(req: WorkModeRequest, *, actor, request=None, remark: Optional[str] = None) -> WorkModeRequestActionResult:
+        if req.mode != AttendanceWorkMode.ON_DUTY:
+            raise WorkModeRequestActionError("WFA documents do not use document review workflow.")
         if request is not None and not can_reopen_document(request, req):
             raise WorkModeRequestActionError("You do not have permission to reopen this document.")
         version = WorkModeRequestActions._current_version(req)
@@ -593,7 +616,7 @@ class WorkModeRequestActions:
         version.save(update_fields=["status", "reviewed_by", "reviewed_at", "review_remark"])
         WorkModeRequestActions._apply_current_version_to_request(req, version)
         WorkModeRequestActions._touch_action(req, actor=actor, action_type=WorkModeRequestActionType.REOPENED, remark=remark)
-        req.save(update_fields=["document_status", "document_verified_by", "document_verified_at", "document_remark", "action_by", "action_at", "action_type", "action_reason"])
+        req.save(update_fields=["current_document_version", "document_status", "document_verified_by", "document_verified_at", "document_remark", "action_by", "action_at", "action_type", "action_reason"])
         WorkModeRequestActions._audit(req, actor=actor, action_type=WorkModeRequestActionType.REOPENED, old_status=f"document:{old_status}", new_status=f"document:{req.document_status}", remark=remark, metadata={"version_number": version.version_number})
         WorkModeRequestActions._recompute(req)
         return WorkModeRequestActionResult(request=req, recomputed=True)
