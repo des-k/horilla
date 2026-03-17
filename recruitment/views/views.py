@@ -22,7 +22,14 @@ from datetime import date, datetime
 from itertools import chain
 from urllib.parse import parse_qs
 
-import fitz  # type: ignore
+try:
+    import fitz  # type: ignore
+except ImportError:  # pragma: no cover - optional dependency in test env
+    class _FitzUnavailable:
+        def open(self, *args, **kwargs):
+            raise ImportError("PyMuPDF is required for PDF extraction features")
+
+    fitz = _FitzUnavailable()  # type: ignore
 from django import template
 from django.conf import settings
 from django.contrib import messages
