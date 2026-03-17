@@ -185,7 +185,14 @@
                                   {% endif %}
                                 </div>
                                 
-                                <div data-cell-index="8" class="oh-sticky-table__td">{{attendance.shift_id}}</div>
+                                <div data-cell-index="8" class="oh-sticky-table__td"><div>{{attendance.shift_id}}</div>
+                                    {% with flex_label=attendance|attendance_flex_display %}
+                                        {% if flex_label %}
+                                            <div class="mt-1">
+                                                <span class="oh-badge oh-badge--light">{{ flex_label }}</span>
+                                            </div>
+                                        {% endif %}
+                                    {% endwith %}</div>
                                 <div data-cell-index="9" class="oh-sticky-table__td">{{attendance.work_type_id}}</div>
                                 <div data-cell-index="10" class="oh-sticky-table__td">{{attendance.minimum_hour}}</div>
                                 <div data-cell-index="11" class="oh-sticky-table__td">
