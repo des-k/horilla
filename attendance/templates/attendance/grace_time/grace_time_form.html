@@ -66,9 +66,19 @@
                             <span class="oh-info mt-2" title="{{form.allowed_clock_out.help_text|safe }}"></span>
                         </div>
                         <div class="oh-switch p-2 pt-0">
-                            {{ form.allowed_clock_out }}
+                            {{ form.allowed_clock_out|add_class:"oh-switch__checkbox" }}
                         </div>
                         {{ form.allowed_clock_out.errors }}
+                    </div>
+                </div>
+            </div>
+            <div class="row">
+                <div class="col-12 col-sm-12 col-md-6 col-lg-6">
+                    <div class="oh-input__group">
+                        <label class="oh-input__label" for="{{ form.clock_in_type.id_for_label }}">{{ form.clock_in_type.label }}</label>
+                        {{ form.clock_in_type|add_class:"oh-select oh-select-2 w-100" }}
+                        <small class="text-muted d-block mt-1">{% trans 'Choose whether flexible check-in applies only after shift start or before and after shift start.' %}</small>
+                        {{ form.clock_in_type.errors }}
                     </div>
                 </div>
             </div>
