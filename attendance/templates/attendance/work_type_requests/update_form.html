@@ -15,7 +15,11 @@
       {% trans "Allowed edit: update note, destination, detail, and upload a new document version while the request is still editable." %}
       <br />
       <strong>{% trans "Current status" %}:</strong> {{ req.status|upper }}<br/>
-      <strong>{% trans "Document status" %}:</strong> {{ req.get_document_status_display }}
+      {% if req.mode == 'wfa' %}
+        <strong>{% trans "WFA document flow" %}:</strong> {% trans "Optional supporting attachment history (no verify/reject/reopen review workflow)." %}
+      {% else %}
+        <strong>{% trans "Document status" %}:</strong> {{ req.get_document_status_display }}
+      {% endif %}
       {% if req.current_document_version %}<br/><strong>{% trans "Current version" %}:</strong> v{{ req.current_document_version.version_number }}{% endif %}
     </small>
   </div>
@@ -46,7 +50,11 @@
       <label class="oh-label">{{ form.files.label }}</label>
       {{ form.files }}
       {% if form.files.errors %}<small class="text-danger">{{ form.files.errors|join:", " }}</small>{% endif %}
-      <small class="text-muted">{% trans "Uploading new files creates a new On Duty document version. The previous version remains in history, and the current version will go back into review until it is verified again." %}</small>
+      {% if req.mode == 'wfa' %}
+        <small class="text-muted">{% trans "WFA documents remain optional supporting history only. Uploading new files creates a new supporting document version and preserves older versions. WFA does not use verify/reject/reopen document review actions." %}</small>
+      {% else %}
+        <small class="text-muted">{% trans "Uploading new files creates a new On Duty document version. Older versions stay in history, and the current version returns to document review until it is verified again." %}</small>
+      {% endif %}
     </div>
 
     {% if form.non_field_errors %}
