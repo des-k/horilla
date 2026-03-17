@@ -19,9 +19,8 @@ class DynamicFieldsConfig(AppConfig):
     name = "dynamic_fields"
 
     def ready(self):
-        # Load signal registrations here so Django imports them only after the
-        # app registry is ready. Do not import signals from migrations/__init__.py.
         from dynamic_fields import signals  # noqa: F401
+
         from django.contrib.contenttypes.models import ContentType
         from simple_history.models import HistoricalRecords
 
