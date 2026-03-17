@@ -3,6 +3,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from ...api_decorators.base.decorators import ManagerPermission
+from attendance.services.work_type_request_permissions import is_global_work_type_approver, subordinate_employee_ids
 
 
 class AttendancePermissionCheck(APIView):
@@ -34,21 +35,12 @@ class WorkModeRequestApprovePermissionCheck(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        # Admin shortcuts (also works when the user has no employee profile)
+        can_approve = False
         try:
-            user = request.user
-            if getattr(user, "is_superuser", False) or user.has_perm(
-                "attendance.change_workmoderequest"
-            ) or user.has_perm("attendance.change_attendance"):
-                return Response({"can_approve": True}, status=200)
-        except Exception:
-            pass
-
-        # Manager check (may require employee profile)
-        try:
-            can_approve = ManagerPermission().has_permission(
-                request, "attendance.change_workmoderequest"
+            can_approve = bool(
+                is_global_work_type_approver(request.user)
+                or subordinate_employee_ids(request)
             )
         except Exception:
             can_approve = False
-        return Response({"can_approve": bool(can_approve)}, status=200)
+        return Response({"can_approve": can_approve}, status=200)
