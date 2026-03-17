@@ -35,13 +35,7 @@ from attendance.models import (
     WorkModeRequestRejectReasonCode,
     WorkModeRequestStatus,
 )
-from attendance.services.work_type_request_rules import (
-    apply_rejection_to_attendance,
-    has_attachments,
-    work_mode_request_approval_q,
-)
-from attendance.services.request_audit import log_request_action
-from attendance.services.reconciliation import recompute_attendance_range
+from attendance.services.work_type_request_rules import work_mode_request_approval_q
 from attendance.services.work_type_request_files import (
     attachment_belongs_to_request,
     build_attachment_links,
@@ -52,6 +46,8 @@ from attendance.services.work_type_request_actions import WorkModeRequestActionE
 from attendance.services.work_type_request_permissions import (
     build_permission_flags,
     can_manage_as_approver,
+    can_update_request,
+    can_upload_document,
     is_global_work_type_approver,
     request_actor_employee,
 )
@@ -78,29 +74,6 @@ def _can_act_on_request(request, req: WorkModeRequest) -> bool:
 
 
 
-def _set_on_duty_document_state(req: WorkModeRequest, *, has_files: bool, approved: bool = False):
-    if req.mode != AttendanceWorkMode.ON_DUTY:
-        return
-    if not has_files:
-        req.document_status = WorkModeRequestDocumentStatus.NOT_UPLOADED
-        return
-    req.document_status = WorkModeRequestDocumentStatus.PENDING_VERIFICATION if approved else WorkModeRequestDocumentStatus.SUBMITTED
-
-
-def _log_request_action(req: WorkModeRequest, actor, *, action_type: str, old_status: str = None, new_status: str = None, remark: str = None):
-    try:
-        log_request_action(
-            work_mode_request=req,
-            actor=actor,
-            action_type=action_type,
-            old_status=old_status,
-            new_status=new_status,
-            remark=remark,
-        )
-    except Exception:
-        pass
-
-
 def _request_actor_employee(request):
     return request_actor_employee(request)
 
@@ -112,26 +85,11 @@ def _request_actor_label(request, fallback):
     return fallback
 
 
-def _is_web_update_allowed(req: WorkModeRequest) -> bool:
-    if req.status in (
-        WorkModeRequestStatus.REJECTED,
-        WorkModeRequestStatus.CANCELED,
-        WorkModeRequestStatus.REVOKED,
-    ):
-        return False
-    if req.mode != AttendanceWorkMode.ON_DUTY:
-        return req.status in (
-            WorkModeRequestStatus.PENDING,
-            WorkModeRequestStatus.WAITING_FOR_APPROVAL,
-        )
-    if req.status in (
-        WorkModeRequestStatus.PENDING,
-        WorkModeRequestStatus.WAITING_FOR_APPROVAL,
-    ):
-        return True
-    if req.status != WorkModeRequestStatus.APPROVED:
-        return False
-    return req.document_status != WorkModeRequestDocumentStatus.VERIFIED
+def _is_web_update_allowed(request, req: WorkModeRequest) -> bool:
+    return bool(
+        can_update_request(request, req)
+        or can_upload_document(request, req)
+    )
 
 
 def _request_remark_value(request, *keys: str):
@@ -140,48 +98,6 @@ def _request_remark_value(request, *keys: str):
         if value:
             return value
     return None
-
-
-def _save_on_duty_uploads(req: WorkModeRequest, uploaded_files, *, replace_existing: bool = False):
-    if replace_existing:
-        req.files.clear()
-    for uploaded in uploaded_files:
-        af = AttendanceRequestFile.objects.create(file=uploaded)
-        req.files.add(af)
-
-
-def _sync_on_duty_document_after_upload(req: WorkModeRequest):
-    if req.mode != AttendanceWorkMode.ON_DUTY:
-        return False
-
-    had_approved_finalization = req.status == WorkModeRequestStatus.APPROVED
-    previous_document_status = req.document_status
-    previous_verified_by = req.document_verified_by_id
-    previous_verified_at = req.document_verified_at
-
-    _set_on_duty_document_state(
-        req,
-        has_files=has_attachments(req),
-        approved=had_approved_finalization,
-    )
-
-    if req.status == WorkModeRequestStatus.PENDING and has_attachments(req):
-        req.status = WorkModeRequestStatus.WAITING_FOR_APPROVAL
-
-    document_changed = previous_document_status != req.document_status
-    verification_reset = False
-    if had_approved_finalization and req.document_status != WorkModeRequestDocumentStatus.VERIFIED:
-        if req.document_verified_by_id is not None or req.document_verified_at is not None:
-            verification_reset = True
-        req.document_verified_by = None
-        req.document_verified_at = None
-
-    return document_changed or verification_reset or previous_verified_by != req.document_verified_by_id or previous_verified_at != req.document_verified_at
-
-
-def _recompute_if_needed(req: WorkModeRequest, *, should_recompute: bool):
-    if should_recompute:
-        recompute_attendance_range(req.employee_id, req.start_date, req.end_date)
 
 
 def _mode_label(mode: str) -> str:
@@ -649,7 +565,7 @@ def work_type_request_update(request, obj_id: int):
     if req.employee_id_id != employee.id:
         return HttpResponseForbidden("Not allowed")
 
-    if not _is_web_update_allowed(req):
+    if not _is_web_update_allowed(request, req):
         return HttpResponseForbidden("This request can no longer be updated")
 
     form = WorkTypeRequestUpdateForm(
