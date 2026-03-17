@@ -97,9 +97,9 @@ class WorkTypeRequestCreateForm(forms.ModelForm):
     )
 
     files = MultipleFileField(
-        label="Attachments",
+        label="Supporting Documents",
         required=False,
-        help_text="For ON DUTY, attachments can be uploaded now or later. Later uploads create a new document version for review.",
+        help_text="WFA attachments are optional supporting history only. ON DUTY attachments create document versions and use review workflow after approval.",
         widget=MultipleClearableFileInput(attrs={"multiple": True, "class": "oh-input w-100"}),
     )
 
@@ -199,15 +199,25 @@ class WorkTypeRequestUpdateForm(forms.Form):
     )
 
     files = MultipleFileField(
-        label="Attachments",
+        label="Documents",
         required=False,
-        help_text="Uploading files here creates a new document version and sends it back for review. Old versions stay in history.",
+        help_text="WFA uploads stay as supporting history. ON DUTY uploads create a new reviewable document version and preserve prior history.",
         widget=MultipleClearableFileInput(attrs={"multiple": True, "class": "oh-input w-100"}),
     )
 
     def __init__(self, *args, request_obj: WorkModeRequest | None = None, **kwargs):
         super().__init__(*args, **kwargs)
         self._request_obj = request_obj
+        if request_obj is not None and request_obj.mode == AttendanceWorkMode.WFA:
+            self.fields["files"].label = "Supporting Documents"
+            self.fields["files"].help_text = (
+                "WFA documents are optional supporting history only. Uploading more files creates a new version but does not trigger verify/reject/reopen workflow."
+            )
+        elif request_obj is not None and request_obj.mode == AttendanceWorkMode.ON_DUTY:
+            self.fields["files"].label = "On Duty Documents"
+            self.fields["files"].help_text = (
+                "Uploading files creates a new On Duty document version. Previous versions remain in history and the current version returns to document review."
+            )
 
     def clean(self):
         cleaned = super().clean()
@@ -226,7 +236,8 @@ class WorkTypeRequestUpdateForm(forms.Form):
 class WorkTypeRequestRejectForm(forms.Form):
     reason_code = forms.ChoiceField(
         label="Reject Reason Code",
-        choices=WorkModeRequestRejectReasonCode.choices,
+        choices=((WorkModeRequestRejectReasonCode.MANUAL_REJECT, "Manual Reject"),),
+        initial=WorkModeRequestRejectReasonCode.MANUAL_REJECT,
         widget=forms.Select(attrs={"class": "oh-select w-100"}),
     )
     reason = forms.CharField(
