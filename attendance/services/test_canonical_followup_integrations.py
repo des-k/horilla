@@ -126,10 +126,11 @@ class CanonicalRecomputeDecisionFlowTests(SimpleTestCase):
 
     def test_wfa_latest_checkout_wins_and_older_checkout_becomes_superseded(self):
         attendance_date = date(2026, 3, 14)
+        employee = SimpleNamespace(id=321, employee_work_info=SimpleNamespace())
         attendance = SimpleNamespace(attendance_date=attendance_date, save=lambda *args, **kwargs: None)
         activity = SimpleNamespace(save=lambda *args, **kwargs: None)
         ctx = reconciliation.ShiftContext(
-            employee="EMP-WFA",
+            employee=employee,
             attendance_date=attendance_date,
             day=None,
             shift=None,
@@ -163,11 +164,12 @@ class CanonicalRecomputeDecisionFlowTests(SimpleTestCase):
              patch.object(reconciliation, "_resolve_shift_context", return_value=ctx), \
              patch.object(reconciliation, "_resolve_leave_context", return_value=leave_ctx), \
              patch.object(reconciliation, "_approved_work_mode_request", return_value=work_request), \
+             patch.object(reconciliation, "_approved_work_mode_request_for_session", return_value=work_request), \
              patch.object(reconciliation, "_latest_revoked_request", return_value=None), \
              patch.object(reconciliation, "_candidate_logs", return_value=logs), \
              patch.object(reconciliation, "_sync_attendance_and_activity", lambda *args, **kwargs: sync_calls.append(kwargs)), \
              patch.object(reconciliation, "_set_late_early_rows", lambda *args, **kwargs: None):
-            reconciliation.recompute_attendance("EMP-WFA", attendance_date)
+            reconciliation.recompute_attendance(employee, attendance_date)
 
         self.assertEqual(sync_calls[0]["source"], reconciliation.SOURCE_WFA)
         self.assertEqual(sync_calls[0]["note"], "WFA reconciled under normal attendance rules")
@@ -297,10 +299,9 @@ class WorkModeDocumentActionFlowTests(TestCase):
         request.session = {}
 
         with patch.object(work_type_requests, "get_object_or_404", return_value=req_obj), \
-             patch.object(work_type_requests, "_can_act_on_request", return_value=True), \
-             patch.object(work_type_requests, "has_attachments", return_value=True), \
-             patch.object(work_type_requests, "recompute_attendance_range", lambda employee, start_date, end_date: recompute_calls.append((employee, start_date, end_date))), \
-             patch.object(work_type_requests, "_log_request_action", lambda *args, **kwargs: log_calls.append(kwargs)), \
+             patch("attendance.services.work_type_request_actions.can_reopen_document", return_value=True), \
+             patch.object(work_type_requests.WorkModeRequestActions, "_recompute", lambda req: recompute_calls.append((req.employee_id, req.start_date, req.end_date))), \
+             patch.object(work_type_requests.WorkModeRequestActions, "_audit", lambda req, **kwargs: log_calls.append(kwargs)), \
              patch.object(work_type_requests.messages, "success", lambda *args, **kwargs: None):
             response = work_type_requests.work_type_request_document_action(request, req_obj.id, "reopen")
 
@@ -611,7 +612,7 @@ class WorkModeDocumentActionReasonParityTests(TestCase):
         request.user = web_user
         request.session = {}
 
-        with patch.object(work_type_requests, "get_object_or_404", return_value=req_obj),              patch.object(work_type_requests, "_can_act_on_request", return_value=True),              patch.object(work_type_requests, "recompute_attendance_range", lambda *args, **kwargs: None),              patch.object(work_type_requests, "_log_request_action", lambda *args, **kwargs: None),              patch.object(work_type_requests.messages, "success", lambda *args, **kwargs: None):
+        with patch.object(work_type_requests, "get_object_or_404", return_value=req_obj),              patch("attendance.services.work_type_request_actions.can_verify_document", return_value=True),              patch.object(work_type_requests.WorkModeRequestActions, "_recompute", lambda *args, **kwargs: None),              patch.object(work_type_requests.WorkModeRequestActions, "_audit", lambda *args, **kwargs: None),              patch.object(work_type_requests.messages, "success", lambda *args, **kwargs: None):
             response = work_type_requests.work_type_request_document_action(request, req_obj.id, "verify")
 
         self.assertEqual(response.status_code, 200)
