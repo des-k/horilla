@@ -21,8 +21,21 @@ from django.template.loader import render_to_string
 from django.utils import timezone as django_timezone
 from django.utils.translation import gettext as __
 from django.utils.translation import gettext_lazy as _
-from zk import ZK
-from zk import exception as zk_exception
+try:
+    from zk import ZK
+    from zk import exception as zk_exception
+except ImportError:  # pragma: no cover - optional device dependency in test env
+    class _ZKUnavailable:
+        def __init__(self, *args, **kwargs):
+            raise ImportError("pyzk is required for biometric device features")
+
+    class _ZKExceptionModule:
+        ZKErrorConnection = Exception
+        ZKErrorResponse = Exception
+        ZKNetworkError = Exception
+
+    ZK = _ZKUnavailable  # type: ignore
+    zk_exception = _ZKExceptionModule()  # type: ignore
 
 from attendance.methods.utils import Request
 from attendance.models import AttendanceActivity
