@@ -18,6 +18,16 @@ TERMINAL_STATUSES = {
 }
 
 
+def _effective_document_status(req: WorkModeRequest) -> str | None:
+    resolver = getattr(req, "effective_document_status", None)
+    if callable(resolver):
+        try:
+            return resolver()
+        except Exception:
+            pass
+    return getattr(req, "document_status", None)
+
+
 def request_actor_employee(request) -> Any | None:
     try:
         return request.user.employee_get
@@ -80,7 +90,7 @@ def update_allowed(req: WorkModeRequest) -> bool:
         return True
     if req.status != WorkModeRequestStatus.APPROVED:
         return False
-    return req.document_status != WorkModeRequestDocumentStatus.VERIFIED
+    return _effective_document_status(req) != WorkModeRequestDocumentStatus.VERIFIED
 
 
 def can_update_request(request, req: WorkModeRequest) -> bool:
@@ -99,12 +109,17 @@ def can_cancel_request(request, req: WorkModeRequest) -> bool:
 
 
 def can_upload_document(request, req: WorkModeRequest) -> bool:
-    return bool(
-        request
-        and is_owner(request, req)
-        and req.mode == AttendanceWorkMode.ON_DUTY
-        and update_allowed(req)
-    )
+    if not request or not is_owner(request, req):
+        return False
+    if req.status in TERMINAL_STATUSES:
+        return False
+    if req.mode == AttendanceWorkMode.WFA:
+        return req.status in {
+            WorkModeRequestStatus.PENDING,
+            WorkModeRequestStatus.WAITING_FOR_APPROVAL,
+            WorkModeRequestStatus.APPROVED,
+        }
+    return update_allowed(req)
 
 
 def can_approve_request(request, req: WorkModeRequest) -> bool:
@@ -140,7 +155,7 @@ def can_verify_document(request, req: WorkModeRequest) -> bool:
         request
         and req.mode == AttendanceWorkMode.ON_DUTY
         and req.status == WorkModeRequestStatus.APPROVED
-        and req.document_status in {
+        and _effective_document_status(req) in {
             WorkModeRequestDocumentStatus.SUBMITTED,
             WorkModeRequestDocumentStatus.PENDING_VERIFICATION,
         }
@@ -157,7 +172,7 @@ def can_reopen_document(request, req: WorkModeRequest) -> bool:
         request
         and req.mode == AttendanceWorkMode.ON_DUTY
         and req.status == WorkModeRequestStatus.APPROVED
-        and req.document_status in {
+        and _effective_document_status(req) in {
             WorkModeRequestDocumentStatus.VERIFIED,
             WorkModeRequestDocumentStatus.REJECTED,
         }
