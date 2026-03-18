@@ -52,10 +52,12 @@ from attendance.services.punching_history import (
     capture_request_restore_snapshot,
     clear_raw_links_for_request_override,
     reconcile_attendance_punches,
+    restore_raw_state_after_request,
 )
 from attendance.services.reconciliation import recompute_attendance
 from attendance.services.request_override_recompute import clear_request_override_and_recompute
 from attendance.services.request_audit import log_request_action
+from attendance.services.attachment_validation import validate_uploaded_files
 from base.methods import (
     choosesubordinates,
     closest_numbers,
@@ -206,7 +208,7 @@ def _detach_request_overridden_raw_links(attendance: Attendance, *, include_in: 
 
 
 def _restore_request_back_to_raw(attendance: Attendance, *, include_in: bool, include_out: bool, prev_attendance_date=None):
-    return clear_request_override_and_recompute(
+    return restore_raw_state_after_request(
         attendance,
         include_in=include_in,
         include_out=include_out,
@@ -438,6 +440,7 @@ def request_attendance_view(request):
 
 @login_required
 @hx_request_required
+@transaction.atomic
 def request_new(request):
     """
     This method is used to create new attendance requests
@@ -492,34 +495,42 @@ def request_new(request):
                     attendance_obj = None
 
             # Attach optional proof files (same as mobile/API: field name "files")
+            from attendance.models import AttendanceRequestFile, AttendanceRequestComment
+
+            uploaded = []
+            if hasattr(request, "FILES"):
+                uploaded = request.FILES.getlist("files") or request.FILES.getlist("files[]") or []
+                if not uploaded:
+                    f_single = request.FILES.get("file")
+                    if f_single:
+                        uploaded = [f_single]
+
             try:
-                from attendance.models import AttendanceRequestFile, AttendanceRequestComment
+                validate_uploaded_files(uploaded)
+            except ValidationError as exc:
+                form.add_error(None, exc)
+                transaction.set_rollback(True)
+                return render(
+                    request,
+                    "requests/attendance/request_new_form.html",
+                    {"form": form, "bulk": False},
+                )
 
-                uploaded = []
-                if hasattr(request, "FILES"):
-                    uploaded = request.FILES.getlist("files") or request.FILES.getlist("files[]") or []
-                    if not uploaded:
-                        f_single = request.FILES.get("file")
-                        if f_single:
-                            uploaded = [f_single]
+            if attendance_obj and uploaded:
+                try:
+                    actor_emp = request.user.employee_get
+                except Exception:
+                    actor_emp = getattr(attendance_obj, "employee_id", None)
 
-                if attendance_obj and uploaded:
-                    try:
-                        actor_emp = request.user.employee_get
-                    except Exception:
-                        actor_emp = getattr(attendance_obj, "employee_id", None)
-
-                    comment_text = (request.POST.get("request_description") or request.POST.get("reason") or "").strip()
-                    c = AttendanceRequestComment.objects.create(
-                        request_id=attendance_obj,
-                        employee_id=actor_emp,
-                        comment=(comment_text[:255] if comment_text else None),
-                    )
-                    for up in uploaded:
-                        arf = AttendanceRequestFile.objects.create(file=up)
-                        c.files.add(arf)
-            except Exception:
-                pass
+                comment_text = (request.POST.get("request_description") or request.POST.get("reason") or "").strip()
+                c = AttendanceRequestComment.objects.create(
+                    request_id=attendance_obj,
+                    employee_id=actor_emp,
+                    comment=(comment_text[:255] if comment_text else None),
+                )
+                for up in uploaded:
+                    arf = AttendanceRequestFile.objects.create(file=up)
+                    c.files.add(arf)
 
             if is_created:
                 messages.success(request, _("New attendance request created"))
@@ -1214,7 +1225,7 @@ def cancel_attendance_request(request, attendance_id):
         req_date = attendance.attendance_date
         req_employee = attendance.employee_id
         wants_in, wants_out = get_requested_sessions(attendance)
-        needs_canonical_reset = bool(req_type == "create_request" or is_approved_request)
+        needs_canonical_reset = bool(req_type == "create_request")
 
         if is_approved_request:
             _restore_request_back_to_raw(attendance, include_in=wants_in, include_out=wants_out, prev_attendance_date=req_date)
@@ -1222,9 +1233,6 @@ def cancel_attendance_request(request, attendance_id):
 
         attendance.is_validate_request_approved = False
         attendance.is_validate_request = False
-        if is_pending_request:
-            # Discard pending payload but keep request_description for history
-            attendance.requested_data = None
         attendance.request_type = "cancel_request"
         try:
             attendance.action_by = request.user.employee_get
@@ -1295,7 +1303,6 @@ def reject_validate_attendance_request(request, attendance_id):
 
         attendance.is_validate_request_approved = False
         attendance.is_validate_request = False
-        attendance.requested_data = None
         attendance.request_type = "reject_request"
         try:
             attendance.action_by = request.user.employee_get
