@@ -9,6 +9,7 @@ from attendance.models import (
     WorkModeRequestDocumentStatus,
     WorkModeRequestStatus,
 )
+from attendance.services.work_type_request_exceptions import WorkModeRequestConsistencyError
 from base.methods import get_subordinate_employee_ids
 
 
@@ -27,13 +28,17 @@ def _effective_document_status(req: WorkModeRequest) -> str | None:
     if callable(resolver):
         try:
             return resolver()
-        except Exception:
+        except Exception as exc:
             logger.exception(
                 "Failed to resolve effective document status for work mode request %s",
                 getattr(req, "id", None),
             )
-            return None
-    return None
+            raise WorkModeRequestConsistencyError(
+                f"Failed to resolve effective document status for request {getattr(req, 'id', None)}"
+            ) from exc
+    raise WorkModeRequestConsistencyError(
+        f"Request {getattr(req, 'id', None)} does not expose an authoritative document status resolver"
+    )
 
 
 def request_actor_employee(request) -> Any | None:
