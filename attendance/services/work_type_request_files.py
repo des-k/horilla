@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from typing import Iterable
@@ -13,6 +14,8 @@ from attendance.services.work_type_request_permissions import can_manage_as_appr
 
 SIGNER_SALT = "attendance.work_type_request_attachment"
 DEFAULT_MAX_AGE_SECONDS = 60 * 60 * 24
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -75,8 +78,13 @@ def request_can_view_attachment(request, req: WorkModeRequest) -> bool:
         if is_owner(request, req):
             return True
     except Exception:
-        pass
-    return can_manage_as_approver(request, req)
+        logger.exception("Failed to resolve work-mode attachment owner for request %s", getattr(req, "id", None))
+        return False
+    try:
+        return can_manage_as_approver(request, req)
+    except Exception:
+        logger.exception("Failed to resolve work-mode attachment access for request %s", getattr(req, "id", None))
+        return False
 
 
 def build_attachment_links(request, req: WorkModeRequest, files: Iterable) -> list[AttachmentLink]:
