@@ -89,6 +89,9 @@ class GraceClockInType(models.TextChoices):
 
 class WorkModeRequestActionType(models.TextChoices):
     """Audit action applied to a work-mode request."""
+    CREATED = "CREATED", _("Created")
+    UPDATED = "UPDATED", _("Updated")
+    DOCUMENT_UPLOADED = "DOCUMENT_UPLOADED", _("Document Uploaded")
     APPROVED = "APPROVED", _("Approved")
     REJECTED = "REJECTED", _("Rejected")
     DOCUMENT_REJECTED = "DOCUMENT_REJECTED", _("Document Rejected")
