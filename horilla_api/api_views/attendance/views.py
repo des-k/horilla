@@ -9,7 +9,7 @@ from django.core.mail import EmailMessage
 from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.db.models import Case, CharField, F, Value, When, Q
-from django.http import HttpResponse, QueryDict
+from django.http import FileResponse, HttpResponse, QueryDict
 from django.shortcuts import get_object_or_404
 from django.template.loader import render_to_string
 from django.utils import timezone as dj_timezone
@@ -34,6 +34,7 @@ from attendance.models import (
     Attendance,
     AttendanceActivity,
     AttendanceLateComeEarlyOut,
+    AttendanceRequestFile,
     AttendancePunchSource,
     AttendancePunchingHistory,
     EmployeeShiftDay,
@@ -70,7 +71,13 @@ from attendance.services.punching_history import (
     create_mobile_punch_history,
     humanize_mobile_error,
     reconcile_attendance_punches,
+    restore_raw_state_after_request,
     update_punch_history,
+)
+from attendance.services.attendance_request_files import (
+    attachment_belongs_to_request as attendance_attachment_belongs_to_request,
+    request_can_view_attachment as attendance_request_can_view_attachment,
+    verify_attachment_token as verify_attendance_attachment_token,
 )
 from attendance.services.request_audit import log_request_action
 from attendance.services.attendance_access import evaluate_attendance_access
@@ -665,7 +672,7 @@ def _detach_request_overridden_raw_links(attendance: Attendance, *, include_in: 
 
 
 def _restore_request_back_to_raw(attendance: Attendance, *, include_in: bool, include_out: bool, prev_attendance_date: date | None = None):
-    return clear_request_override_and_recompute(
+    return restore_raw_state_after_request(
         attendance,
         include_in=include_in,
         include_out=include_out,
@@ -1348,6 +1355,7 @@ class AttendanceRequestView(APIView):
                 "revalidate_request",
                 "cancel_request",
                 "reject_request",
+                "revoke_request",
             ])
             | Q(request_description__isnull=False)
             | Q(requested_data__isnull=False)
@@ -1367,8 +1375,10 @@ class AttendanceRequestView(APIView):
         return pagenation.get_paginated_response(serializer.data)
 
 
+    @transaction.atomic
     def post(self, request):
         from attendance.forms import NewRequestForm
+        from attendance.services.attachment_validation import validate_uploaded_files
 
         # Self-only: force employee_id to the logged-in employee.
         data = request.data.copy() if hasattr(request, 'data') else getattr(request, 'POST', {}).copy()
@@ -1376,6 +1386,19 @@ class AttendanceRequestView(APIView):
             data['employee_id'] = request.user.employee_get.id
         except Exception:
             pass
+
+        uploaded = []
+        if hasattr(request, "FILES"):
+            uploaded = request.FILES.getlist("files") or request.FILES.getlist("files[]") or []
+            if not uploaded:
+                f_single = request.FILES.get("file")
+                if f_single:
+                    uploaded = [f_single]
+        try:
+            validate_uploaded_files(uploaded)
+        except ValidationError as ve:
+            transaction.set_rollback(True)
+            return Response({"files": getattr(ve, "messages", [str(ve)])}, status=400)
 
         form = NewRequestForm(data=data, files=getattr(request, "FILES", None))
         if form.is_valid():
@@ -1388,57 +1411,42 @@ class AttendanceRequestView(APIView):
                 form.new_instance.save()
 
             # Attach proof files (e.g., CCTV screenshots) via AttendanceRequestComment
-            try:
-                from attendance.models import AttendanceRequestFile, AttendanceRequestComment
-                from attendance.services.attachment_validation import validate_uploaded_files
+            from attendance.models import AttendanceRequestFile, AttendanceRequestComment
 
-                attendance_obj = form.new_instance
+            attendance_obj = form.new_instance
 
-                # If this was an update_request (attendance already exists), attach to the existing record.
-                if attendance_obj is None:
-                    try:
-                        emp = data.get("employee_id") if hasattr(request, "data") else None
-                        if not emp:
-                            try:
-                                emp = request.user.employee_get.id
-                            except Exception:
-                                emp = None
-                        att_date = data.get("attendance_date") if hasattr(request, "data") else None
-                        if not att_date:
-                            from datetime import date as _date
-                            att_date = _date.today()
-                        attendance_obj = Attendance.objects.filter(employee_id=emp, attendance_date=att_date).first()
-                    except Exception:
-                        attendance_obj = None
+            # If this was an update_request (attendance already exists), attach to the existing record.
+            if attendance_obj is None:
+                try:
+                    emp = data.get("employee_id") if hasattr(request, "data") else None
+                    if not emp:
+                        try:
+                            emp = request.user.employee_get.id
+                        except Exception:
+                            emp = None
+                    att_date = data.get("attendance_date") if hasattr(request, "data") else None
+                    if not att_date:
+                        from datetime import date as _date
+                        att_date = _date.today()
+                    attendance_obj = Attendance.objects.filter(employee_id=emp, attendance_date=att_date).first()
+                except Exception:
+                    attendance_obj = None
 
-                uploaded = []
-                if hasattr(request, "FILES"):
-                    uploaded = request.FILES.getlist("files") or request.FILES.getlist("files[]") or []
-                    if not uploaded:
-                        f_single = request.FILES.get("file")
-                        if f_single:
-                            uploaded = [f_single]
+            if attendance_obj and uploaded:
+                try:
+                    actor_emp = request.user.employee_get
+                except Exception:
+                    actor_emp = getattr(attendance_obj, "employee_id", None)
 
-                if attendance_obj and uploaded:
-                    validate_uploaded_files(uploaded)
-                    try:
-                        actor_emp = request.user.employee_get
-                    except Exception:
-                        actor_emp = getattr(attendance_obj, "employee_id", None)
-
-                    comment_text = (data.get("request_description") if hasattr(request, "data") else None) or (data.get("reason") if hasattr(request, "data") else None) or None
-                    c = AttendanceRequestComment.objects.create(
-                        request_id=attendance_obj,
-                        employee_id=actor_emp,
-                        comment=(str(comment_text)[:255] if comment_text else None),
-                    )
-                    for up in uploaded:
-                        arf = AttendanceRequestFile.objects.create(file=up)
-                        c.files.add(arf)
-            except ValidationError as ve:
-                return Response({"files": getattr(ve, "messages", [str(ve)])}, status=400)
-            except Exception:
-                pass
+                comment_text = (data.get("request_description") if hasattr(request, "data") else None) or (data.get("reason") if hasattr(request, "data") else None) or None
+                c = AttendanceRequestComment.objects.create(
+                    request_id=attendance_obj,
+                    employee_id=actor_emp,
+                    comment=(str(comment_text)[:255] if comment_text else None),
+                )
+                for up in uploaded:
+                    arf = AttendanceRequestFile.objects.create(file=up)
+                    c.files.add(arf)
 
             # IMPORTANT: do NOT return form.data because for multipart uploads it may contain
             # UploadedFile objects / bytes which are not JSON serializable.
@@ -1806,7 +1814,7 @@ class AttendanceRequestCancelView(APIView):
             req_date = attendance.attendance_date
             req_employee = attendance.employee_id
             wants_in, wants_out = get_requested_sessions(attendance)
-            needs_canonical_reset = bool(req_type == "create_request" or is_approved_request)
+            needs_canonical_reset = bool(req_type == "create_request")
 
             if is_approved_request:
                 _restore_request_back_to_raw(attendance, include_in=wants_in, include_out=wants_out, prev_attendance_date=req_date)
@@ -1814,9 +1822,6 @@ class AttendanceRequestCancelView(APIView):
 
             attendance.is_validate_request_approved = False
             attendance.is_validate_request = False
-            if is_pending_request:
-                # Keep request_description for history, but discard pending payload
-                attendance.requested_data = None
             attendance.request_type = "cancel_request"
             try:
                 attendance.action_by = request.user.employee_get
@@ -1914,8 +1919,6 @@ class AttendanceRequestRejectView(APIView):
 
             attendance.is_validate_request_approved = False
             attendance.is_validate_request = False
-            # Keep request_description for history, but discard pending payload
-            attendance.requested_data = None
             attendance.request_type = "reject_request"
             try:
                 attendance.action_by = request.user.employee_get
@@ -1944,6 +1947,26 @@ class AttendanceRequestRejectView(APIView):
             return Response({"error": str(E)}, status=400)
 
         return Response(AttendanceRequestSerializer(attendance, context={"request": request}).data, status=200)
+
+
+class AttendanceRequestAttachmentDownloadView(APIView):
+    permission_classes = []
+
+    def get(self, request, attendance_id, file_id):
+        attendance = get_object_or_404(Attendance, id=attendance_id)
+        file_obj = get_object_or_404(AttendanceRequestFile, id=file_id)
+        if not attendance_attachment_belongs_to_request(attendance, file_obj):
+            return Response({"error": "Attachment not found for this request."}, status=404)
+        token = request.GET.get("token")
+        allowed = attendance_request_can_view_attachment(request, attendance) or verify_attendance_attachment_token(
+            attendance.id,
+            file_obj.id,
+            token,
+        )
+        if not allowed:
+            return Response({"error": "You do not have permission to access this attachment."}, status=403)
+        file_obj.file.open("rb")
+        return FileResponse(file_obj.file, as_attachment=False)
 
 def _work_mode_request_text(data, *keys):
     try:
