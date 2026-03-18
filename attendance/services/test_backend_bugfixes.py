@@ -112,17 +112,17 @@ class CanonicalFlowSourceInspectionTests(SimpleTestCase):
         self.assertNotIn('late_come_early_out.filter(type="early_out")', source)
         self.assertNotIn('AttendanceLateComeEarlyOut.objects.filter(attendance_id=attendance, type="early_out").delete()', source)
 
-    def test_request_restore_helpers_delegate_to_canonical_recompute_without_snapshot_restore(self):
+    def test_request_restore_helpers_delegate_to_snapshot_restore_before_canonical_normalization(self):
         from attendance.views.requests import _restore_request_back_to_raw as web_restore
         from horilla_api.api_views.attendance.views import _restore_request_back_to_raw as api_restore
 
         web_source = inspect.getsource(web_restore)
         api_source = inspect.getsource(api_restore)
 
-        self.assertIn('clear_request_override_and_recompute', web_source)
-        self.assertIn('clear_request_override_and_recompute', api_source)
-        self.assertNotIn('restore_raw_state_after_request', web_source)
-        self.assertNotIn('restore_raw_state_after_request', api_source)
+        self.assertIn('restore_raw_state_after_request', web_source)
+        self.assertIn('restore_raw_state_after_request', api_source)
+        self.assertNotIn('clear_request_override_and_recompute', web_source)
+        self.assertNotIn('clear_request_override_and_recompute', api_source)
 
     def test_request_cancel_and_reject_handlers_no_longer_delete_derived_rows_manually(self):
         from attendance.views.requests import cancel_attendance_request, reject_validate_attendance_request
