@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import mimetypes
 from pathlib import Path
 from typing import Iterable
 
@@ -12,15 +13,19 @@ ALLOWED_ATTACHMENT_EXTENSIONS = (
     ".jpg",
     ".jpeg",
     ".png",
-    ".webp",
     ".pdf",
     ".doc",
     ".docx",
-    ".xls",
-    ".xlsx",
-    ".csv",
-    ".txt",
 )
+
+ALLOWED_ATTACHMENT_MIME_TYPES = {
+    ".jpg": {"image/jpeg"},
+    ".jpeg": {"image/jpeg"},
+    ".png": {"image/png"},
+    ".pdf": {"application/pdf"},
+    ".doc": {"application/msword"},
+    ".docx": {"application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
+}
 
 
 def allowed_attachment_extensions_text() -> str:
@@ -36,6 +41,15 @@ def validate_uploaded_files(uploaded_files: Iterable) -> None:
         if ext not in ALLOWED_ATTACHMENT_EXTENSIONS:
             raise ValidationError(
                 _("Unsupported attachment type for %(name)s. Allowed types: %(allowed)s."),
+                params={"name": name, "allowed": allowed_text},
+            )
+        content_type = (getattr(uploaded, "content_type", None) or "").lower().strip()
+        guessed_type, guessed_encoding = mimetypes.guess_type(name)
+        allowed_mime_types = ALLOWED_ATTACHMENT_MIME_TYPES.get(ext, set())
+        effective_type = content_type or (guessed_type or "").lower().strip()
+        if allowed_mime_types and effective_type and effective_type not in allowed_mime_types:
+            raise ValidationError(
+                _("MIME type mismatch for %(name)s. Allowed types: %(allowed)s."),
                 params={"name": name, "allowed": allowed_text},
             )
         if size > MAX_ATTACHMENT_SIZE_BYTES:
