@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from attendance.models import (
@@ -18,14 +19,21 @@ TERMINAL_STATUSES = {
 }
 
 
+logger = logging.getLogger(__name__)
+
+
 def _effective_document_status(req: WorkModeRequest) -> str | None:
     resolver = getattr(req, "effective_document_status", None)
     if callable(resolver):
         try:
             return resolver()
         except Exception:
-            pass
-    return getattr(req, "document_status", None)
+            logger.exception(
+                "Failed to resolve effective document status for work mode request %s",
+                getattr(req, "id", None),
+            )
+            return None
+    return None
 
 
 def request_actor_employee(request) -> Any | None:
