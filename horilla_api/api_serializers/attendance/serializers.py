@@ -1,3 +1,4 @@
+import logging
 from django.utils import timezone as dj_timezone
 from rest_framework import serializers
 
@@ -9,7 +10,10 @@ from attendance.services.work_type_request_rules import (
     coerce_work_type_payload,
     validate_work_type_request,
 )
+from attendance.services.work_type_request_exceptions import WorkModeRequestConsistencyError
 from attendance.services.work_type_request_permissions import build_permission_flags
+
+logger = logging.getLogger(__name__)
 from attendance.services.attendance_request_files import build_attachment_url as build_attendance_attachment_url
 from attendance.services.work_type_request_files import build_attachment_url as build_work_mode_attachment_url
 
@@ -464,7 +468,21 @@ class WorkModeRequestSerializer(serializers.ModelSerializer):
         request = self._request()
         if not request:
             return {}
-        return build_permission_flags(request, obj)
+        try:
+            return build_permission_flags(request, obj)
+        except WorkModeRequestConsistencyError:
+            logger.exception("Failed to build permission flags for work mode request %s", getattr(obj, "id", None))
+            return {
+                "can_update": False,
+                "can_cancel": False,
+                "can_upload_document": False,
+                "can_approve": False,
+                "can_reject": False,
+                "can_revoke": False,
+                "can_verify_document": False,
+                "can_reject_document": False,
+                "can_reopen_document": False,
+            }
 
     def to_internal_value(self, data):
         try:
@@ -625,8 +643,12 @@ class WorkModeRequestSerializer(serializers.ModelSerializer):
         return None
 
     def get_document_status_label(self, obj):
-        resolver = getattr(obj, "effective_document_status", None)
-        raw_status = resolver() if callable(resolver) else getattr(obj, "document_status", None)
+        try:
+            resolver = getattr(obj, "effective_document_status", None)
+            raw_status = resolver() if callable(resolver) else getattr(obj, "document_status", None)
+        except WorkModeRequestConsistencyError:
+            logger.exception("Failed to resolve document status label for work mode request %s", getattr(obj, "id", None))
+            raw_status = None
         label = self._document_status_label_for_mode(obj, raw_status)
         if label:
             return label
@@ -641,7 +663,12 @@ class WorkModeRequestSerializer(serializers.ModelSerializer):
             return None
         files = []
         try:
-            files = obj.current_document_files() or []
+            resolver = getattr(obj, "current_document_files", None)
+            files = resolver() if callable(resolver) else []
+            files = files or []
+        except WorkModeRequestConsistencyError:
+            logger.exception("Failed to resolve current document version payload for work mode request %s", getattr(obj, "id", None))
+            files = []
         except Exception:
             files = []
         return {
@@ -660,7 +687,12 @@ class WorkModeRequestSerializer(serializers.ModelSerializer):
 
     def get_current_document_files(self, obj):
         try:
-            return self._serialize_file_links(obj, obj.current_document_files() or [])
+            resolver = getattr(obj, "current_document_files", None)
+            files = resolver() if callable(resolver) else []
+            return self._serialize_file_links(obj, files or [])
+        except WorkModeRequestConsistencyError:
+            logger.exception("Failed to serialize current document files for work mode request %s", getattr(obj, "id", None))
+            return []
         except Exception:
             return []
 
@@ -683,8 +715,13 @@ class WorkModeRequestSerializer(serializers.ModelSerializer):
 
     def get_attachment_urls(self, obj):
         try:
-            files = obj.current_document_files() or []
+            resolver = getattr(obj, "current_document_files", None)
+            files = resolver() if callable(resolver) else []
+            files = files or []
             return [item.get("url") for item in self._serialize_file_links(obj, files) if item.get("url")]
+        except WorkModeRequestConsistencyError:
+            logger.exception("Failed to serialize attachment URLs for work mode request %s", getattr(obj, "id", None))
+            return []
         except Exception:
             return []
 
@@ -750,7 +787,14 @@ class WorkModeRequestSerializer(serializers.ModelSerializer):
     def get_document_versions(self, obj):
         out = []
         try:
-            versions = obj.document_versions.all().select_related("submitted_by", "reviewed_by").prefetch_related("file_links__attendance_request_file")[:10]
+            versions_rel = getattr(obj, "document_versions", None)
+            if versions_rel is None:
+                versions = []
+            else:
+                versions = versions_rel.all().select_related("submitted_by", "reviewed_by").prefetch_related("file_links__attendance_request_file")[:10]
+        except WorkModeRequestConsistencyError:
+            logger.exception("Failed to resolve historical document versions for work mode request %s", getattr(obj, "id", None))
+            versions = []
         except Exception:
             versions = []
         for version in versions:
@@ -772,28 +816,15 @@ class WorkModeRequestSerializer(serializers.ModelSerializer):
         return out
 
     def get_queue_type(self, obj):
-        status_value = getattr(obj, "status", None)
-        raw_doc_status = None
-        resolver = getattr(obj, "effective_document_status", None)
-        if callable(resolver):
-            try:
-                raw_doc_status = resolver()
-            except Exception:
-                raw_doc_status = None
-        if status_value == WorkModeRequestStatus.WAITING_FOR_APPROVAL:
-            return "approval"
-        if (
-            getattr(obj, "mode", None) == AttendanceWorkMode.ON_DUTY
-            and status_value == WorkModeRequestStatus.APPROVED
-            and raw_doc_status in {
-                WorkModeRequestDocumentStatus.SUBMITTED,
-                WorkModeRequestDocumentStatus.PENDING_VERIFICATION,
-                WorkModeRequestDocumentStatus.REJECTED,
-                WorkModeRequestDocumentStatus.VERIFIED,
-            }
-        ):
-            return "document_review"
-        return None
+        try:
+            from attendance.services.work_type_request_rules import classify_work_mode_request_queue
+
+            return classify_work_mode_request_queue(obj)
+        except WorkModeRequestConsistencyError:
+            logger.exception("Failed to classify work mode request queue for request %s", getattr(obj, "id", None))
+            return None
+        except Exception:
+            return None
 
 
 class MailTemplateSerializer(serializers.ModelSerializer):
