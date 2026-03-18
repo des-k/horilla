@@ -225,8 +225,13 @@ def _log_attendance_request_action(attendance: Attendance, request, *, action_ty
             new_status=new_status,
             remark=remark,
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.exception(
+            "Failed to log attendance request action for attendance=%s action=%s",
+            getattr(attendance, "id", None),
+            action_type,
+        )
+        raise
 
 
 @login_required
@@ -1593,7 +1598,6 @@ def bulk_reject_attendance_request(request):
 
             attendance.is_validate_request_approved = False
             attendance.is_validate_request = False
-            attendance.requested_data = None
             attendance.request_type = "reject_request"
             try:
                 attendance.action_by = request.user.employee_get
