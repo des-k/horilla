@@ -52,6 +52,11 @@ urlpatterns = [
         AttendanceRequestRevokeView.as_view(),
         name="api-",
     ),
+    path(
+        "attendance-request-attachment/<int:attendance_id>/<int:file_id>",
+        AttendanceRequestAttachmentDownloadView.as_view(),
+        name="api-attendance-request-attachment-download",
+    ),
     path("overtime-approve/<int:pk>", OvertimeApproveView.as_view(), name="api-"),
     path(
         "attendance-hour-account/<int:pk>/",
@@ -160,6 +165,18 @@ urlpatterns = [
         WorkModeRequestDocumentActionView.as_view(),
         name="api-work-mode-request-action-slash",
     ),
+    path(
+        "work-mode-request-revoke/<int:pk>",
+        WorkModeRequestDocumentActionView.as_view(),
+        {"action": "revoke"},
+        name="api-work-mode-request-revoke",
+    ),
+    path(
+        "work-mode-request-revoke/<int:pk>/",
+        WorkModeRequestDocumentActionView.as_view(),
+        {"action": "revoke"},
+        name="api-work-mode-request-revoke-slash",
+    ),
 
 
     # Work type requests (alias for work-mode-request)
@@ -242,6 +259,18 @@ urlpatterns = [
         "work-type-request-action/<int:pk>/<str:action>/",
         WorkModeRequestDocumentActionView.as_view(),
         name="api-work-type-request-action-slash",
+    ),
+    path(
+        "work-type-request-revoke/<int:pk>",
+        WorkModeRequestDocumentActionView.as_view(),
+        {"action": "revoke"},
+        name="api-work-type-request-revoke",
+    ),
+    path(
+        "work-type-request-revoke/<int:pk>/",
+        WorkModeRequestDocumentActionView.as_view(),
+        {"action": "revoke"},
+        name="api-work-type-request-revoke-slash",
     ),
 
     path("mobile-attendance-settings/", MobileAttendanceSettingsAPIView.as_view(), name="api-mobile-attendance-settings"),
