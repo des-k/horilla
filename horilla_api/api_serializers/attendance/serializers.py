@@ -10,6 +10,8 @@ from attendance.services.work_type_request_rules import (
     validate_work_type_request,
 )
 from attendance.services.work_type_request_permissions import build_permission_flags
+from attendance.services.attendance_request_files import build_attachment_url as build_attendance_attachment_url
+from attendance.services.work_type_request_files import build_attachment_url as build_work_mode_attachment_url
 
 
 class AttendanceSerializer(serializers.ModelSerializer):
@@ -69,13 +71,14 @@ class AttendanceSerializer(serializers.ModelSerializer):
         """
         try:
             from attendance.models import AttendanceRequestComment
+            request = self.context.get("request") if hasattr(self, "context") else None
             urls = []
             seen = set()
             qs = AttendanceRequestComment.objects.filter(request_id=obj).prefetch_related('files')
             for c in qs:
                 for f in c.files.all():
                     try:
-                        u = getattr(getattr(f, 'file', None), 'url', None)
+                        u = build_attendance_attachment_url(request, obj, f) if request is not None else None
                         if u and u not in seen:
                             seen.add(u)
                             urls.append(u)
@@ -199,6 +202,7 @@ class AttendanceRequestSerializer(serializers.ModelSerializer):
         """
         try:
             from attendance.models import AttendanceRequestComment
+            request = self.context.get("request") if hasattr(self, "context") else None
 
             urls = []
             seen = set()
@@ -206,7 +210,7 @@ class AttendanceRequestSerializer(serializers.ModelSerializer):
             for c in qs:
                 for f in c.files.all():
                     try:
-                        u = getattr(getattr(f, "file", None), "url", None)
+                        u = build_attendance_attachment_url(request, obj, f) if request is not None else None
                         if u and u not in seen:
                             seen.add(u)
                             urls.append(u)
@@ -232,7 +236,9 @@ class AttendanceRequestSerializer(serializers.ModelSerializer):
         try:
             rt = getattr(obj, "request_type", None)
             if rt == "cancel_request":
-                return "CANCEL"
+                return "CANCELED"
+            if rt == "revoke_request":
+                return "REVOKED"
             if rt == "reject_request":
                 return "REJECTED"
             if getattr(obj, "is_validate_request", False):
@@ -271,8 +277,10 @@ class AttendanceRequestSerializer(serializers.ModelSerializer):
             return "APPROVED"
         if status == "REJECTED":
             return "REJECTED"
-        if status == "CANCEL":
+        if status == "CANCELED":
             return "CANCELED"
+        if status == "REVOKED":
+            return "REVOKED"
         return None
 
     def get_action_type(self, obj):
@@ -434,6 +442,7 @@ class WorkModeRequestSerializer(serializers.ModelSerializer):
     document_status_label = serializers.SerializerMethodField(read_only=True)
     current_document_version = serializers.SerializerMethodField(read_only=True)
     current_document_files = serializers.SerializerMethodField(read_only=True)
+    queue_type = serializers.SerializerMethodField(read_only=True)
 
     work_type = serializers.CharField(source="mode", read_only=True)
 
@@ -535,7 +544,7 @@ class WorkModeRequestSerializer(serializers.ModelSerializer):
         effective_doc_status = None
         if self.instance is not None:
             resolver = getattr(self.instance, "effective_document_status", None)
-            effective_doc_status = resolver() if callable(resolver) else getattr(self.instance, "document_status", None)
+            effective_doc_status = resolver() if callable(resolver) else None
         if mode == AttendanceWorkMode.ON_DUTY and effective_doc_status == WorkModeRequestDocumentStatus.VERIFIED:
             immutable = {"reason", "start_date", "end_date", "scope", "mode", "duty_destination_location", "duty_destination_detail"}
             changed = [field for field in immutable if field in attrs]
@@ -656,7 +665,6 @@ class WorkModeRequestSerializer(serializers.ModelSerializer):
             return []
 
     def _serialize_file_links(self, obj, files):
-        request = self._request()
         out = []
         seen = set()
         for f in files or []:
@@ -664,12 +672,8 @@ class WorkModeRequestSerializer(serializers.ModelSerializer):
             if fid in seen:
                 continue
             seen.add(fid)
-            url = getattr(getattr(f, "file", None), "url", None)
-            if request is not None and url:
-                try:
-                    url = request.build_absolute_uri(url)
-                except Exception:
-                    pass
+            request = self._request()
+            url = build_work_mode_attachment_url(request, obj, f) if request is not None else None
             out.append({
                 "id": fid,
                 "name": getattr(getattr(f, "file", None), "name", None),
@@ -679,7 +683,7 @@ class WorkModeRequestSerializer(serializers.ModelSerializer):
 
     def get_attachment_urls(self, obj):
         try:
-            files = obj.current_document_files() or list(obj.files.all())
+            files = obj.current_document_files() or []
             return [item.get("url") for item in self._serialize_file_links(obj, files) if item.get("url")]
         except Exception:
             return []
@@ -766,6 +770,30 @@ class WorkModeRequestSerializer(serializers.ModelSerializer):
                 "files": self._serialize_file_links(obj, files),
             })
         return out
+
+    def get_queue_type(self, obj):
+        status_value = getattr(obj, "status", None)
+        raw_doc_status = None
+        resolver = getattr(obj, "effective_document_status", None)
+        if callable(resolver):
+            try:
+                raw_doc_status = resolver()
+            except Exception:
+                raw_doc_status = None
+        if status_value == WorkModeRequestStatus.WAITING_FOR_APPROVAL:
+            return "approval"
+        if (
+            getattr(obj, "mode", None) == AttendanceWorkMode.ON_DUTY
+            and status_value == WorkModeRequestStatus.APPROVED
+            and raw_doc_status in {
+                WorkModeRequestDocumentStatus.SUBMITTED,
+                WorkModeRequestDocumentStatus.PENDING_VERIFICATION,
+                WorkModeRequestDocumentStatus.REJECTED,
+                WorkModeRequestDocumentStatus.VERIFIED,
+            }
+        ):
+            return "document_review"
+        return None
 
 
 class MailTemplateSerializer(serializers.ModelSerializer):
