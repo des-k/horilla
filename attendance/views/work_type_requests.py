@@ -36,6 +36,7 @@ from attendance.models import (
     WorkModeRequestStatus,
 )
 from attendance.services.work_type_request_rules import work_mode_request_approval_q
+from attendance.services.work_type_request_exceptions import WorkModeRequestConsistencyError
 from attendance.services.work_type_request_files import (
     attachment_belongs_to_request,
     build_attachment_links,
@@ -418,7 +419,7 @@ def work_type_request_revoke(request, obj_id: int):
     try:
         remark = _request_remark_value(request, "reason", "remark", "note")
         WorkModeRequestActions.revoke_request(req, actor=employee, request=request, remark=remark)
-    except WorkModeRequestActionError as exc:
+    except (WorkModeRequestActionError, WorkModeRequestConsistencyError) as exc:
         messages.error(request, str(exc))
     else:
         messages.success(request, _("Request revoked."))
@@ -448,7 +449,7 @@ def work_type_request_document_action(request, obj_id: int, action: str):
             messages.success(request, _("Document review reopened."))
         else:
             return HttpResponseForbidden("Unsupported action")
-    except WorkModeRequestActionError as exc:
+    except (WorkModeRequestActionError, WorkModeRequestConsistencyError) as exc:
         messages.error(request, str(exc))
     return HttpResponse("<script>location.reload();</script>")
 
@@ -511,8 +512,10 @@ def work_type_request_attachment_download(request, obj_id: int, file_id: int):
         allowed = False
 
     token = request.GET.get("token")
-    if not allowed and not verify_attachment_token(req.id, file_obj.id, token):
+    if not allowed:
         return HttpResponseForbidden("Not allowed")
+    if not verify_attachment_token(req.id, file_obj.id, token):
+        return HttpResponseForbidden("Invalid or expired attachment token")
 
     try:
         file_handle = file_obj.file.open("rb")
@@ -619,7 +622,7 @@ def work_type_request_cancel(request, obj_id: int):
 
     try:
         WorkModeRequestActions.cancel_request(req, actor=employee, request=request)
-    except WorkModeRequestActionError as exc:
+    except (WorkModeRequestActionError, WorkModeRequestConsistencyError) as exc:
         messages.error(request, str(exc))
     else:
         messages.success(request, _("Request canceled."))
@@ -639,7 +642,7 @@ def work_type_request_approve(request, obj_id: int):
 
     try:
         result = WorkModeRequestActions.approve_request(req, actor=employee, request=request)
-    except WorkModeRequestActionError as exc:
+    except (WorkModeRequestActionError, WorkModeRequestConsistencyError) as exc:
         messages.error(request, str(exc))
     else:
         if result.auto_rejected:
