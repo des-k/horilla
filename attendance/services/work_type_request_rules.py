@@ -119,6 +119,34 @@ TERMINAL_WORK_MODE_REQUEST_STATUSES = {
 }
 
 
+
+DOCUMENT_REVIEW_DOCUMENT_STATUSES = {
+    WorkModeRequestDocumentStatus.SUBMITTED,
+    WorkModeRequestDocumentStatus.PENDING_VERIFICATION,
+    WorkModeRequestDocumentStatus.REJECTED,
+    WorkModeRequestDocumentStatus.VERIFIED,
+}
+
+
+def work_mode_request_document_review_q() -> Q:
+    return Q(
+        status=WorkModeRequestStatus.APPROVED,
+        mode=AttendanceWorkMode.ON_DUTY,
+    )
+
+
+def classify_work_mode_request_queue(req: WorkModeRequest) -> str | None:
+    status_value = getattr(req, "status", None)
+    if status_value == WorkModeRequestStatus.WAITING_FOR_APPROVAL:
+        return "approval"
+    if (
+        getattr(req, "mode", None) == AttendanceWorkMode.ON_DUTY
+        and status_value == WorkModeRequestStatus.APPROVED
+        and req.effective_document_status() in DOCUMENT_REVIEW_DOCUMENT_STATUSES
+    ):
+        return "document_review"
+    return None
+
 def is_terminal_work_mode_request_status(status_val: str | None) -> bool:
     return status_val in TERMINAL_WORK_MODE_REQUEST_STATUSES
 
@@ -136,19 +164,8 @@ def active_work_mode_request_status_q() -> Q:
 
 
 def work_mode_request_approval_q(*, include_pending_on_duty: bool = False) -> Q:
-    queue_q = Q(status=WorkModeRequestStatus.WAITING_FOR_APPROVAL) | Q(
-        status=WorkModeRequestStatus.APPROVED,
-        mode=AttendanceWorkMode.ON_DUTY,
-        document_status__in=[
-            WorkModeRequestDocumentStatus.SUBMITTED,
-            WorkModeRequestDocumentStatus.PENDING_VERIFICATION,
-            WorkModeRequestDocumentStatus.REJECTED,
-            WorkModeRequestDocumentStatus.VERIFIED,
-        ],
-    )
-    if include_pending_on_duty:
-        queue_q |= Q(status=WorkModeRequestStatus.PENDING, mode=AttendanceWorkMode.ON_DUTY)
-    return queue_q
+    _ = include_pending_on_duty  # kept for backward-compatible callers
+    return Q(status=WorkModeRequestStatus.WAITING_FOR_APPROVAL)
 
 
 def pick_relevant_request(employee, target_date: date, want: str) -> Optional[WorkModeRequest]:
