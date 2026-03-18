@@ -58,6 +58,8 @@ from attendance.services.work_type_request_rules import (
     apply_rejection_to_attendance,
     has_attachments,
     work_mode_request_approval_q,
+    work_mode_request_document_review_q,
+    classify_work_mode_request_queue,
 )
 from attendance.services.activity_sync import (
     get_requested_sessions,
@@ -80,6 +82,7 @@ from attendance.services.attendance_request_files import (
     verify_attachment_token as verify_attendance_attachment_token,
 )
 from attendance.services.request_audit import log_request_action
+from attendance.services.work_type_request_exceptions import WorkModeRequestConsistencyError
 from attendance.services.attendance_access import evaluate_attendance_access
 from attendance.services.reconciliation import recompute_attendance, recompute_attendance_range
 from attendance.services.mobile_status_note import build_mobile_header_state
@@ -157,7 +160,12 @@ def _log_work_mode_status_change(obj: WorkModeRequest, request, *, action_type: 
             remark=remark,
         )
     except Exception:
-        pass
+        logger.exception(
+            "Failed to log work-mode status change for request=%s action=%s",
+            getattr(obj, "id", None),
+            action_type,
+        )
+        raise
 
 
 def _log_attendance_request_status_change(attendance: Attendance, request, *, action_type: str, old_status: str = None, new_status: str = None, remark: str = None):
@@ -1958,13 +1966,14 @@ class AttendanceRequestAttachmentDownloadView(APIView):
         if not attendance_attachment_belongs_to_request(attendance, file_obj):
             return Response({"error": "Attachment not found for this request."}, status=404)
         token = request.GET.get("token")
-        allowed = attendance_request_can_view_attachment(request, attendance) or verify_attendance_attachment_token(
+        if not attendance_request_can_view_attachment(request, attendance):
+            return Response({"error": "You do not have permission to access this attachment."}, status=403)
+        if not verify_attendance_attachment_token(
             attendance.id,
             file_obj.id,
             token,
-        )
-        if not allowed:
-            return Response({"error": "You do not have permission to access this attachment."}, status=403)
+        ):
+            return Response({"error": "Invalid or expired attachment token."}, status=403)
         file_obj.file.open("rb")
         return FileResponse(file_obj.file, as_attachment=False)
 
@@ -2040,7 +2049,7 @@ class WorkModeRequestView(APIView):
             qs = qs.filter(scope=scope_q)
 
         pagenation = PageNumberPagination()
-        page = pagenation.paginate_queryset(qs.order_by("-id"), request)
+        page = pagenation.paginate_queryset(ordered, request)
         serializer = self.serializer_class(page, many=True, context={"request": request})
         return pagenation.get_paginated_response(serializer.data)
 
@@ -2101,6 +2110,8 @@ class WorkModeRequestView(APIView):
                 duty_destination_detail=serializer.validated_data.get("duty_destination_detail"),
                 uploaded_files=uploaded,
             )
+        except WorkModeRequestConsistencyError as exc:
+            return Response({"error": str(exc)}, status=409)
         except ValidationError as exc:
             return Response({"error": exc.messages if hasattr(exc, "messages") else str(exc)}, status=400)
 
@@ -2147,6 +2158,8 @@ class WorkModeRequestView(APIView):
                 uploaded_files=uploaded,
                 remark=remark,
             )
+        except WorkModeRequestConsistencyError as exc:
+            return Response({"error": str(exc)}, status=409)
         except ValidationError as exc:
             return Response({"error": exc.messages if hasattr(exc, "messages") else str(exc)}, status=400)
 
@@ -2211,9 +2224,15 @@ class WorkModeRequestApprovalsView(APIView):
             pass
 
         include_pending_on_duty = _is_admin_with_perm(request, "attendance.change_workmoderequest")
-        qs = WorkModeRequest.objects.filter(
-            work_mode_request_approval_q(include_pending_on_duty=include_pending_on_duty)
-        ).exclude(employee_id__employee_user_id=request.user)
+        queue = (request.GET.get("queue") or "approval").strip().lower()
+        if queue == "document_review":
+            queue_q = work_mode_request_document_review_q()
+        elif queue == "all":
+            queue_q = work_mode_request_approval_q(include_pending_on_duty=include_pending_on_duty) | work_mode_request_document_review_q()
+        else:
+            queue_q = work_mode_request_approval_q(include_pending_on_duty=include_pending_on_duty)
+
+        qs = WorkModeRequest.objects.filter(queue_q).exclude(employee_id__employee_user_id=request.user)
 
         if not include_pending_on_duty:
             sub_ids = _subordinate_employee_ids(request)
@@ -2222,8 +2241,29 @@ class WorkModeRequestApprovalsView(APIView):
             else:
                 qs = qs.filter(employee_id__id__in=sub_ids)
 
+        ordered = list(qs.order_by("-id"))
+        if queue in {"approval", "document_review", "all"}:
+            filtered = []
+            for req in ordered:
+                try:
+                    queue_type = classify_work_mode_request_queue(req)
+                except WorkModeRequestConsistencyError:
+                    logger.exception(
+                        "Skipping inconsistent work-mode request %s while building queue %s",
+                        getattr(req, "id", None),
+                        queue,
+                    )
+                    continue
+                if queue == "approval" and queue_type != "approval":
+                    continue
+                if queue == "document_review" and queue_type != "document_review":
+                    continue
+                if queue == "all" and queue_type not in {"approval", "document_review"}:
+                    continue
+                filtered.append(req)
+            ordered = filtered
         pagenation = PageNumberPagination()
-        page = pagenation.paginate_queryset(qs.order_by("-id"), request)
+        page = pagenation.paginate_queryset(ordered, request)
         serializer = self.serializer_class(page, many=True, context={"request": request})
         return pagenation.get_paginated_response(serializer.data)
 
@@ -2237,6 +2277,8 @@ class WorkModeRequestApproveView(APIView):
         obj = get_object_or_404(WorkModeRequest.objects.select_for_update(), pk=pk)
         try:
             result = WorkModeRequestActions.approve_request(obj, actor=_request_actor_employee(request), request=request, now_dt=dj_timezone.now())
+        except WorkModeRequestConsistencyError as exc:
+            return Response({"error": str(exc)}, status=409)
         except ValidationError as exc:
             return Response({"error": exc.messages if hasattr(exc, "messages") else str(exc)}, status=400)
         data = self.serializer_class(obj, context={"request": request}).data
@@ -2268,6 +2310,8 @@ class WorkModeRequestRejectView(APIView):
                 reason_code=WorkModeRequestRejectReasonCode.MANUAL_REJECT,
                 remark=(str(comment_text).strip() if comment_text is not None else None),
             )
+        except WorkModeRequestConsistencyError as exc:
+            return Response({"error": str(exc)}, status=409)
         except ValidationError as exc:
             return Response({"error": exc.messages if hasattr(exc, "messages") else str(exc)}, status=400)
         return Response(self.serializer_class(obj, context={"request": request}).data, status=200)
@@ -2289,6 +2333,8 @@ class WorkModeRequestCancelView(APIView):
         )
         try:
             WorkModeRequestActions.cancel_request(obj, actor=_request_actor_employee(request), request=request, remark=remark)
+        except WorkModeRequestConsistencyError as exc:
+            return Response({"error": str(exc)}, status=409)
         except ValidationError as exc:
             return Response({"error": exc.messages if hasattr(exc, "messages") else str(exc)}, status=400)
         return Response(self.serializer_class(obj, context={"request": request}).data, status=200)
@@ -2321,6 +2367,8 @@ class WorkModeRequestDocumentActionView(APIView):
                 WorkModeRequestActions.reopen_document(obj, actor=_request_actor_employee(request), request=request, remark=remark)
             else:
                 return Response({"error": "Unsupported action."}, status=400)
+        except WorkModeRequestConsistencyError as exc:
+            return Response({"error": str(exc)}, status=409)
         except ValidationError as exc:
             return Response({"error": exc.messages if hasattr(exc, "messages") else str(exc)}, status=400)
         return Response(self.serializer_class(obj, context={"request": request}).data, status=200)
