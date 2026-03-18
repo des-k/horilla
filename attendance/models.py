@@ -550,8 +550,14 @@ class WorkModeRequest(HorillaModel):
             return self.document_versions.filter(is_current=True).select_related(
                 "reviewed_by", "submitted_by"
             ).prefetch_related("file_links__attendance_request_file").first()
-        except Exception:
-            return None
+        except Exception as exc:
+            logger.exception(
+                "Failed to resolve current document version for work mode request %s",
+                getattr(self, "id", None),
+            )
+            raise WorkModeRequestConsistencyError(
+                f"Failed to resolve current document version for request {getattr(self, 'id', None)}"
+            ) from exc
 
     def current_document_files(self):
         version = self.resolve_current_document_version()
@@ -563,8 +569,14 @@ class WorkModeRequest(HorillaModel):
                 for link in version.file_links.select_related("attendance_request_file")
                 if getattr(link, "attendance_request_file", None)
             ]
-        except Exception:
-            return []
+        except Exception as exc:
+            logger.exception(
+                "Failed to resolve current document files for work mode request %s",
+                getattr(self, "id", None),
+            )
+            raise WorkModeRequestConsistencyError(
+                f"Failed to resolve current document files for request {getattr(self, 'id', None)}"
+            ) from exc
 
     def effective_document_status(self) -> str:
         """Version-led document status.
@@ -606,7 +618,11 @@ class WorkModeRequest(HorillaModel):
     def current_document_file_count(self) -> int:
         try:
             return len(self.current_document_files() or [])
-        except Exception:
+        except WorkModeRequestConsistencyError:
+            logger.exception(
+                "Failed to calculate current document file count for work mode request %s",
+                getattr(self, "id", None),
+            )
             return 0
 
     @property
@@ -639,8 +655,14 @@ class WorkModeRequest(HorillaModel):
         try:
             current_ids = [obj.id for obj in self.current_document_files() if getattr(obj, "id", None)]
             self.files.set(current_ids)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.exception(
+                "Failed to sync legacy files from current version for work mode request %s",
+                getattr(self, "id", None),
+            )
+            raise WorkModeRequestConsistencyError(
+                f"Failed to sync legacy files for request {getattr(self, 'id', None)}"
+            ) from exc
 
     @staticmethod
     def _employee_display_name(employee) -> str | None:
