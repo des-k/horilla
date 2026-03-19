@@ -375,6 +375,11 @@ urlpatterns = [
         name="attendance-request-attachments",
     ),
     path(
+        "attendance-request-attachments/<int:attendance_id>/delete/<int:file_id>/",
+        attendance.views.requests.delete_attendance_request_attachment,
+        name="attendance-request-delete-attachment",
+    ),
+    path(
         "select-all-filter-attendance-request",
         attendance.views.requests.select_all_filter_attendance_request,
         name="select-all-filter-attendance-request",
