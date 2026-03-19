@@ -81,8 +81,11 @@
                       <ion-icon name="eye-outline"></ion-icon>
                     </button>
 
-                    <a class="oh-btn oh-btn--danger" title="{% trans 'Reject' %}" href="{% url 'reject-validate-attendance-request' r.id %}"
-                      onclick="return confirm('{% trans "Reject this request?" %}');">
+                    <a class="oh-btn oh-btn--danger" title="{% trans 'Reject' %}"
+                      data-toggle="oh-modal-toggle" data-target="#attendanceRequestRejectModal"
+                      hx-get="{% url 'reject-validate-attendance-request' r.id %}"
+                      hx-target="#attendanceRequestRejectModalBody"
+                      onclick="event.preventDefault()">
                       <ion-icon name="close-circle-outline"></ion-icon>
                     </a>
 
