@@ -402,7 +402,8 @@ class AttendanceRequestApiFlowTests(SimpleTestCase):
         )
         force_authenticate(request, user=self.other_user)
 
-        with patch("horilla_api.api_views.attendance.views.Attendance.objects.get", return_value=attendance):
+        with patch("horilla_api.api_views.attendance.views.Attendance.objects.select_for_update") as mocked_select:
+            mocked_select.return_value.get.return_value = attendance
             response = AttendanceRequestView.as_view()(request, pk=attendance.id)
 
         self.assertEqual(response.status_code, 403)
@@ -416,7 +417,8 @@ class AttendanceRequestApiFlowTests(SimpleTestCase):
         )
         force_authenticate(request, user=self.owner_user)
 
-        with patch("horilla_api.api_views.attendance.views.Attendance.objects.get", return_value=attendance):
+        with patch("horilla_api.api_views.attendance.views.Attendance.objects.select_for_update") as mocked_select:
+            mocked_select.return_value.get.return_value = attendance
             response = AttendanceRequestView.as_view()(request, pk=attendance.id)
 
         self.assertEqual(response.status_code, 400)
@@ -620,7 +622,7 @@ class AttendanceRequestDirectAttachmentApiViewTests(SimpleTestCase):
 
         worktype_filter = MagicMock()
         worktype_filter.exists.return_value = False
-        with patch("horilla_api.api_views.attendance.views.Attendance.objects.get", side_effect=[attendance, attendance]), patch(
+        with patch("horilla_api.api_views.attendance.views.Attendance.objects.select_for_update") as mocked_select, patch(
             "attendance.forms.AttendanceRequestForm",
             return_value=form,
         ), patch(
@@ -633,6 +635,7 @@ class AttendanceRequestDirectAttachmentApiViewTests(SimpleTestCase):
             "horilla_api.api_views.attendance.views.AttendanceRequestSerializer",
             return_value=SimpleNamespace(data={"id": attendance.id, "attachment_urls": ["protected-url"]}),
         ):
+            mocked_select.return_value.get.return_value = attendance
             response = self.view(request, pk=attendance.id)
 
         self.assertEqual(response.status_code, 200)
