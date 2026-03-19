@@ -1,5 +1,7 @@
 import logging
+from datetime import date
 from django.utils import timezone as dj_timezone
+from django.core.exceptions import ValidationError
 from rest_framework import serializers
 
 from attendance.models import *
@@ -137,6 +139,11 @@ class AttendanceRequestSerializer(serializers.ModelSerializer):
         ]
 
     def create(self, validated_data):
+        from attendance.services.attendance_correction_scope_rules import (
+            build_requested_data_for_save,
+            infer_scope_from_values,
+        )
+
         employee_id = validated_data.get("employee_id")
         attendance_date = validated_data.get("attendance_date")
         attendances = Attendance.objects.filter(
@@ -155,20 +162,38 @@ class AttendanceRequestSerializer(serializers.ModelSerializer):
             "minimum_hour": validated_data.get("minimum_hour"),
         }
         payload = Attendance(**data).serialize()
+        incoming_scope = infer_scope_from_values(
+            payload.get("attendance_clock_in"),
+            payload.get("attendance_clock_out"),
+        )
+        request_description = self.initial_data.get("request_description")
+
         if attendances.exists():
             attendance = attendances.first()
-            attendance.requested_data = payload
+            attendance.requested_data = build_requested_data_for_save(
+                new_payload=payload,
+                existing_requested_data=getattr(attendance, "requested_data", None),
+                incoming_scope=incoming_scope,
+                keep_existing_fields=(attendance.request_type != "create_request"),
+            )
             attendance.is_validate_request = True
+            attendance.is_validate_request_approved = False
             if attendance.request_type != "create_request":
                 attendance.request_type = "update_request"
-            attendance.request_description = self.initial_data.get("request_description")
+            attendance.request_description = request_description
             attendance.save()
             return attendance
 
         new_instance = Attendance(**data)
+        new_instance.requested_data = build_requested_data_for_save(
+            new_payload=payload,
+            existing_requested_data=None,
+            incoming_scope=incoming_scope,
+            keep_existing_fields=False,
+        )
         new_instance.is_validate_request = True
         new_instance.attendance_validated = False
-        new_instance.request_description = self.initial_data.get("request_description")
+        new_instance.request_description = request_description
         new_instance.request_type = "create_request"
         new_instance.save()
         return new_instance
