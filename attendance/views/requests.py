@@ -37,7 +37,6 @@ from attendance.models import (
     Attendance,
     AttendanceActivity,
     AttendanceRequestActionType,
-    AttendanceRequestComment,
     AttendanceRequestFile,
     BatchAttendance,
 )
@@ -58,6 +57,15 @@ from attendance.services.reconciliation import recompute_attendance
 from attendance.services.request_override_recompute import clear_request_override_and_recompute
 from attendance.services.request_audit import log_request_action
 from attendance.services.attachment_validation import validate_uploaded_files
+from attendance.services.attendance_request_access import (
+    iter_request_attachments,
+    hard_delete_request_attachment,
+    user_can_approve_request,
+    user_can_delete_attachment,
+    user_can_manage_request,
+    user_can_view_request,
+)
+from attendance.services.attendance_correction_scope_rules import load_requested_data
 from base.methods import (
     choosesubordinates,
     closest_numbers,
@@ -368,20 +376,8 @@ def request_attendance_view(request):
 
     # Attachment counts for current page (used as badges like Work Type Requests)
     try:
-        my_ids = [obj.id for obj in getattr(my_requests, "object_list", [])]
-        app_ids = [obj.id for obj in getattr(approvals, "object_list", [])]
-        my_attach_counts = {
-            row["request_id_id"]: row["cnt"]
-            for row in AttendanceRequestComment.objects.filter(request_id_id__in=my_ids)
-            .values("request_id_id")
-            .annotate(cnt=Count("files", distinct=True))
-        }
-        app_attach_counts = {
-            row["request_id_id"]: row["cnt"]
-            for row in AttendanceRequestComment.objects.filter(request_id_id__in=app_ids)
-            .values("request_id_id")
-            .annotate(cnt=Count("files", distinct=True))
-        }
+        my_attach_counts = {obj.id: len(list(iter_request_attachments(obj))) for obj in getattr(my_requests, "object_list", [])}
+        app_attach_counts = {obj.id: len(list(iter_request_attachments(obj))) for obj in getattr(approvals, "object_list", [])}
     except Exception:
         my_attach_counts = {}
         app_attach_counts = {}
@@ -499,8 +495,8 @@ def request_new(request):
                 except Exception:
                     attendance_obj = None
 
-            # Attach optional proof files (same as mobile/API: field name "files")
-            from attendance.models import AttendanceRequestFile, AttendanceRequestComment
+            # Attach optional proof files directly to the attendance request
+            from attendance.models import AttendanceRequestFile
 
             uploaded = []
             if hasattr(request, "FILES"):
@@ -522,20 +518,9 @@ def request_new(request):
                 )
 
             if attendance_obj and uploaded:
-                try:
-                    actor_emp = request.user.employee_get
-                except Exception:
-                    actor_emp = getattr(attendance_obj, "employee_id", None)
-
-                comment_text = (request.POST.get("request_description") or request.POST.get("reason") or "").strip()
-                c = AttendanceRequestComment.objects.create(
-                    request_id=attendance_obj,
-                    employee_id=actor_emp,
-                    comment=(comment_text[:255] if comment_text else None),
-                )
                 for up in uploaded:
                     arf = AttendanceRequestFile.objects.create(file=up)
-                    c.files.add(arf)
+                    attendance_obj.request_attachments.add(arf)
 
             if is_created:
                 messages.success(request, _("New attendance request created"))
@@ -794,7 +779,7 @@ def attendance_request_changes(request, attendance_id):
                         incoming_scope=incoming_scope,
                         keep_existing_fields=True,
                     )
-                    attendance.requested_data = json.dumps(wrapped)
+                    attendance.requested_data = wrapped
                 except ValidationError as ve:
                     # Attach error and re-render form.
                     for k, v in ve.message_dict.items():
@@ -808,7 +793,7 @@ def attendance_request_changes(request, attendance_id):
                         {"form": form, "attendance_id": attendance_id},
                     )
                 except Exception:
-                    attendance.requested_data = json.dumps(instance.serialize())
+                    attendance.requested_data = instance.serialize()
                 attendance.request_description = instance.request_description
                 # set the user level validation here
                 attendance.is_validate_request = True
@@ -906,7 +891,7 @@ def validate_attendance_request(request, attendance_id):
                 _req_date = attendance.attendance_date
         first_dict["attendance_date"] = _req_date
     else:
-        other_dict = json.loads(attendance.requested_data)
+        other_dict = load_requested_data(attendance.requested_data)
 
     requests_ids_json = request.GET.get("requests_ids")
     previous_instance_id = next_instance_id = attendance.pk
@@ -915,14 +900,9 @@ def validate_attendance_request(request, attendance_id):
             json.loads(requests_ids_json), attendance_id
         )
 
-    # Attachments count (used for UI parity with Work Type Requests)
+    # Attachments count (direct attachment flow)
     try:
-        attachment_count = (
-            AttendanceRequestComment.objects.filter(request_id=attendance)
-            .aggregate(cnt=Count("files", distinct=True))
-            .get("cnt")
-            or 0
-        )
+        attachment_count = len(list(iter_request_attachments(attendance)))
     except Exception:
         attachment_count = 0
 
@@ -1075,7 +1055,7 @@ def approve_validate_attendance_request(request, attendance_id):
         except Exception:
             pass
 
-        requested_data = _normalize_requested_data(json.loads(attendance.requested_data))
+        requested_data = _normalize_requested_data(load_requested_data(attendance.requested_data))
         Attendance.objects.filter(id=attendance_id).update(**requested_data)
 
         # Re-fetch to ensure types are correct (TimeField -> datetime.time, etc.)
@@ -1221,8 +1201,8 @@ def cancel_attendance_request(request, attendance_id):
 
         is_pending_request = bool(getattr(attendance, "is_validate_request", False))
         is_approved_request = bool(getattr(attendance, "is_validate_request_approved", False))
-        if not (is_pending_request or is_approved_request):
-            messages.error(request, _("Only waiting or approved requests can be canceled."))
+        if not is_pending_request or is_approved_request:
+            messages.error(request, _("Only waiting requests can be canceled."))
             return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
 
         req_type = attendance.request_type
@@ -1231,10 +1211,6 @@ def cancel_attendance_request(request, attendance_id):
         req_employee = attendance.employee_id
         wants_in, wants_out = get_requested_sessions(attendance)
         needs_canonical_reset = bool(req_type == "create_request")
-
-        if is_approved_request:
-            _restore_request_back_to_raw(attendance, include_in=wants_in, include_out=wants_out, prev_attendance_date=req_date)
-            attendance.refresh_from_db()
 
         attendance.is_validate_request_approved = False
         attendance.is_validate_request = False
@@ -1274,22 +1250,18 @@ def cancel_attendance_request(request, attendance_id):
 @manager_can_enter("attendance.change_attendance")
 @transaction.atomic
 def reject_validate_attendance_request(request, attendance_id):
-    """Reject an attendance request (approver action).
-
-    Aligned with mobile Attendance Correction Request:
-    - Owner cannot reject own request (use cancel)
-    - Only WAITING requests can be rejected
-    - Keep the Attendance row for history (status=REJECTED)
-    """
+    """Reject an attendance request (approver action) with mandatory reason."""
+    if request.method != "POST":
+        attendance = Attendance.objects.filter(id=attendance_id, is_validate_request=True).first()
+        if not attendance or not user_can_approve_request(request.user, attendance):
+            return HttpResponseForbidden("Permission denied")
+        return render(request, "attendance/attendance_requests/reject_form.html", {"attendance": attendance})
     try:
         # Fetch via permission-filtered queryset to ensure manager/admin scope
-        qs = Attendance.objects.filter(id=attendance_id, is_validate_request=True)
-        qs = filtersubordinates(
-            request=request,
-            perm="attendance.change_attendance",
-            queryset=qs,
-        )
-        attendance = qs.select_for_update().get()
+        attendance = Attendance.objects.select_for_update().get(id=attendance_id, is_validate_request=True)
+        if not user_can_approve_request(request.user, attendance):
+            messages.error(request, _("You do not have permission to perform this action."))
+            return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
 
         # Disallow rejecting your own request
         try:
@@ -1306,6 +1278,11 @@ def reject_validate_attendance_request(request, attendance_id):
         wants_in, wants_out = get_requested_sessions(attendance)
         needs_canonical_reset = req_type == "create_request"
 
+        comment_text = (request.POST.get("comment") or request.POST.get("reason") or "").strip()
+        if not comment_text:
+            messages.error(request, _("Reject reason is required."))
+            return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+
         attendance.is_validate_request_approved = False
         attendance.is_validate_request = False
         attendance.request_type = "reject_request"
@@ -1316,7 +1293,6 @@ def reject_validate_attendance_request(request, attendance_id):
         attendance.action_type = AttendanceRequestActionType.REJECTED
         attendance.action_at = timezone.now()
         attendance.save()
-        comment_text = (request.POST.get("comment") or request.POST.get("reason") or "").strip() or None
         _log_attendance_request_action(
             attendance,
             request,
@@ -1346,46 +1322,34 @@ def reject_validate_attendance_request(request, attendance_id):
 @login_required
 @hx_request_required
 def attendance_request_attachments(request, attendance_id):
-    """HTMX modal: show Attendance Request attachments."""
+    """HTMX modal: show Attendance Request direct attachments."""
     attendance = Attendance.objects.filter(id=attendance_id).first()
     if not attendance:
-        return render(
-            request,
-            "attendance/attendance_requests/attachments_modal.html",
-            {"req": None, "files": []},
-        )
-
-    # Allow: owner OR manager/admin with attendance perms
-    try:
-        is_owner = attendance.employee_id.employee_user_id == request.user
-    except Exception:
-        is_owner = False
-
-    if not (
-        is_owner
-        or is_reportingmanager(request)
-        or request.user.has_perm("attendance.change_attendance")
-        or request.user.has_perm("attendance.view_attendance")
-    ):
+        return render(request, "attendance/attendance_requests/attachments_modal.html", {"req": None, "files": []})
+    if not user_can_view_request(request.user, attendance):
         return HttpResponseForbidden("Permission denied")
+    files = list(iter_request_attachments(attendance))
+    return render(request, "attendance/attendance_requests/attachments_modal.html", {"req": attendance, "files": files, "can_delete": user_can_delete_attachment(request.user, attendance)})
 
-    files = []
-    try:
-        comments = AttendanceRequestComment.objects.filter(request_id=attendance).prefetch_related("files")
-        seen = set()
-        for c in comments:
-            for f in c.files.all():
-                if f and f.id not in seen:
-                    seen.add(f.id)
-                    files.append(f)
-    except Exception:
-        files = []
-
-    return render(
-        request,
-        "attendance/attendance_requests/attachments_modal.html",
-        {"req": attendance, "files": files},
-    )
+@login_required
+@transaction.atomic
+def delete_attendance_request_attachment(request, attendance_id, file_id):
+    if request.method != "POST":
+        return HttpResponseForbidden("Method not allowed")
+    attendance = Attendance.objects.filter(id=attendance_id).first()
+    if not attendance:
+        messages.error(request, _("Attendance request not found."))
+        return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+    if not user_can_delete_attachment(request.user, attendance):
+        messages.error(request, _("You do not have permission to delete this attachment."))
+        return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+    file_obj = AttendanceRequestFile.objects.filter(id=file_id).first()
+    if not file_obj or file_obj not in list(iter_request_attachments(attendance)):
+        messages.error(request, _("Attachment not found."))
+        return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+    hard_delete_request_attachment(attendance, file_obj)
+    messages.success(request, _("Attachment deleted."))
+    return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
 
 
 
@@ -1492,7 +1456,7 @@ def bulk_approve_attendance_request(request):
             except Exception:
                 pass
 
-            requested_data = _normalize_requested_data(json.loads(attendance.requested_data))
+            requested_data = _normalize_requested_data(load_requested_data(attendance.requested_data))
             Attendance.objects.filter(id=attendance_id).update(**requested_data)
             attendance.refresh_from_db()
             attendance.attendance_validated = True
@@ -1642,7 +1606,7 @@ def edit_validate_attendance(request, attendance_id):
         initial = request.GET.dict()
     else:
         if attendance.request_type != "create_request":
-            initial = json.loads(attendance.requested_data)
+            initial = load_requested_data(attendance.requested_data)
         initial["request_description"] = attendance.request_description
     form = AttendanceRequestForm(initial=initial)
     form.instance.id = attendance.id
@@ -1660,7 +1624,7 @@ def edit_validate_attendance(request, attendance_id):
                     attendance.refresh_from_db()
                     attendance.is_validate_request_approved = False
                     attendance.request_type = "revalidate_request"
-                attendance.requested_data = json.dumps(instance.serialize())
+                attendance.requested_data = instance.serialize()
                 attendance.request_description = instance.request_description
                 # set the user level validation here
                 attendance.is_validate_request = True
