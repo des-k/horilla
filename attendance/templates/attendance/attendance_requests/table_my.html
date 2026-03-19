@@ -102,7 +102,7 @@
                       <ion-icon name="eye-outline"></ion-icon>
                     </button>
 
-                    {% if r.is_validate_request or r.is_validate_request_approved %}
+                    {% if r.is_validate_request and not r.is_validate_request_approved %}
                       <a class="oh-btn oh-btn--danger" title="{% trans 'Cancel Request' %}" href="{% url 'cancel-validate-attendance-request' r.id %}"
                         onclick="return confirm('{% trans "Cancel this request?" %}');">
                         <ion-icon name="close-circle-outline"></ion-icon>

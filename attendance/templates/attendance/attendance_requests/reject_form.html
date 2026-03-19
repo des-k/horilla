@@ -1,0 +1,16 @@
+{% load i18n %}
+<div class="oh-modal__dialog-header">
+  <h2 class="oh-modal__dialog-title">{% trans "Reject Attendance Request" %}</h2>
+</div>
+<div class="oh-modal__dialog-body">
+  <form method="post" action="{% url 'reject-validate-attendance-request' attendance.id %}">
+    {% csrf_token %}
+    <div class="form-group">
+      <label for="reject-reason">{% trans "Reason" %}</label>
+      <textarea id="reject-reason" name="reason" class="oh-input w-100" required></textarea>
+    </div>
+    <div class="mt-3 d-flex" style="gap:8px; justify-content:flex-end;">
+      <button type="submit" class="oh-btn oh-btn--danger">{% trans "Reject" %}</button>
+    </div>
+  </form>
+</div>
