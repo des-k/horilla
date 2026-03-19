@@ -102,51 +102,37 @@
     </a>
 
     {% if attendance.is_validate_request %}
-      {# Owner: Cancel only #}
       {% if attendance.employee_id.employee_user_id == request.user %}
+        <a hx-get="{% url 'edit-validate-attendance' attendance.id %}"
+           hx-target="#editValidateAttendanceRequestModalBody"
+           data-target="#editValidateAttendanceRequest"
+           data-toggle="oh-modal-toggle"
+           class="oh-btn oh-btn--info w-100"
+           onclick="event.preventDefault()">
+          <ion-icon name="create-outline"></ion-icon>
+          {% trans "Edit" %}
+        </a>
         <a href="{% url 'cancel-validate-attendance-request' attendance.id %}"
            class="oh-btn oh-btn--secondary w-100"
            onclick="return confirm('{% trans "Cancel this request?" %}');">
           <ion-icon name="close-circle-outline"></ion-icon>
           {% trans "Cancel Request" %}
         </a>
-      {% else %}
-        {# Approver: Approve/Reject (no self approve) #}
-        {% if request.user|is_reportingmanager or perms.attendance.change_attendance %}
-          <a href="{% url 'reject-validate-attendance-request' attendance.id %}"
-             class="oh-btn oh-btn--danger w-100"
-             onclick="return confirm('{% trans "Reject this request?" %}');">
-            <ion-icon name="close-circle-outline"></ion-icon>
-            {% trans "Reject" %}
-          </a>
-
-          <a href="{% url 'approve-validate-attendance-request' attendance.id %}"
-             class="oh-btn oh-btn--success w-100"
-             onclick="return confirm('{% trans "Approve this request?" %}');">
-            <ion-icon name="checkmark-outline"></ion-icon>
-            {% trans "Approve" %}
-          </a>
-
-          <a hx-get="{% url 'edit-validate-attendance' attendance.id %}"
-             hx-target="#editValidateAttendanceRequestModalBody"
-             data-target="#editValidateAttendanceRequest"
-             data-toggle="oh-modal-toggle"
-             class="oh-btn oh-btn--info w-100"
-             onclick="event.preventDefault()">
-            <ion-icon name="create-outline"></ion-icon>
-            {% trans "Edit" %}
-          </a>
-        {% endif %}
+      {% elif request.user|is_reportingmanager or perms.attendance.change_attendance %}
+        <a href="{% url 'reject-validate-attendance-request' attendance.id %}"
+           class="oh-btn oh-btn--danger w-100">
+          <ion-icon name="close-circle-outline"></ion-icon>
+          {% trans "Reject" %}
+        </a>
+        <a href="{% url 'approve-validate-attendance-request' attendance.id %}"
+           class="oh-btn oh-btn--success w-100"
+           onclick="return confirm('{% trans "Approve this request?" %}');">
+          <ion-icon name="checkmark-outline"></ion-icon>
+          {% trans "Approve" %}
+        </a>
       {% endif %}
     {% elif attendance.is_validate_request_approved %}
-      {% if attendance.employee_id.employee_user_id == request.user %}
-        <a href="{% url 'cancel-validate-attendance-request' attendance.id %}"
-           class="oh-btn oh-btn--secondary w-100"
-           onclick="return confirm('{% trans "Cancel this approved request?" %}');">
-          <ion-icon name="close-circle-outline"></ion-icon>
-          {% trans "Cancel Approved Request" %}
-        </a>
-      {% elif request.user|is_reportingmanager or perms.attendance.change_attendance %}
+      {% if request.user|is_reportingmanager or perms.attendance.change_attendance %}
         <a href="{% url 'revoke-validate-attendance-request' attendance.id %}"
            class="oh-btn oh-btn--warning w-100"
            onclick="return confirm('{% trans "Revoke this approval and restore raw attendance?" %}');">
