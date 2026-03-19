@@ -72,7 +72,7 @@ def sessions_to_scope(sessions: Set[str]) -> str:
     return ""
 
 
-def load_requested_data(requested_data: Optional[str]) -> Dict[str, Any]:
+def load_requested_data(requested_data: Optional[Any]) -> Dict[str, Any]:
     if not requested_data:
         return {}
     if isinstance(requested_data, dict):
@@ -214,10 +214,41 @@ def build_requested_data_for_save(
     return out
 
 
-def record_approved_scope_on_requested_data(requested_data_str: Optional[str]) -> Optional[str]:
-    """On approval: add meta.current_scope to meta.approved_scopes and return new JSON."""
+def record_approved_scope_on_requested_data(requested_data_str: Optional[Any]) -> Optional[Dict[str, Any]]:
+    """On approval: add meta.current_scope to meta.approved_scopes and return normalized dict."""
     if not requested_data_str:
-        return requested_data_str
+        return load_requested_data(requested_data_str) or None
+
+    data = load_requested_data(requested_data_str)
+    meta = data.get("__meta") if isinstance(data.get("__meta"), dict) else {}
+
+    current_scope = (meta.get("current_scope") or "").upper()
+    if not current_scope:
+        current_scope = infer_scope_from_values(
+            data.get("attendance_clock_in"),
+            data.get("attendance_clock_out"),
+        )
+    if not current_scope:
+        return data or None
+
+    approved_scopes = get_approved_scopes(requested_data_str)
+    if current_scope == "FULL":
+        approved_scopes.extend(["IN", "OUT"])
+    else:
+        approved_scopes.append(current_scope)
+
+    seen: Set[str] = set()
+    dedup: List[str] = []
+    for s in approved_scopes:
+        if s in seen:
+            continue
+        seen.add(s)
+        dedup.append(s)
+
+    meta["approved_scopes"] = dedup
+    meta["current_scope"] = current_scope
+    data["__meta"] = meta
+    return data
 
     data = load_requested_data(requested_data_str)
     meta = data.get("__meta") if isinstance(data.get("__meta"), dict) else {}
