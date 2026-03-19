@@ -976,6 +976,12 @@ class Attendance(HorillaModel):
         editable=False,
         verbose_name=_("Request Restore Snapshot"),
     )
+    request_attachments = models.ManyToManyField(
+        "attendance.AttendanceRequestFile",
+        blank=True,
+        related_name="attendance_requests",
+        verbose_name=_("Request Attachments"),
+    )
     action_by = models.ForeignKey(
         Employee,
         on_delete=models.PROTECT,
