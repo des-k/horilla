@@ -84,13 +84,13 @@ def load_requested_data(requested_data: Optional[Any]) -> Dict[str, Any]:
         return {}
 
 
-def load_meta(requested_data: Optional[str]) -> Dict[str, Any]:
+def load_meta(requested_data: Optional[Any]) -> Dict[str, Any]:
     d = load_requested_data(requested_data)
     meta = d.get("__meta")
     return meta if isinstance(meta, dict) else {}
 
 
-def get_approved_scopes(requested_data: Optional[str]) -> List[str]:
+def get_approved_scopes(requested_data: Optional[Any]) -> List[str]:
     meta = load_meta(requested_data)
     scopes = meta.get("approved_scopes")
     if not isinstance(scopes, list):
@@ -111,7 +111,7 @@ def get_approved_scopes(requested_data: Optional[str]) -> List[str]:
     return dedup
 
 
-def get_current_scope(requested_data: Optional[str]) -> str:
+def get_current_scope(requested_data: Optional[Any]) -> str:
     data = load_requested_data(requested_data)
     meta = data.get("__meta") if isinstance(data.get("__meta"), dict) else {}
     cur = (meta.get("current_scope") or "").upper()
@@ -177,7 +177,7 @@ def validate_new_request_scope(
 def build_requested_data_for_save(
     *,
     new_payload: Dict[str, Any],
-    existing_requested_data: Optional[str],
+    existing_requested_data: Optional[Any],
     incoming_scope: str,
     keep_existing_fields: bool,
 ) -> Dict[str, Any]:
@@ -214,12 +214,12 @@ def build_requested_data_for_save(
     return out
 
 
-def record_approved_scope_on_requested_data(requested_data_str: Optional[Any]) -> Optional[Dict[str, Any]]:
+def record_approved_scope_on_requested_data(requested_data_obj: Optional[Any]) -> Optional[Dict[str, Any]]:
     """On approval: add meta.current_scope to meta.approved_scopes and return normalized dict."""
-    if not requested_data_str:
-        return load_requested_data(requested_data_str) or None
+    if not requested_data_obj:
+        return requested_data_obj
 
-    data = load_requested_data(requested_data_str)
+    data = load_requested_data(requested_data_obj)
     meta = data.get("__meta") if isinstance(data.get("__meta"), dict) else {}
 
     current_scope = (meta.get("current_scope") or "").upper()
@@ -229,40 +229,9 @@ def record_approved_scope_on_requested_data(requested_data_str: Optional[Any]) -
             data.get("attendance_clock_out"),
         )
     if not current_scope:
-        return data or None
+        return requested_data_obj
 
-    approved_scopes = get_approved_scopes(requested_data_str)
-    if current_scope == "FULL":
-        approved_scopes.extend(["IN", "OUT"])
-    else:
-        approved_scopes.append(current_scope)
-
-    seen: Set[str] = set()
-    dedup: List[str] = []
-    for s in approved_scopes:
-        if s in seen:
-            continue
-        seen.add(s)
-        dedup.append(s)
-
-    meta["approved_scopes"] = dedup
-    meta["current_scope"] = current_scope
-    data["__meta"] = meta
-    return data
-
-    data = load_requested_data(requested_data_str)
-    meta = data.get("__meta") if isinstance(data.get("__meta"), dict) else {}
-
-    current_scope = (meta.get("current_scope") or "").upper()
-    if not current_scope:
-        current_scope = infer_scope_from_values(
-            data.get("attendance_clock_in"),
-            data.get("attendance_clock_out"),
-        )
-    if not current_scope:
-        return requested_data_str
-
-    approved_scopes = get_approved_scopes(requested_data_str)
+    approved_scopes = get_approved_scopes(requested_data_obj)
     if current_scope == "FULL":
         approved_scopes.extend(["IN", "OUT"])
     else:
@@ -281,7 +250,4 @@ def record_approved_scope_on_requested_data(requested_data_str: Optional[Any]) -
     meta["current_scope"] = current_scope
     data["__meta"] = meta
 
-    try:
-        return json.dumps(data)
-    except Exception:
-        return requested_data_str
+    return data
