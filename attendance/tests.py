@@ -2,7 +2,6 @@ from io import BytesIO
 import datetime as dt
 import os
 import unittest
-from unittest import SkipTest
 
 from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -166,149 +165,148 @@ class AttendanceSaveUpdateFieldsTests(unittest.TestCase):
         overtime_account.save.assert_called_once()
         super_save_mock.assert_called_once()
 
-from datetime import date
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
-from django.contrib.auth.models import User
-from django.db import connection
-from django.db import models as django_models
-from django.test import TestCase
+from django.test import SimpleTestCase
 from rest_framework.test import APIRequestFactory, force_authenticate
 
-from attendance.models import Attendance, AttendanceRequestActionType, AttendanceRequestAuditLog
-from employee.models import Employee
-from horilla_api.api_views.attendance.views import AttendanceRequestCancelView
+from attendance.models import AttendanceRequestActionType
+from horilla_api.api_views.attendance.views import AttendanceRequestCancelView, AttendanceRequestRevokeView
 
 
-class AttendanceRequestCancelAuditLogTests(TestCase):
-    @classmethod
-    def setUpTestData(cls):
-        if "employee_employee" not in connection.introspection.table_names():
-            raise SkipTest("employee_employee table is unavailable in this test snapshot")
-        cls.factory = APIRequestFactory()
-        cls.view = AttendanceRequestCancelView.as_view()
-        cls.owner_user = User.objects.create_user(
-            username="attendance-owner",
-            email="attendance-owner@example.com",
-            password="testpass123",
-        )
-        cls.owner_employee = Employee.objects.create(
-            employee_user_id=cls.owner_user,
-            employee_first_name="Attendance",
-            employee_last_name="Owner",
-            email="attendance-owner@example.com",
-            phone="1111111111",
-        )
-        cls.other_user = User.objects.create_user(
-            username="attendance-other",
-            email="attendance-other@example.com",
-            password="testpass123",
-        )
-        cls.other_employee = Employee.objects.create(
-            employee_user_id=cls.other_user,
-            employee_first_name="Attendance",
-            employee_last_name="Other",
-            email="attendance-other@example.com",
-            phone="2222222222",
-        )
+class AttendanceRequestCancelRevokeRegressionTests(SimpleTestCase):
+    databases = "__all__"
 
-    def _create_attendance_request(self, **overrides):
+    def setUp(self):
+        self.factory = APIRequestFactory()
+        self.owner_user = SimpleNamespace(is_authenticated=True, employee_get=SimpleNamespace(id=10), has_perm=lambda perm: False)
+        self.other_user = SimpleNamespace(is_authenticated=True, employee_get=SimpleNamespace(id=11), has_perm=lambda perm: False)
+        self.manager_user = SimpleNamespace(is_authenticated=True, employee_get=SimpleNamespace(id=12), has_perm=lambda perm: False)
+
+    def _attendance(self, **overrides):
+        employee = SimpleNamespace(id=10, employee_user_id=self.owner_user)
         defaults = {
-            "employee_id": self.owner_employee,
-            "attendance_date": date(2026, 3, 10),
+            "id": 77,
+            "pk": 77,
+            "employee_id": employee,
+            "employee_id_id": employee.id,
+            "attendance_date": "2026-03-10",
             "request_type": "update_request",
-            "request_description": "Fix my attendance",
+            "request_description": "Fix attendance",
             "is_validate_request": True,
             "is_validate_request_approved": False,
             "requested_data": {"attendance_clock_in": "09:00:00"},
+            "action_by": None,
+            "action_type": None,
+            "action_at": None,
+            "save": MagicMock(),
+            "refresh_from_db": MagicMock(),
         }
         defaults.update(overrides)
-        attendance = Attendance(**defaults)
-        Attendance.objects.bulk_create([attendance])
-        return Attendance.objects.get(id=attendance.id)
+        return SimpleNamespace(**defaults)
 
-    def _make_request(self, user, attendance_id):
-        request = self.factory.put(f"/api/attendance/request-cancel/{attendance_id}/", {}, format="json")
+    def _request(self, path, user):
+        request = self.factory.put(path, {}, format="json")
         force_authenticate(request, user=user)
         return request
 
-    def test_cancel_pending_request_via_api_creates_single_audit_log(self):
-        attendance = self._create_attendance_request(
-            request_type="update_request",
-            is_validate_request=True,
-            is_validate_request_approved=False,
-        )
+    def test_cancel_pending_request_logs_once_with_canceled_status(self):
+        attendance = self._attendance()
+        request = self._request("/api/attendance/attendance-request-cancel/77", self.owner_user)
 
-        request = self._make_request(self.owner_user, attendance.id)
-        with patch.object(Attendance, "save", new=django_models.Model.save):
-            response = self.view(request, pk=attendance.id)
-
-        self.assertEqual(response.status_code, 200)
-        logs = AttendanceRequestAuditLog.objects.filter(attendance=attendance)
-        self.assertEqual(logs.count(), 1)
-        log = logs.get()
-        self.assertEqual(log.actor, self.owner_employee)
-        self.assertEqual(log.action_type, AttendanceRequestActionType.CANCELED)
-        self.assertEqual(log.old_status, "update_request")
-        self.assertEqual(log.new_status, "cancel_request")
-
-    def test_cancel_approved_request_via_api_creates_single_audit_log(self):
-        attendance = self._create_attendance_request(
-            request_type="update_request",
-            is_validate_request=False,
-            is_validate_request_approved=True,
-            requested_data=None,
-        )
-
-        request = self._make_request(self.owner_user, attendance.id)
-        with patch.object(Attendance, "save", new=django_models.Model.save), \
-             patch("horilla_api.api_views.attendance.views._restore_request_back_to_raw", side_effect=lambda obj, **kwargs: obj), \
-             patch("horilla_api.api_views.attendance.views.clear_request_override_and_recompute", side_effect=lambda obj, **kwargs: obj):
-            response = self.view(request, pk=attendance.id)
+        with patch("horilla_api.api_views.attendance.views.Attendance.objects.select_for_update") as mocked_select, patch(
+            "horilla_api.api_views.attendance.views._log_attendance_request_status_change"
+        ) as log_status, patch(
+            "horilla_api.api_views.attendance.views.AttendanceRequestSerializer",
+            return_value=SimpleNamespace(data={"status": "CANCELED"}),
+        ):
+            mocked_select.return_value.get.return_value = attendance
+            response = AttendanceRequestCancelView.as_view()(request, pk=attendance.id)
 
         self.assertEqual(response.status_code, 200)
-        logs = AttendanceRequestAuditLog.objects.filter(attendance=attendance)
-        self.assertEqual(logs.count(), 1)
-        log = logs.get()
-        self.assertEqual(log.actor, self.owner_employee)
-        self.assertEqual(log.action_type, AttendanceRequestActionType.CANCELED)
-        self.assertEqual(log.old_status, "update_request")
-        self.assertEqual(log.new_status, "cancel_request")
+        self.assertEqual(attendance.request_type, "cancel_request")
+        self.assertFalse(attendance.is_validate_request)
+        self.assertFalse(attendance.is_validate_request_approved)
+        log_status.assert_called_once()
+        kwargs = log_status.call_args.kwargs
+        self.assertEqual(kwargs["action_type"], AttendanceRequestActionType.CANCELED)
+        self.assertEqual(kwargs["old_status"], "update_request")
+        self.assertEqual(kwargs["new_status"], "cancel_request")
 
-    def test_non_owner_cannot_cancel_and_no_audit_log_is_created(self):
-        attendance = self._create_attendance_request()
+    def test_cancel_approved_request_returns_400_and_does_not_log(self):
+        attendance = self._attendance(is_validate_request=False, is_validate_request_approved=True, requested_data=None)
+        request = self._request("/api/attendance/attendance-request-cancel/77", self.owner_user)
 
-        request = self._make_request(self.other_user, attendance.id)
-        response = self.view(request, pk=attendance.id)
-
-        self.assertEqual(response.status_code, 403)
-        self.assertFalse(AttendanceRequestAuditLog.objects.filter(attendance=attendance).exists())
-
-    def test_invalid_state_cannot_cancel_and_no_audit_log_is_created(self):
-        attendance = self._create_attendance_request(
-            is_validate_request=False,
-            is_validate_request_approved=False,
-        )
-
-        request = self._make_request(self.owner_user, attendance.id)
-        response = self.view(request, pk=attendance.id)
+        with patch("horilla_api.api_views.attendance.views.Attendance.objects.select_for_update") as mocked_select, patch(
+            "horilla_api.api_views.attendance.views._log_attendance_request_status_change"
+        ) as log_status:
+            mocked_select.return_value.get.return_value = attendance
+            response = AttendanceRequestCancelView.as_view()(request, pk=attendance.id)
 
         self.assertEqual(response.status_code, 400)
-        self.assertFalse(AttendanceRequestAuditLog.objects.filter(attendance=attendance).exists())
+        self.assertIn("Only waiting requests can be canceled", str(response.data))
+        log_status.assert_not_called()
 
-    def test_successful_cancel_does_not_create_duplicate_audit_logs(self):
-        attendance = self._create_attendance_request(
-            request_type="update_request",
-            is_validate_request=True,
-            is_validate_request_approved=False,
-        )
+    def test_non_owner_cannot_cancel_and_does_not_log(self):
+        attendance = self._attendance()
+        request = self._request("/api/attendance/attendance-request-cancel/77", self.other_user)
 
-        request = self._make_request(self.owner_user, attendance.id)
-        with patch.object(Attendance, "save", new=django_models.Model.save):
-            response = self.view(request, pk=attendance.id)
+        with patch("horilla_api.api_views.attendance.views.Attendance.objects.select_for_update") as mocked_select, patch(
+            "horilla_api.api_views.attendance.views._log_attendance_request_status_change"
+        ) as log_status:
+            mocked_select.return_value.get.return_value = attendance
+            response = AttendanceRequestCancelView.as_view()(request, pk=attendance.id)
+
+        self.assertEqual(response.status_code, 403)
+        log_status.assert_not_called()
+
+    def test_revoke_approved_request_logs_once_with_revoked_status(self):
+        attendance = self._attendance(is_validate_request=False, is_validate_request_approved=True, requested_data=None)
+        request = self._request("/api/attendance/attendance-request-revoke/77", self.manager_user)
+
+        with patch("horilla_api.api_views.attendance.views.Attendance.objects.select_for_update") as mocked_select, patch(
+            "horilla_api.api_views.attendance.views._can_act_on_employee",
+            return_value=True,
+        ), patch(
+            "horilla_api.api_decorators.base.decorators.ManagerPermission.has_permission",
+            return_value=True,
+        ), patch(
+            "horilla_api.api_views.attendance.views._restore_request_back_to_raw",
+            return_value=None,
+        ), patch(
+            "horilla_api.api_views.attendance.views.recompute_attendance",
+            return_value=None,
+        ), patch(
+            "horilla_api.api_views.attendance.views._log_attendance_request_status_change"
+        ) as log_status, patch(
+            "horilla_api.api_views.attendance.views.AttendanceRequestSerializer",
+            return_value=SimpleNamespace(data={"status": "REVOKED"}),
+        ):
+            mocked_select.return_value.get.return_value = attendance
+            response = AttendanceRequestRevokeView.as_view()(request, pk=attendance.id)
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(
-            AttendanceRequestAuditLog.objects.filter(attendance=attendance).count(),
-            1,
-        )
+        self.assertEqual(attendance.request_type, "revoke_request")
+        self.assertFalse(attendance.is_validate_request_approved)
+        log_status.assert_called_once()
+        kwargs = log_status.call_args.kwargs
+        self.assertEqual(kwargs["action_type"], AttendanceRequestActionType.REVOKED)
+        self.assertEqual(kwargs["old_status"], "update_request")
+        self.assertEqual(kwargs["new_status"], "revoke_request")
+
+    def test_owner_cannot_revoke_own_approved_request_and_does_not_log(self):
+        attendance = self._attendance(is_validate_request=False, is_validate_request_approved=True, requested_data=None)
+        request = self._request("/api/attendance/attendance-request-revoke/77", self.owner_user)
+
+        with patch("horilla_api.api_views.attendance.views.Attendance.objects.select_for_update") as mocked_select, patch(
+            "horilla_api.api_decorators.base.decorators.ManagerPermission.has_permission",
+            return_value=True,
+        ), patch(
+            "horilla_api.api_views.attendance.views._log_attendance_request_status_change"
+        ) as log_status:
+            mocked_select.return_value.get.return_value = attendance
+            response = AttendanceRequestRevokeView.as_view()(request, pk=attendance.id)
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("cannot revoke your own approved request", str(response.data).lower())
+        log_status.assert_not_called()
