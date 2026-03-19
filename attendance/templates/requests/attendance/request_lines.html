@@ -76,8 +76,7 @@
                                         hx-get="{% url 'search-attendance-requests' %}?{{pd}}&sortby=attendance_overtime">
                                         {% trans "Overtime" %}
                                     </div>
-                                    <div class="oh-sticky-table__th oh-sticky-table__right" style="width:115px;">{% trans "Comment" %}</div>
-                                    <div class="oh-sticky-table__th oh-sticky-table__right">{% trans "Actions" %}</div>
+                                                                        <div class="oh-sticky-table__th oh-sticky-table__right">{% trans "Actions" %}</div>
                                 </div>
                             </div>
                             <div class="oh-sticky-table__tbody">
@@ -423,15 +422,6 @@
             <!-- end of empty page -->
         {% endif %}
     </div>
-
-
-
-    <!-- start of comment modal -->
-    <div class="oh-modal" id="shiftcommentModal" role="dialog" aria-labelledby="emptagModal" aria-hidden="true">
-        <div class="oh-modal__dialog" id="shiftRequestCommentForm">
-        </div>
-    </div>
-    <!-- end of comment modal -->
 
     <div class="oh-modal" style="z-index: 60;" id="shiftRequestDetailModal" role="dialog"
         aria-labelledby="shiftRequestDetailModal" aria-hidden="true">
