@@ -35,6 +35,7 @@ from attendance.models import (
     AttendanceActivity,
     AttendanceLateComeEarlyOut,
     AttendanceRequestFile,
+    AttendanceRequestActionType,
     AttendancePunchSource,
     AttendancePunchingHistory,
     EmployeeShiftDay,
@@ -1481,96 +1482,98 @@ class AttendanceRequestView(APIView):
             )
         return Response(form.errors, status=400)
 
+    @transaction.atomic
     def put(self, request, pk):
         from attendance.forms import AttendanceRequestForm
 
-        attendance = Attendance.objects.get(id=pk)
+        attendance = Attendance.objects.select_for_update().get(id=pk)
+        if not user_can_manage_request(request.user, attendance):
+            return Response({"error": "You do not have permission to update this request."}, status=status.HTTP_403_FORBIDDEN)
+        if getattr(attendance, "is_validate_request_approved", False):
+            return Response({"error": "Approved requests cannot be edited."}, status=status.HTTP_400_BAD_REQUEST)
+
+        uploaded = []
+        if hasattr(request, "FILES"):
+            uploaded = request.FILES.getlist("files") or request.FILES.getlist("files[]") or []
+            if not uploaded:
+                f_single = request.FILES.get("file")
+                if f_single:
+                    uploaded = [f_single]
+        if uploaded:
+            try:
+                validate_uploaded_files(uploaded)
+            except ValidationError as ve:
+                return Response({"files": getattr(ve, "messages", [str(ve)])}, status=400)
+
         form = AttendanceRequestForm(
             data=request.data,
             files=getattr(request, "FILES", None),
             instance=attendance,
         )
-        if form.is_valid():
-            attendance = Attendance.objects.get(id=form.instance.pk)
-            instance = form.save()
-            instance.employee_id = attendance.employee_id
-            instance.id = attendance.id
-            work_type = form.cleaned_data.get("work_type_id")
+        if not form.is_valid():
+            return Response(form.errors, status=400)
 
-            if not WorkType.objects.filter(pk=getattr(work_type, "pk", None)).exists():
-                form.cleaned_data["work_type_id"] = None
-            if attendance.request_type != "create_request":
-                # Preserve approved-scope meta and validate against already-approved scopes.
-                try:
-                    from attendance.services.attendance_correction_scope_rules import (
-                        infer_scope_from_values,
-                        get_approved_scopes,
-                        build_requested_data_for_save,
-                        validate_new_request_scope,
-                    )
+        attendance = Attendance.objects.select_for_update().get(id=form.instance.pk)
+        instance = form.save()
+        instance.employee_id = attendance.employee_id
+        instance.id = attendance.id
+        work_type = form.cleaned_data.get("work_type_id")
 
-                    serialized = instance.serialize()
-                    incoming_scope = infer_scope_from_values(
-                        serialized.get("attendance_clock_in"),
-                        serialized.get("attendance_clock_out"),
-                    )
-                    approved_scopes = get_approved_scopes(getattr(attendance, "requested_data", None))
-
-                    # Editing an existing request is allowed; we only block overlaps with approved scopes.
-                    validate_new_request_scope(
-                        existing_waiting_scope="",
-                        approved_scopes=approved_scopes,
-                        incoming_scope=incoming_scope,
-                    )
-
-                    wrapped = build_requested_data_for_save(
-                        new_payload=serialized,
-                        existing_requested_data=getattr(attendance, "requested_data", None),
-                        incoming_scope=incoming_scope,
-                        keep_existing_fields=True,
-                    )
-                    attendance.requested_data = wrapped
-                except ValidationError as ve:
-                    return Response(ve.message_dict, status=400)
-                except Exception:
-                    attendance.requested_data = instance.serialize()
-                attendance.request_description = instance.request_description
-                # set the user level validation here
-                attendance.is_validate_request = True
-                attendance.save()
-            else:
-                instance.is_validate_request_approved = False
-                instance.is_validate_request = True
-                instance.save()
-            # Attach proof files (optional) via AttendanceRequestComment
+        if not WorkType.objects.filter(pk=getattr(work_type, "pk", None)).exists():
+            form.cleaned_data["work_type_id"] = None
+        if attendance.request_type != "create_request":
+            # Preserve approved-scope meta and validate against already-approved scopes.
             try:
-                from attendance.models import AttendanceRequestFile
-                from attendance.services.attachment_validation import validate_uploaded_files
-                uploaded = []
-                if hasattr(request, "FILES"):
-                    uploaded = request.FILES.getlist("files") or request.FILES.getlist("files[]") or []
-                    if not uploaded:
-                        f_single = request.FILES.get("file")
-                        if f_single:
-                            uploaded = [f_single]
-                if uploaded:
-                    validate_uploaded_files(uploaded)
-                    for up in uploaded:
-                        arf = AttendanceRequestFile.objects.create(file=up)
-                        attendance.request_attachments.add(arf)
-            except ValidationError as ve:
-                return Response({"files": getattr(ve, "messages", [str(ve)])}, status=400)
-            except Exception:
-                pass
+                from attendance.services.attendance_correction_scope_rules import (
+                    infer_scope_from_values,
+                    get_approved_scopes,
+                    build_requested_data_for_save,
+                    validate_new_request_scope,
+                )
 
-            # IMPORTANT: do NOT return form.data because for multipart uploads it may contain
-            # UploadedFile objects (bytes) which are not JSON serializable.
-            serializer = AttendanceRequestSerializer(
-                instance=attendance,
-                context={"request": request},
-            )
-            return Response(serializer.data, status=status.HTTP_200_OK)
-        return Response(form.errors, status=400)
+                serialized = instance.serialize()
+                incoming_scope = infer_scope_from_values(
+                    serialized.get("attendance_clock_in"),
+                    serialized.get("attendance_clock_out"),
+                )
+                approved_scopes = get_approved_scopes(getattr(attendance, "requested_data", None))
+
+                validate_new_request_scope(
+                    existing_waiting_scope="",
+                    approved_scopes=approved_scopes,
+                    incoming_scope=incoming_scope,
+                )
+
+                wrapped = build_requested_data_for_save(
+                    new_payload=serialized,
+                    existing_requested_data=getattr(attendance, "requested_data", None),
+                    incoming_scope=incoming_scope,
+                    keep_existing_fields=True,
+                )
+                attendance.requested_data = wrapped
+            except ValidationError as ve:
+                return Response(ve.message_dict, status=400)
+            except Exception:
+                attendance.requested_data = instance.serialize()
+            attendance.request_description = instance.request_description
+            attendance.is_validate_request = True
+            attendance.save()
+        else:
+            instance.is_validate_request_approved = False
+            instance.is_validate_request = True
+            instance.save()
+            attendance = instance
+
+        if uploaded:
+            for up in uploaded:
+                arf = AttendanceRequestFile.objects.create(file=up)
+                attendance.request_attachments.add(arf)
+
+        serializer = AttendanceRequestSerializer(
+            instance=attendance,
+            context={"request": request},
+        )
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
 
 class AttendanceRequestApproveView(APIView):
