@@ -970,17 +970,16 @@ class Attendance(HorillaModel):
     )
     is_holiday = models.BooleanField(default=False)
     requested_data = models.JSONField(null=True, editable=False)
+    request_attachments = models.ManyToManyField(
+        "AttendanceRequestFile",
+        blank=True,
+        related_name="attendance_requests",
+    )
     request_restore_snapshot = models.JSONField(
         null=True,
         blank=True,
         editable=False,
         verbose_name=_("Request Restore Snapshot"),
-    )
-    request_attachments = models.ManyToManyField(
-        "attendance.AttendanceRequestFile",
-        blank=True,
-        related_name="attendance_requests",
-        verbose_name=_("Request Attachments"),
     )
     action_by = models.ForeignKey(
         Employee,
@@ -1148,9 +1147,8 @@ class Attendance(HorillaModel):
         """
         keys = []
         if self.requested_data is not None:
-            data = self.requested_data
-            if isinstance(data, str):
-                data = json.loads(data)
+            from attendance.services.attendance_correction_scope_rules import load_requested_data
+            data = load_requested_data(self.requested_data)
             diffs = get_diff_dict(self.serialize(), data)
             keys = diffs.keys()
         return keys
