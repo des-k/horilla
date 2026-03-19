@@ -28,7 +28,7 @@ class AttendanceSerializer(serializers.ModelSerializer):
     shift_name = serializers.CharField(source="shift_id.employee_shift", read_only=True)
     badge_id = serializers.CharField(source="employee_id.badge_id", read_only=True)
     employee_profile_url = serializers.SerializerMethodField(read_only=True)
-    # Attachments uploaded via AttendanceRequestComment.files
+    # Direct attachments uploaded on the attendance request
     attachment_urls = serializers.SerializerMethodField(read_only=True)
     # Alias for UI parity with Work Type Requests
     file_urls = serializers.SerializerMethodField(read_only=True)
@@ -108,7 +108,7 @@ class AttendanceRequestSerializer(serializers.ModelSerializer):
     badge_id = serializers.CharField(source="employee_id.badge_id", read_only=True)
     employee_profile_url = serializers.SerializerMethodField(read_only=True)
 
-    # Attachments uploaded via AttendanceRequestComment.files
+    # Direct attachments uploaded on the attendance request
     attachment_urls = serializers.SerializerMethodField(read_only=True)
     # Alias for UI parity with Work Type Requests
     file_urls = serializers.SerializerMethodField(read_only=True)
@@ -137,10 +137,8 @@ class AttendanceRequestSerializer(serializers.ModelSerializer):
         ]
 
     def create(self, validated_data):
-        # Extract relevant data from validated_data
         employee_id = validated_data.get("employee_id")
         attendance_date = validated_data.get("attendance_date")
-        # Check if attendance exists for the employee and date
         attendances = Attendance.objects.filter(
             employee_id=employee_id, attendance_date=attendance_date
         )
@@ -156,34 +154,21 @@ class AttendanceRequestSerializer(serializers.ModelSerializer):
             "attendance_worked_hour": validated_data.get("attendance_worked_hour"),
             "minimum_hour": validated_data.get("minimum_hour"),
         }
+        payload = Attendance(**data).serialize()
         if attendances.exists():
-            data["employee_id"] = employee_id.id
-            data["attendance_date"] = str(attendance_date)
-            data["attendance_clock_in_date"] = self.data["attendance_clock_in_date"]
-            data["attendance_clock_in"] = self.data["attendance_clock_in"]
-            data["attendance_clock_out"] = (
-                None if data["attendance_clock_out"] == "None" else data["attendance_clock_out"]
-            )
-            data["attendance_clock_out_date"] = (
-                None if data["attendance_clock_out_date"] == "None" else data["attendance_clock_out_date"]
-            )
-            data["work_type_id"] = self.data["work_type_id"]
-            data["shift_id"] = self.data["shift_id"]
             attendance = attendances.first()
-            for key, value in data.items():
-                data[key] = str(value)
-            attendance.requested_data = data
+            attendance.requested_data = payload
             attendance.is_validate_request = True
             if attendance.request_type != "create_request":
                 attendance.request_type = "update_request"
-            attendance.request_description = self.data["request_description"]
+            attendance.request_description = self.initial_data.get("request_description")
             attendance.save()
             return attendance
 
         new_instance = Attendance(**data)
         new_instance.is_validate_request = True
         new_instance.attendance_validated = False
-        new_instance.request_description = self.data["request_description"]
+        new_instance.request_description = self.initial_data.get("request_description")
         new_instance.request_type = "create_request"
         new_instance.save()
         return new_instance
@@ -300,7 +285,7 @@ class AttendanceOverTimeSerializer(serializers.ModelSerializer):
         source="employee_id.employee_last_name", read_only=True
     )
     employee_profile_url = serializers.SerializerMethodField(read_only=True)
-    # Attachments uploaded via AttendanceRequestComment.files
+    # Direct attachments uploaded on the attendance request
     attachment_urls = serializers.SerializerMethodField(read_only=True)
     # Alias for UI parity with Work Type Requests
     file_urls = serializers.SerializerMethodField(read_only=True)
@@ -322,23 +307,18 @@ class AttendanceOverTimeSerializer(serializers.ModelSerializer):
         ]
 
     def get_attachment_urls(self, obj):
-        """Return list of attachment URLs for an attendance correction request.
-        Files are stored via AttendanceRequestComment.files (ManyToMany -> AttendanceRequestFile).
-        """
         try:
-            from attendance.models import AttendanceRequestComment
+            from attendance.services.attendance_request_access import iter_request_attachments
             urls = []
             seen = set()
-            qs = AttendanceRequestComment.objects.filter(request_id=obj).prefetch_related('files')
-            for c in qs:
-                for f in c.files.all():
-                    try:
-                        u = getattr(getattr(f, 'file', None), 'url', None)
-                        if u and u not in seen:
-                            seen.add(u)
-                            urls.append(u)
-                    except Exception:
-                        continue
+            for f in iter_request_attachments(obj):
+                try:
+                    u = getattr(getattr(f, 'file', None), 'url', None)
+                    if u and u not in seen:
+                        seen.add(u)
+                        urls.append(u)
+                except Exception:
+                    continue
             return urls
         except Exception:
             return []
