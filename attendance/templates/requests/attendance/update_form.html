@@ -1,9 +1,10 @@
-<form hx-post="{% url 'edit-validate-attendance' form.instance.id %}" id="attendanceRequestForm"
+{% load i18n %}
+<form hx-post="{% url 'edit-validate-attendance' form.instance.id %}" id="attendanceRequestForm" enctype="multipart/form-data"
     data-url ="{% url 'edit-validate-attendance' form.instance.id %}"
     hx-target="{% if hx_target %}#{{hx_target}}{% else %}#updateAttendanceRequestModalBody{% endif %}">
     {% csrf_token %} {{form.as_p}}
+    <div class="mt-2">
+        <label class="form-label">{% trans "Attachments" %}</label>
+        <input type="file" name="files" multiple class="form-control">
+    </div>
 </form>
-{% comment %} <script>
-    alert($("[name=batch_attendance_id]").val())
-    $("[name=batch_attendance_id]").change()
-</script> {% endcomment %}
