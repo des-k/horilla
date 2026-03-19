@@ -2808,179 +2808,20 @@ def update_gracetime_clock_in_clock_out(request):
 
 
 @login_required
-def create_attendancerequest_comment(request, attendance_id):
-    """
-    This method renders form and template to create Attendance request comments
-    """
-    previous_data = request.GET.urlencode()
-    attendance = Attendance.objects.filter(id=attendance_id).first()
-    emp = request.user.employee_get
-    form = AttendanceRequestCommentForm(
-        initial={"employee_id": emp.id, "request_id": attendance_id}
-    )
-
-    if request.method == "POST":
-        form = AttendanceRequestCommentForm(request.POST)
-        if form.is_valid():
-            form.instance.employee_id = emp
-            form.instance.request_id = attendance
-            form.save()
-            comments = AttendanceRequestComment.objects.filter(
-                request_id=attendance_id
-            ).order_by("-created_at")
-            no_comments = False
-            if not comments.exists():
-                no_comments = True
-            form = AttendanceRequestCommentForm(
-                initial={"employee_id": emp.id, "request_id": attendance_id}
-            )
-            messages.success(request, _("Comment added successfully!"))
-            work_info = EmployeeWorkInformation.objects.filter(
-                employee_id=attendance.employee_id
-            )
-            if work_info.exists():
-                if (
-                    attendance.employee_id.employee_work_info.reporting_manager_id
-                    is not None
-                ):
-                    if request.user.employee_get.id == attendance.employee_id.id:
-                        rec = (
-                            attendance.employee_id.employee_work_info.reporting_manager_id.employee_user_id
-                        )
-                        notify.send(
-                            request.user.employee_get,
-                            recipient=rec,
-                            verb=f"{attendance.employee_id}'s attendance request has received a comment.",
-                            verb_ar=f"تلقت طلب الحضور {attendance.employee_id} تعليقًا.",
-                            verb_de=f"{attendance.employee_id}s Anfrage zur Anwesenheit hat einen Kommentar erhalten.",
-                            verb_es=f"La solicitud de asistencia de {attendance.employee_id} ha recibido un comentario.",
-                            verb_fr=f"La demande de présence de {attendance.employee_id} a reçu un commentaire.",
-                            redirect=reverse("request-attendance-view")
-                            + f"?id={attendance.id}",
-                            icon="chatbox-ellipses",
-                        )
-                    elif (
-                        request.user.employee_get.id
-                        == attendance.employee_id.employee_work_info.reporting_manager_id.id
-                    ):
-                        rec = attendance.employee_id.employee_user_id
-                        notify.send(
-                            request.user.employee_get,
-                            recipient=rec,
-                            verb="Your attendance request has received a comment.",
-                            verb_ar="تلقى طلب الحضور الخاص بك تعليقًا.",
-                            verb_de="Ihr Antrag auf Anwesenheit hat einen Kommentar erhalten.",
-                            verb_es="Tu solicitud de asistencia ha recibido un comentario.",
-                            verb_fr="Votre demande de présence a reçu un commentaire.",
-                            redirect=reverse("request-attendance-view")
-                            + f"?id={attendance.id}",
-                            icon="chatbox-ellipses",
-                        )
-                    else:
-                        rec = [
-                            attendance.employee_id.employee_user_id,
-                            attendance.employee_id.employee_work_info.reporting_manager_id.employee_user_id,
-                        ]
-                        notify.send(
-                            request.user.employee_get,
-                            recipient=rec,
-                            verb=f"{attendance.employee_id}'s attendance request has received a comment.",
-                            verb_ar=f"تلقت طلب الحضور {attendance.employee_id} تعليقًا.",
-                            verb_de=f"{attendance.employee_id}s Anfrage zur Anwesenheit hat einen Kommentar erhalten.",
-                            verb_es=f"La solicitud de asistencia de {attendance.employee_id} ha recibido un comentario.",
-                            verb_fr=f"La demande de présence de {attendance.employee_id} a reçu un commentaire.",
-                            redirect=reverse("request-attendance-view")
-                            + f"?id={attendance.id}",
-                            icon="chatbox-ellipses",
-                        )
-                else:
-                    rec = attendance.employee_id.employee_user_id
-                    notify.send(
-                        request.user.employee_get,
-                        recipient=rec,
-                        verb="Your attendance request has received a comment.",
-                        verb_ar="تلقى طلب الحضور الخاص بك تعليقًا.",
-                        verb_de="Ihr Antrag auf Anwesenheit hat einen Kommentar erhalten.",
-                        verb_es="Tu solicitud de asistencia ha recibido un comentario.",
-                        verb_fr="Votre demande de présence a reçu un commentaire.",
-                        redirect=reverse("request-attendance-view")
-                        + f"?id={attendance.id}",
-                        icon="chatbox-ellipses",
-                    )
-            return render(
-                request,
-                "requests/attendance/attendance_comment.html",
-                {
-                    "comments": comments,
-                    "no_comments": no_comments,
-                    "request_id": attendance_id,
-                },
-            )
-    return render(
-        request,
-        "requests/attendance/attendance_comment.html",
-        {
-            "form": form,
-            "request_id": attendance_id,
-            "pd": previous_data,
-        },
-    )
-
+def create_attendancerequest_comment(request, *args, **kwargs):
+    return HttpResponseForbidden("Attendance request comments are disabled.")
 
 @login_required
-def view_attendancerequest_comment(request, attendance_id):
-    """
-    This method is used to show Attendance request comments
-    """
-    comments = AttendanceRequestComment.objects.filter(
-        request_id=attendance_id
-    ).order_by("-created_at")
-    no_comments = False
-    if not comments.exists():
-        no_comments = True
-
-    if request.FILES:
-        files = request.FILES.getlist("files")
-        comment_id = request.GET["comment_id"]
-        comment = AttendanceRequestComment.objects.get(id=comment_id)
-        attachments = []
-        for file in files:
-            file_instance = AttendanceRequestFile()
-            file_instance.file = file
-            file_instance.save()
-            attachments.append(file_instance)
-        comment.files.add(*attachments)
-
-    return render(
-        request,
-        "requests/attendance/attendance_comment.html",
-        {"comments": comments, "no_comments": no_comments, "request_id": attendance_id},
-    )
-
+def view_attendancerequest_comment(request, *args, **kwargs):
+    return HttpResponseForbidden("Attendance request comments are disabled.")
 
 @login_required
-def delete_attendancerequest_comment(request, comment_id):
-    """
-    This method is used to delete Attendance request comments
-    """
-    script = ""
-    comment = AttendanceRequestComment.objects.get(id=comment_id)
-    comment.delete()
-    messages.success(request, _("Comment deleted successfully!"))
-    return HttpResponse(script)
-
+def delete_attendancerequest_comment(request, *args, **kwargs):
+    return HttpResponseForbidden("Attendance request comments are disabled.")
 
 @login_required
 def delete_comment_file(request):
-    """
-    Used to delete attachment
-    """
-    script = ""
-    ids = request.GET.getlist("ids")
-    AttendanceRequestFile.objects.filter(id__in=ids).delete()
-    messages.success(request, _("File deleted successfully"))
-    return HttpResponse(script)
-
+    return HttpResponseForbidden("Attendance request comments are disabled.")
 
 @login_required
 def work_records(request):
