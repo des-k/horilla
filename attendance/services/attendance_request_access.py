@@ -17,6 +17,11 @@ def user_can_manage_request(user, attendance: Attendance) -> bool:
     if user_is_request_owner(user, attendance):
         return True
     try:
+        if getattr(user, "is_superuser", False):
+            return True
+    except Exception:
+        pass
+    try:
         employee_id = int(getattr(attendance, "employee_id_id", None) or attendance.employee_id.id)
     except Exception:
         return False
@@ -24,18 +29,18 @@ def user_can_manage_request(user, attendance: Attendance) -> bool:
         subordinate_ids = {int(v) for v in (get_subordinate_employee_ids(type("R", (), {"user": user})()) or [])}
     except Exception:
         subordinate_ids = set()
-    if employee_id in subordinate_ids:
-        return True
-    try:
-        return user.has_perm("attendance.change_attendance") or user.has_perm("attendance.view_attendance")
-    except Exception:
-        return False
+    return employee_id in subordinate_ids
 
 
 def user_can_approve_request(user, attendance: Attendance) -> bool:
     if user_is_request_owner(user, attendance):
         return False
     try:
+        if getattr(user, "is_superuser", False):
+            return True
+    except Exception:
+        pass
+    try:
         employee_id = int(getattr(attendance, "employee_id_id", None) or attendance.employee_id.id)
     except Exception:
         return False
@@ -43,12 +48,7 @@ def user_can_approve_request(user, attendance: Attendance) -> bool:
         subordinate_ids = {int(v) for v in (get_subordinate_employee_ids(type("R", (), {"user": user})()) or [])}
     except Exception:
         subordinate_ids = set()
-    if employee_id in subordinate_ids:
-        return True
-    try:
-        return user.has_perm("attendance.change_attendance")
-    except Exception:
-        return False
+    return employee_id in subordinate_ids
 
 
 def user_can_view_request(user, attendance: Attendance) -> bool:
