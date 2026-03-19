@@ -70,24 +70,17 @@ class AttendanceSerializer(serializers.ModelSerializer):
         return data
 
     def get_attachment_urls(self, obj):
-        """Return list of attachment URLs for an attendance correction request.
-        Files are stored via AttendanceRequestComment.files (ManyToMany -> AttendanceRequestFile).
-        """
         try:
-            from attendance.models import AttendanceRequestComment
+            from attendance.services.attendance_request_access import iter_request_attachments
             request = self.context.get("request") if hasattr(self, "context") else None
             urls = []
-            seen = set()
-            qs = AttendanceRequestComment.objects.filter(request_id=obj).prefetch_related('files')
-            for c in qs:
-                for f in c.files.all():
-                    try:
-                        u = build_attendance_attachment_url(request, obj, f) if request is not None else None
-                        if u and u not in seen:
-                            seen.add(u)
-                            urls.append(u)
-                    except Exception:
-                        continue
+            for f in iter_request_attachments(obj):
+                try:
+                    u = build_attendance_attachment_url(request, obj, f) if request is not None else getattr(getattr(f, "file", None), "url", None)
+                    if u:
+                        urls.append(u)
+                except Exception:
+                    continue
             return urls
         except Exception:
             return []
@@ -179,7 +172,7 @@ class AttendanceRequestSerializer(serializers.ModelSerializer):
             attendance = attendances.first()
             for key, value in data.items():
                 data[key] = str(value)
-            attendance.requested_data = json.dumps(data)
+            attendance.requested_data = data
             attendance.is_validate_request = True
             if attendance.request_type != "create_request":
                 attendance.request_type = "update_request"
@@ -201,25 +194,17 @@ class AttendanceRequestSerializer(serializers.ModelSerializer):
         return super().update(instance, validated_data)
 
     def get_attachment_urls(self, obj):
-        """Return list of attachment URLs for an attendance correction request.
-        Files are stored via AttendanceRequestComment.files (ManyToMany -> AttendanceRequestFile).
-        """
         try:
-            from attendance.models import AttendanceRequestComment
+            from attendance.services.attendance_request_access import iter_request_attachments
             request = self.context.get("request") if hasattr(self, "context") else None
-
             urls = []
-            seen = set()
-            qs = AttendanceRequestComment.objects.filter(request_id=obj).prefetch_related("files")
-            for c in qs:
-                for f in c.files.all():
-                    try:
-                        u = build_attendance_attachment_url(request, obj, f) if request is not None else None
-                        if u and u not in seen:
-                            seen.add(u)
-                            urls.append(u)
-                    except Exception:
-                        continue
+            for f in iter_request_attachments(obj):
+                try:
+                    u = build_attendance_attachment_url(request, obj, f) if request is not None else getattr(getattr(f, "file", None), "url", None)
+                    if u:
+                        urls.append(u)
+                except Exception:
+                    continue
             return urls
         except Exception:
             return []
