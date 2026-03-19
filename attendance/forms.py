@@ -1131,7 +1131,7 @@ class NewRequestForm(AttendanceRequestForm):
                 incoming_scope=incoming_scope,
                 keep_existing_fields=keep_existing_fields,
             )
-            attendance.requested_data = json.dumps(meta_wrapped)
+            attendance.requested_data = meta_wrapped
             attendance.is_validate_request = True
             if attendance.request_type != "create_request":
                 attendance.request_type = "update_request"
@@ -1164,7 +1164,7 @@ class NewRequestForm(AttendanceRequestForm):
         new_instance.attendance_validated = False
         new_instance.request_description = self.data.get("request_description")
         new_instance.request_type = "create_request"
-        new_instance.requested_data = json.dumps(meta_wrapped)
+        new_instance.requested_data = meta_wrapped
         self.new_instance = new_instance
         return self.cleaned_data
 
