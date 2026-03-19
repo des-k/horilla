@@ -494,6 +494,44 @@ class AttendanceRequestApiFlowTests(SimpleTestCase):
         self.assertEqual(attendance.request_type, "revoke_request")
         self.assertFalse(attendance.is_validate_request_approved)
 
+    def test_api_revoke_rejects_owner_even_when_permission_layer_is_green(self):
+        attendance = self._attendance(is_validate_request=False, is_validate_request_approved=True)
+        request = self.factory.put(
+            "/api/attendance/attendance-request-revoke/77",
+            {},
+            format="json",
+        )
+        force_authenticate(request, user=self.owner_user)
+
+        with patch("horilla_api.api_views.attendance.views.Attendance.objects.select_for_update") as mocked_select, patch(
+            "horilla_api.api_decorators.base.decorators.ManagerPermission.has_permission",
+            return_value=True,
+        ), patch(
+            "horilla_api.api_views.attendance.views._can_act_on_employee",
+            return_value=True,
+        ):
+            mocked_select.return_value.get.return_value = attendance
+            response = AttendanceRequestRevokeView.as_view()(request, pk=attendance.id)
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("cannot revoke your own approved request", str(response.data).lower())
+
+    def test_api_cancel_is_owner_only_even_for_manager_actor(self):
+        attendance = self._attendance()
+        request = self.factory.put(
+            "/api/attendance/attendance-request-cancel/77",
+            {},
+            format="json",
+        )
+        force_authenticate(request, user=self.manager_user)
+
+        with patch("horilla_api.api_views.attendance.views.Attendance.objects.select_for_update") as mocked_select:
+            mocked_select.return_value.get.return_value = attendance
+            response = AttendanceRequestCancelView.as_view()(request, pk=attendance.id)
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("only the requester can cancel", str(response.data).lower())
+
     def test_api_attachment_delete_is_owner_only_and_invokes_hard_delete(self):
         attendance = self._attendance()
         file_obj = SimpleNamespace(id=5)
