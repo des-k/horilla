@@ -8,8 +8,8 @@ from django.urls import reverse
 
 import logging
 
-from attendance.models import Attendance, AttendanceRequestComment
-from base.methods import get_subordinate_employee_ids
+from attendance.models import Attendance
+from attendance.services.attendance_request_access import iter_request_attachments, user_can_view_request
 
 logger = logging.getLogger(__name__)
 
@@ -33,10 +33,7 @@ def _attachment_name(file_obj) -> str:
 
 def attachment_belongs_to_request(attendance: Attendance, file_obj) -> bool:
     try:
-        return AttendanceRequestComment.objects.filter(
-            request_id=attendance,
-            files=file_obj,
-        ).exists()
+        return any(getattr(f, "id", None) == getattr(file_obj, "id", None) for f in iter_request_attachments(attendance))
     except Exception:
         return False
 
@@ -74,21 +71,7 @@ def request_can_view_attachment(request, attendance: Attendance) -> bool:
     if not request or not attendance:
         return False
     try:
-        if attendance.employee_id.employee_user_id == request.user:
-            return True
-    except Exception:
-        logger.exception("Failed to resolve attendance attachment owner for attendance %s", getattr(attendance, "id", None))
-        return False
-    try:
-        if request.user.has_perm("attendance.change_attendance") or request.user.has_perm("attendance.view_attendance"):
-            return True
+        return user_can_view_request(request.user, attendance)
     except Exception:
         logger.exception("Failed to resolve attendance attachment permissions for attendance %s", getattr(attendance, "id", None))
-        return False
-    try:
-        employee_id = int(getattr(attendance, "employee_id_id", 0) or 0)
-        subordinate_ids = {int(v) for v in (get_subordinate_employee_ids(request) or [])}
-        return employee_id in subordinate_ids
-    except Exception:
-        logger.exception("Failed to resolve subordinate scope for attendance attachment %s", getattr(attendance, "id", None))
         return False
