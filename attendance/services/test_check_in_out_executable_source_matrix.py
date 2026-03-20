@@ -12,6 +12,7 @@ from attendance.services import reconciliation
 from attendance.services.final_session_resolution import (
     APPROVED_REQUEST_CHANNEL,
     resolve_final_session,
+    should_accept_raw_session,
 )
 from attendance.services.punching_history import (
     humanize_biometric_error,
@@ -208,3 +209,83 @@ class CheckInOutExecutableSourceMatrixTests(SimpleTestCase):
         self.assertFalse(superseded_out.accepted_to_attendance)
         self.assertEqual(superseded_out.decision_status, "superseded")
         self.assertEqual(latest_out.decision_status, "accepted")
+
+
+class ExecutableSourceDuplicateMatrixTests(SimpleTestCase):
+    def _ctx(self):
+        return CheckInOutExecutableSourceMatrixTests()._ctx()
+
+    def test_duplicate_mobile_checkin_same_window_keeps_single_final_in(self):
+        logs = [
+            FakePunchLog(201, AttendancePunchDirection.IN, timezone.make_aware(datetime(2026, 3, 19, 8, 6)), source="mobile"),
+            FakePunchLog(202, AttendancePunchDirection.IN, timezone.make_aware(datetime(2026, 3, 19, 8, 2)), source="mobile"),
+            FakePunchLog(203, AttendancePunchDirection.OUT, timezone.make_aware(datetime(2026, 3, 19, 17, 1)), source="mobile"),
+        ]
+
+        raw = reconciliation._pick_raw_sessions(logs, self._ctx())
+
+        self.assertEqual(raw["final_in"].id, 202)
+        self.assertEqual([log.id for log in raw["extra_in"]], [201])
+        self.assertEqual(raw["final_out"].id, 203)
+
+    def test_duplicate_mobile_checkout_same_window_keeps_single_final_out(self):
+        logs = [
+            FakePunchLog(211, AttendancePunchDirection.IN, timezone.make_aware(datetime(2026, 3, 19, 8, 1)), source="mobile"),
+            FakePunchLog(212, AttendancePunchDirection.OUT, timezone.make_aware(datetime(2026, 3, 19, 16, 40)), source="mobile"),
+            FakePunchLog(213, AttendancePunchDirection.OUT, timezone.make_aware(datetime(2026, 3, 19, 17, 6)), source="mobile"),
+        ]
+
+        raw = reconciliation._pick_raw_sessions(logs, self._ctx())
+
+        self.assertEqual(raw["final_out"].id, 213)
+        self.assertEqual([log.id for log in raw["extra_out"]], [212])
+
+    def test_request_channel_blocks_raw_retry_from_becoming_authoritative(self):
+        existing_dt = datetime(2026, 3, 19, 8, 15)
+        incoming_retry = datetime(2026, 3, 19, 8, 1)
+
+        accepted = should_accept_raw_session(
+            session="IN",
+            existing_dt=existing_dt,
+            incoming_dt=incoming_retry,
+            existing_channel=APPROVED_REQUEST_CHANNEL,
+        )
+
+        self.assertFalse(accepted)
+
+    def test_timeout_retry_decision_marks_second_attempt_as_duplicate_not_second_final(self):
+        attendance = SimpleNamespace(attendance_date=date(2026, 3, 19))
+        first = FakePunchLog(221, AttendancePunchDirection.IN, timezone.make_aware(datetime(2026, 3, 19, 8, 1)), source="mobile")
+        retry = FakePunchLog(222, AttendancePunchDirection.IN, timezone.make_aware(datetime(2026, 3, 19, 8, 4)), source="mobile")
+        out_log = FakePunchLog(223, AttendancePunchDirection.OUT, timezone.make_aware(datetime(2026, 3, 19, 17, 1)), source="mobile")
+
+        reconciliation._apply_punch_decisions(
+            attendance,
+            [first, retry, out_log],
+            {
+                221: (True, reconciliation.NOTE_FINAL_IN),
+                222: (False, reconciliation.NOTE_DUPLICATE_CHECKIN),
+                223: (True, reconciliation.NOTE_FINAL_OUT),
+            },
+            reconciliation.SOURCE_NORMAL,
+        )
+
+        self.assertTrue(first.accepted_to_attendance)
+        self.assertEqual(first.decision_status, "accepted")
+        self.assertFalse(retry.accepted_to_attendance)
+        self.assertEqual(retry.decision_status, "not_accepted")
+        self.assertEqual(retry.reason, reconciliation.NOTE_DUPLICATE_CHECKIN)
+
+    def test_mixed_source_raw_resolution_keeps_single_authoritative_out(self):
+        resolved = resolve_final_session(
+            session="OUT",
+            approved_dt=None,
+            raw_datetimes=[
+                datetime(2026, 3, 19, 16, 55),
+                datetime(2026, 3, 19, 17, 4),
+            ],
+            raw_source="mixed",
+        )
+
+        self.assertEqual(resolved.final_dt, datetime(2026, 3, 19, 17, 4))
+        self.assertEqual(resolved.final_source, "mixed")
