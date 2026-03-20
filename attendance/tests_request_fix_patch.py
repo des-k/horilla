@@ -11,6 +11,7 @@ from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import connection
 from django.db import models as django_models
+from django.http import Http404
 from django.test import RequestFactory, SimpleTestCase, TestCase, override_settings
 from django.urls import reverse
 from rest_framework.test import APIRequestFactory, force_authenticate
@@ -52,7 +53,7 @@ from horilla_api.api_views.attendance.views import (
     AttendanceRequestView,
 )
 from horilla_api.api_serializers.attendance.serializers import AttendanceRequestSerializer, WorkModeRequestSerializer
-from horilla_api.api_views.attendance.views import AttendanceRequestAttachmentDownloadView, WorkModeRequestDocumentActionView
+from horilla_api.api_views.attendance.views import AttendanceRequestAttachmentDownloadView, WorkModeRequestApproveView, WorkModeRequestCancelView, WorkModeRequestDocumentActionView, WorkModeRequestView
 
 
 class WorkModeActionTypeTests(SimpleTestCase):
@@ -366,7 +367,7 @@ class ApiUrlTests(SimpleTestCase):
 
 
 class AttendanceRequestApiFlowTests(SimpleTestCase):
-    databases = "__all__"
+    databases = {"default"}
 
     def setUp(self):
         self.factory = APIRequestFactory()
@@ -568,7 +569,7 @@ class AttendanceRequestApiFlowTests(SimpleTestCase):
 
 
 class AttendanceRequestDirectAttachmentApiViewTests(SimpleTestCase):
-    databases = "__all__"
+    databases = {"default"}
 
     def setUp(self):
         self.factory = APIRequestFactory()
@@ -679,3 +680,152 @@ class AttendanceRequestDirectAttachmentApiViewTests(SimpleTestCase):
         self.assertEqual(response.status_code, 200)
         create_file.assert_called_once()
         attendance.request_attachments.add.assert_called_once_with(arf)
+
+
+
+class WorkModeRequestPermissionApiRegressionTests(SimpleTestCase):
+    databases = {"default"}
+    def setUp(self):
+        self.factory = APIRequestFactory()
+        self.owner_user = SimpleNamespace(is_authenticated=True, employee_get=SimpleNamespace(id=10), has_perm=lambda perm: False, is_superuser=False)
+        self.manager_user = SimpleNamespace(is_authenticated=True, employee_get=SimpleNamespace(id=20), has_perm=lambda perm: False, is_superuser=False)
+
+    def _work_request(self, **overrides):
+        employee = SimpleNamespace(id=10, employee_user_id=self.owner_user)
+        current_version = SimpleNamespace(status=WorkModeRequestDocumentStatus.SUBMITTED)
+        defaults = {
+            "id": 55,
+            "pk": 55,
+            "employee_id": employee,
+            "employee_id_id": employee.id,
+            "status": WorkModeRequestStatus.WAITING_FOR_APPROVAL,
+            "mode": AttendanceWorkMode.ON_DUTY,
+            "reason": "Need field visit",
+            "document_status": WorkModeRequestDocumentStatus.SUBMITTED,
+            "current_document_version": current_version,
+            "resolve_current_document_version": lambda: current_version,
+            "effective_document_status": lambda: WorkModeRequestDocumentStatus.SUBMITTED,
+            "sync_legacy_files_from_current_version": lambda: None,
+            "sync_root_document_fields_from_current_version": lambda: None,
+            "save": MagicMock(),
+            "start_date": date(2026, 3, 14),
+            "end_date": date(2026, 3, 14),
+        }
+        defaults.update(overrides)
+        return SimpleNamespace(**defaults)
+
+    def test_manager_cannot_cancel_employee_work_type_request(self):
+        req = self._work_request(status=WorkModeRequestStatus.PENDING)
+        request = self.factory.put('/api/attendance/work-mode-request-cancel/55', {}, format='json')
+        force_authenticate(request, user=self.manager_user)
+
+        with patch('horilla_api.api_views.attendance.views.get_object_or_404', return_value=req), \
+             patch('horilla_api.api_views.attendance.views._request_actor_employee', return_value=self.manager_user.employee_get):
+            response = WorkModeRequestCancelView.as_view()(request, pk=req.id)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('permission to cancel this request', str(response.data).lower())
+
+    def test_owner_cannot_revoke_own_approved_work_type_request(self):
+        req = self._work_request(status=WorkModeRequestStatus.APPROVED)
+        request = self.factory.put('/api/attendance/work-mode-request-revoke/55', {'remark': 'undo'}, format='json')
+        force_authenticate(request, user=self.owner_user)
+
+        with patch('horilla_api.api_views.attendance.views.get_object_or_404', return_value=req), \
+             patch('horilla_api.api_views.attendance.views._request_actor_employee', return_value=self.owner_user.employee_get):
+            response = WorkModeRequestDocumentActionView.as_view()(request, pk=req.id, action='revoke')
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('permission to revoke this request', str(response.data).lower())
+
+    def test_unrelated_manager_cannot_approve_work_type_request(self):
+        req = self._work_request(status=WorkModeRequestStatus.WAITING_FOR_APPROVAL)
+        request = self.factory.put('/api/attendance/work-mode-request-approve/55', {}, format='json')
+        force_authenticate(request, user=self.manager_user)
+
+        with patch('horilla_api.api_views.attendance.views.get_object_or_404', return_value=req), \
+             patch('horilla_api.api_views.attendance.views._request_actor_employee', return_value=self.manager_user.employee_get), \
+             patch('attendance.services.work_type_request_permissions.get_subordinate_employee_ids', return_value=[]):
+            response = WorkModeRequestApproveView.as_view()(request, pk=req.id)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('permission to approve this request', str(response.data).lower())
+
+    def test_self_approval_is_rejected_for_work_type_request(self):
+        req = self._work_request(status=WorkModeRequestStatus.WAITING_FOR_APPROVAL)
+        request = self.factory.put('/api/attendance/work-mode-request-approve/55', {}, format='json')
+        force_authenticate(request, user=self.owner_user)
+
+        with patch('horilla_api.api_views.attendance.views.get_object_or_404', return_value=req), \
+             patch('horilla_api.api_views.attendance.views._request_actor_employee', return_value=self.owner_user.employee_get):
+            response = WorkModeRequestApproveView.as_view()(request, pk=req.id)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('permission to approve this request', str(response.data).lower())
+
+    def test_owner_cannot_update_approved_work_type_request(self):
+        req = self._work_request(status=WorkModeRequestStatus.APPROVED, mode=AttendanceWorkMode.WFA)
+        request = self.factory.put('/api/attendance/work-mode-request/55', {'reason': 'edited note'}, format='json')
+        force_authenticate(request, user=self.owner_user)
+
+        with patch('horilla_api.api_views.attendance.views.get_object_or_404', return_value=req), \
+             patch.object(WorkModeRequestView, '_collect_uploaded_files', return_value=[]), \
+             patch('horilla_api.api_views.attendance.views._request_actor_employee', return_value=self.owner_user.employee_get):
+            response = WorkModeRequestView.as_view()(request, pk=req.id)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('can no longer be updated', str(response.data).lower())
+
+
+class WorkModeAttachmentSecurityRegressionTests(SimpleTestCase):
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.owner_user = SimpleNamespace(is_authenticated=True, is_active=True, is_superuser=False, employee_get=SimpleNamespace(is_active=True))
+
+    def _req_and_file(self):
+        req = SimpleNamespace(id=91)
+        file_obj = SimpleNamespace(id=7, file=SimpleNamespace(open=MagicMock(return_value=BytesIO(b'data')), name='media/private/proof.pdf'))
+        return req, file_obj
+
+    def test_attachment_download_rejects_when_authorization_fails_even_with_valid_token(self):
+        req, file_obj = self._req_and_file()
+        request = self.factory.get('/attendance/work-mode/91/attachment/7?token=valid')
+        request.user = self.owner_user
+        request.session = {}
+
+        with patch('attendance.views.work_type_requests.get_object_or_404', side_effect=lambda model, **kwargs: req if getattr(model, '__name__', '') == 'WorkModeRequest' else file_obj), \
+             patch('attendance.views.work_type_requests.attachment_belongs_to_request', return_value=True), \
+             patch('attendance.views.work_type_requests.request_can_view_attachment', return_value=False), \
+             patch('attendance.views.work_type_requests.verify_attachment_token', return_value=True):
+            response = work_type_request_attachment_download(request, req.id, file_obj.id)
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn('Not allowed', response.content.decode())
+
+    def test_old_attachment_token_cannot_access_replaced_current_version(self):
+        req, file_obj = self._req_and_file()
+        request = self.factory.get('/attendance/work-mode/91/attachment/7?token=stale')
+        request.user = self.owner_user
+        request.session = {}
+
+        with patch('attendance.views.work_type_requests.get_object_or_404', side_effect=lambda model, **kwargs: req if getattr(model, '__name__', '') == 'WorkModeRequest' else file_obj), \
+             patch('attendance.views.work_type_requests.attachment_belongs_to_request', return_value=True), \
+             patch('attendance.views.work_type_requests.request_can_view_attachment', return_value=True), \
+             patch('attendance.views.work_type_requests.verify_attachment_token', return_value=False):
+            response = work_type_request_attachment_download(request, req.id, file_obj.id)
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn('Invalid or expired attachment token', response.content.decode())
+
+    def test_non_current_document_version_cannot_be_used_as_current_download_target(self):
+        req, file_obj = self._req_and_file()
+        request = self.factory.get('/attendance/work-mode/91/attachment/7?token=valid')
+        request.user = self.owner_user
+        request.session = {}
+
+        with patch('attendance.views.work_type_requests.get_object_or_404', side_effect=lambda model, **kwargs: req if getattr(model, '__name__', '') == 'WorkModeRequest' else file_obj), \
+             patch('attendance.views.work_type_requests.attachment_belongs_to_request', return_value=False), \
+             patch('attendance.views.work_type_requests.request_can_view_attachment', return_value=True), \
+             patch('attendance.views.work_type_requests.verify_attachment_token', return_value=True):
+            with self.assertRaises(Http404):
+                work_type_request_attachment_download(request, req.id, file_obj.id)
