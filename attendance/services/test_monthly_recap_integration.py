@@ -127,6 +127,45 @@ class MonthlyRecapIntegrationTests(SimpleTestCase):
                 return row
         self.fail(f"No row found for {target_date}")
 
+    def _get_recap(self, *, attendances=None, activities=None, requests=None, leaves=None, day_obj=None):
+        day_obj = day_obj or SimpleNamespace(day=self.target_date.strftime("%A").lower())
+        with patch.object(monthly_recap.Attendance, "objects", FakeManager(attendances or [])), \
+             patch.object(monthly_recap.AttendanceActivity, "objects", FakeManager(activities or [])), \
+             patch.object(monthly_recap.WorkModeRequest, "objects", FakeManager(requests or [])), \
+             patch.object(monthly_recap.LeaveRequest, "objects", FakeManager(leaves or [])), \
+             patch.object(monthly_recap.EmployeeShiftDay, "objects", FakeManager([day_obj])):
+            recap = monthly_recap.get_monthly_attendance_recap(self.employee, "2026-03")
+        return recap, self._find_row(recap["rows"], self.target_date)
+
+    def _raw_activity(
+        self,
+        *,
+        id,
+        in_time=None,
+        out_time=None,
+        in_mode=monthly_recap.AttendanceWorkMode.WFO,
+        out_mode=monthly_recap.AttendanceWorkMode.WFO,
+        work_mode_request_id=None,
+    ):
+        return SimpleNamespace(
+            id=id,
+            employee_id=self.employee,
+            attendance_date=self.target_date,
+            clock_in_date=self.target_date if in_time else None,
+            clock_in=in_time,
+            in_datetime=datetime.combine(self.target_date, in_time) if in_time else None,
+            clock_out_date=self.target_date if out_time else None,
+            clock_out=out_time,
+            out_datetime=datetime.combine(self.target_date, out_time) if out_time else None,
+            clock_in_channel="mobile" if in_time else None,
+            clock_out_channel="mobile" if out_time else None,
+            clock_in_mode=in_mode if in_time else None,
+            clock_out_mode=out_mode if out_time else None,
+            work_mode_request_id=work_mode_request_id,
+            in_related_work_type_request_id=getattr(work_mode_request_id, "id", None) if work_mode_request_id else None,
+            out_related_work_type_request_id=getattr(work_mode_request_id, "id", None) if work_mode_request_id else None,
+        )
+
     def test_full_day_leave_uses_persisted_canonical_attendance_result(self):
         attendance = SimpleNamespace(
             id=11,
@@ -241,3 +280,254 @@ class MonthlyRecapIntegrationTests(SimpleTestCase):
         row = self._find_row(rows, self.target_date)
         self.assertEqual(row.check_in, "-")
         self.assertNotEqual(row.note, "-")
+
+
+    def test_monthly_recap_ignores_waiting_request_and_prefers_raw_punch(self):
+        pending_request_row = SimpleNamespace(
+            id=30,
+            employee_id=self.employee,
+            attendance_date=self.target_date,
+            attendance_clock_in_date=self.target_date,
+            attendance_clock_in=time(8, 5),
+            attendance_clock_out_date=self.target_date,
+            attendance_clock_out=time(17, 5),
+            attendance_clock_in_mode=monthly_recap.AttendanceWorkMode.WFO,
+            attendance_clock_out_mode=monthly_recap.AttendanceWorkMode.WFO,
+            reconciliation_note="",
+            reconciliation_source="",
+            late_minutes=0,
+            early_out_minutes=0,
+            attendance_validated=False,
+            is_validate_request_approved=False,
+            is_validate_request=True,
+            request_type="create_request",
+            shift_id="SHIFT-A",
+            requested_data={
+                "attendance_clock_in_date": "2026-03-03",
+                "attendance_clock_in": "08:05",
+                "attendance_clock_out_date": "2026-03-03",
+                "attendance_clock_out": "17:05",
+                "__meta": {"current_scope": "FULL"},
+            },
+        )
+        raw_activity = self._raw_activity(id=31, in_time=time(8, 1), out_time=time(17, 2))
+
+        recap, row = self._get_recap(attendances=[pending_request_row], activities=[raw_activity])
+
+        self.assertEqual(row.check_in, "08:01")
+        self.assertEqual(row.check_out, "17:02")
+        self.assertIn("Attendance IN pending: 08:05", row.note)
+        self.assertIn("Attendance OUT pending: 17:05", row.note)
+        self.assertEqual(recap["summary"]["late_minutes"], 1)
+        self.assertEqual(recap["summary"]["early_out_minutes"], 0)
+
+    def test_monthly_recap_uses_approved_request_when_it_is_final_truth(self):
+        approved_attendance = SimpleNamespace(
+            id=40,
+            employee_id=self.employee,
+            attendance_date=self.target_date,
+            attendance_clock_in_date=self.target_date,
+            attendance_clock_in=time(8, 20),
+            attendance_clock_in_channel=monthly_recap.APPROVED_REQUEST_CHANNEL,
+            attendance_clock_in_mode=monthly_recap.AttendanceWorkMode.WFA,
+            attendance_clock_out_date=self.target_date,
+            attendance_clock_out=time(16, 40),
+            attendance_clock_out_channel=monthly_recap.APPROVED_REQUEST_CHANNEL,
+            attendance_clock_out_mode=monthly_recap.AttendanceWorkMode.WFA,
+            reconciliation_note="",
+            reconciliation_source="",
+            late_minutes=0,
+            early_out_minutes=0,
+            attendance_validated=True,
+            is_validate_request_approved=True,
+            is_validate_request=False,
+            request_type="update_request",
+            shift_id="SHIFT-A",
+            requested_data={
+                "attendance_clock_in": "08:20",
+                "attendance_clock_out": "16:40",
+                "__meta": {"approved_scopes": ["FULL"], "current_scope": "FULL"},
+            },
+        )
+        raw_activity = self._raw_activity(id=41, in_time=time(8, 0), out_time=time(17, 0))
+
+        recap, row = self._get_recap(attendances=[approved_attendance], activities=[raw_activity])
+
+        self.assertEqual(row.check_in, "08:20")
+        self.assertEqual(row.check_out, "16:40")
+        self.assertEqual(row.work_type, "WFA")
+        self.assertEqual(recap["summary"]["late_minutes"], 20)
+        self.assertEqual(recap["summary"]["early_out_minutes"], 20)
+        self.assertEqual(recap["summary"]["total_minutes"], 40)
+
+    def test_monthly_recap_ignores_non_approved_work_type_request_and_terminal_request_effects(self):
+        raw_activity = self._raw_activity(id=50, in_time=time(8, 0), out_time=time(17, 0), in_mode=None, out_mode=None)
+        waiting_wfa = SimpleNamespace(
+            id=51,
+            employee_id=self.employee,
+            start_date=self.target_date,
+            end_date=self.target_date,
+            status=monthly_recap.WorkModeRequestStatus.WAITING_FOR_APPROVAL,
+            scope=monthly_recap.WorkModeRequestScope.FULL,
+            mode=monthly_recap.AttendanceWorkMode.WFA,
+            planned_time=time(8, 0),
+        )
+        revoked_on_duty = SimpleNamespace(
+            id=52,
+            employee_id=self.employee,
+            start_date=self.target_date,
+            end_date=self.target_date,
+            status=monthly_recap.WorkModeRequestStatus.REVOKED,
+            scope=monthly_recap.WorkModeRequestScope.FULL,
+            mode=monthly_recap.AttendanceWorkMode.ON_DUTY,
+            planned_time=time(8, 0),
+        )
+
+        recap, row = self._get_recap(activities=[raw_activity], requests=[waiting_wfa, revoked_on_duty])
+
+        self.assertEqual(row.work_type, "WFO")
+        self.assertEqual(row.note, "")
+        self.assertEqual(recap["summary"], {"late_minutes": 0, "early_out_minutes": 0, "total_minutes": 0})
+
+    def test_monthly_recap_reflects_approved_on_duty_effective_state(self):
+        raw_activity = self._raw_activity(id=60, in_time=time(8, 0), out_time=time(17, 0), in_mode=None, out_mode=None)
+        approved_on_duty = SimpleNamespace(
+            id=61,
+            employee_id=self.employee,
+            start_date=self.target_date,
+            end_date=self.target_date,
+            status=monthly_recap.WorkModeRequestStatus.APPROVED,
+            scope=monthly_recap.WorkModeRequestScope.FULL,
+            mode=monthly_recap.AttendanceWorkMode.ON_DUTY,
+            planned_time=time(8, 0),
+        )
+
+        _, row = self._get_recap(activities=[raw_activity], requests=[approved_on_duty])
+
+        self.assertEqual(row.work_type, "On Duty FULL")
+        self.assertEqual(row.note, "")
+
+    def test_monthly_recap_does_not_drift_when_raw_history_contains_rejected_request_log(self):
+        rejected_request = SimpleNamespace(
+            id=70,
+            employee_id=self.employee,
+            start_date=self.target_date,
+            end_date=self.target_date,
+            status=monthly_recap.WorkModeRequestStatus.REJECTED,
+            scope=monthly_recap.WorkModeRequestScope.IN,
+            mode=monthly_recap.AttendanceWorkMode.ON_DUTY,
+            planned_time=time(7, 50),
+        )
+        rejected_linked_raw = self._raw_activity(
+            id=71,
+            in_time=time(7, 50),
+            work_mode_request_id=rejected_request,
+        )
+        valid_raw = self._raw_activity(id=72, in_time=time(8, 10), out_time=time(17, 0))
+
+        recap, row = self._get_recap(activities=[rejected_linked_raw, valid_raw], requests=[rejected_request])
+
+        self.assertEqual(row.check_in, "08:10")
+        self.assertEqual(row.check_out, "17:00")
+        self.assertEqual(recap["summary"]["late_minutes"], 10)
+
+    def test_monthly_recap_reflects_first_half_leave_final_state(self):
+        leave_request = SimpleNamespace(
+            employee_id=self.employee,
+            status="approved",
+            start_date=self.target_date,
+            end_date=self.target_date,
+            start_date_breakdown="first_half",
+            end_date_breakdown="first_half",
+        )
+        raw_activity = self._raw_activity(id=80, in_time=time(11, 55), out_time=time(17, 0))
+        day_obj = SimpleNamespace(day=self.target_date.strftime("%A").lower())
+
+        def half_day_rules(day, shift, day_obj, **kwargs):
+            rules = self._default_shift_rules(day, shift, day_obj, **kwargs)
+            rules["schedule"] = SimpleNamespace(
+                id=2,
+                enable_first_half_leave_rule=True,
+                first_half_leave_latest_check_in_time=time(11, 50),
+                enable_second_half_leave_rule=False,
+                second_half_leave_earliest_check_out_time=None,
+            )
+            return rules
+
+        with patch("attendance.views.clock_in_out.get_shift_rules", half_day_rules):
+            recap, row = self._get_recap(activities=[raw_activity], leaves=[leave_request], day_obj=day_obj)
+
+        self.assertEqual(row.check_in, "11:55")
+        self.assertEqual(row.check_out, "17:00")
+        self.assertEqual(row.late_minutes, 5)
+        self.assertIn("Approved First Half Leave", row.note)
+        self.assertEqual(recap["summary"]["late_minutes"], 5)
+        self.assertEqual(recap["summary"]["early_out_minutes"], 0)
+
+    def test_monthly_recap_reflects_second_half_leave_final_state(self):
+        leave_request = SimpleNamespace(
+            employee_id=self.employee,
+            status="approved",
+            start_date=self.target_date,
+            end_date=self.target_date,
+            start_date_breakdown="second_half",
+            end_date_breakdown="second_half",
+        )
+        raw_activity = self._raw_activity(id=90, in_time=time(8, 0), out_time=time(12, 5))
+        day_obj = SimpleNamespace(day=self.target_date.strftime("%A").lower())
+
+        def half_day_rules(day, shift, day_obj, **kwargs):
+            rules = self._default_shift_rules(day, shift, day_obj, **kwargs)
+            rules["schedule"] = SimpleNamespace(
+                id=3,
+                enable_first_half_leave_rule=False,
+                first_half_leave_latest_check_in_time=None,
+                enable_second_half_leave_rule=True,
+                second_half_leave_earliest_check_out_time=time(12, 10),
+            )
+            return rules
+
+        with patch("attendance.views.clock_in_out.get_shift_rules", half_day_rules):
+            recap, row = self._get_recap(activities=[raw_activity], leaves=[leave_request], day_obj=day_obj)
+
+        self.assertEqual(row.check_in, "08:00")
+        self.assertEqual(row.check_out, "12:05")
+        self.assertEqual(row.early_out_minutes, 5)
+        self.assertIn("Approved Second Half Leave", row.note)
+        self.assertEqual(recap["summary"]["late_minutes"], 0)
+        self.assertEqual(recap["summary"]["early_out_minutes"], 5)
+
+    def test_monthly_recap_recompute_is_idempotent_for_same_final_state(self):
+        approved_attendance = SimpleNamespace(
+            id=100,
+            employee_id=self.employee,
+            attendance_date=self.target_date,
+            attendance_clock_in_date=self.target_date,
+            attendance_clock_in=time(8, 15),
+            attendance_clock_in_channel=monthly_recap.APPROVED_REQUEST_CHANNEL,
+            attendance_clock_in_mode=monthly_recap.AttendanceWorkMode.WFA,
+            attendance_clock_out_date=self.target_date,
+            attendance_clock_out=time(17, 0),
+            attendance_clock_out_channel="biometric",
+            attendance_clock_out_mode=monthly_recap.AttendanceWorkMode.WFO,
+            reconciliation_note="",
+            reconciliation_source="",
+            late_minutes=0,
+            early_out_minutes=0,
+            attendance_validated=True,
+            is_validate_request_approved=True,
+            is_validate_request=False,
+            request_type="update_request",
+            shift_id="SHIFT-A",
+            requested_data={"attendance_clock_in": "08:15", "__meta": {"approved_scopes": ["IN"], "current_scope": "IN"}},
+        )
+        raw_activity = self._raw_activity(id=101, in_time=time(8, 0), out_time=time(17, 0))
+
+        recap_one, row_one = self._get_recap(attendances=[approved_attendance], activities=[raw_activity])
+        recap_two, row_two = self._get_recap(attendances=[approved_attendance], activities=[raw_activity])
+
+        self.assertEqual(recap_one["summary"], recap_two["summary"])
+        self.assertEqual(row_one.check_in, row_two.check_in)
+        self.assertEqual(row_one.check_out, row_two.check_out)
+        self.assertEqual(row_one.work_type, row_two.work_type)
+        self.assertEqual(row_one.note, row_two.note)
