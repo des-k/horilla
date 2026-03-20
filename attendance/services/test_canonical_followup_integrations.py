@@ -9,7 +9,7 @@ from attendance.models import AttendancePunchDirection
 from attendance.services import reconciliation
 from attendance.services.test_reconciliation_canonical import FakePunchLog
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from django.test import RequestFactory, SimpleTestCase, TestCase
 from rest_framework.test import APIRequestFactory, force_authenticate
@@ -313,6 +313,152 @@ class WorkModeDocumentActionFlowTests(TestCase):
         self.assertEqual(log_calls[0]["old_status"], "document:verified")
         self.assertEqual(log_calls[0]["new_status"], "document:pending_verification")
         self.assertEqual(log_calls[0]["remark"], "reopen it")
+
+
+class WorkTypeDocumentVersionLifecycleTests(SimpleTestCase):
+    databases = {"default"}
+    def _request_obj(self, *, status=WorkModeRequestStatus.APPROVED):
+        current = SimpleNamespace(version_number=2, status=WorkModeRequestDocumentStatus.SUBMITTED)
+        current.file_links = SimpleNamespace(exists=lambda: True)
+        current.save = MagicMock()
+        manager = MagicMock()
+        manager.filter.return_value.update = MagicMock()
+        req = SimpleNamespace(
+            id=101,
+            mode=AttendanceWorkMode.ON_DUTY,
+            status=status,
+            reason='site visit',
+            duty_destination_location='Client Site',
+            duty_destination_detail='Building A',
+            employee_id='EMP-1',
+            start_date=date(2026, 3, 14),
+            end_date=date(2026, 3, 15),
+            current_document_version=current,
+            document_versions=manager,
+            document_status=current.status,
+            document_verified_by=None,
+            document_verified_at=None,
+            document_remark=None,
+            action_by=None,
+            action_at=None,
+            action_type=None,
+            action_reason=None,
+            save=MagicMock(),
+            sync_legacy_files_from_current_version=lambda: None,
+            sync_root_document_fields_from_current_version=lambda: setattr(req, 'document_status', getattr(req.current_document_version, 'status', WorkModeRequestDocumentStatus.NOT_UPLOADED)),
+        )
+        return req, current, manager
+
+    def test_reupload_creates_new_current_document_version_and_marks_previous_non_current(self):
+        from attendance.services.work_type_request_actions import WorkModeRequestActions
+
+        req, current, manager = self._request_obj()
+        actor = SimpleNamespace(id=7)
+        new_version = SimpleNamespace(version_number=3, status=WorkModeRequestDocumentStatus.PENDING_VERIFICATION)
+        new_version.file_links = SimpleNamespace(exists=lambda: True)
+
+        with patch('attendance.services.work_type_request_actions.validate_uploaded_files', lambda uploads: None), \
+             patch('attendance.services.work_type_request_actions.WorkModeRequestDocumentVersion.objects.create', return_value=new_version) as create_version, \
+             patch('attendance.services.work_type_request_actions.AttendanceRequestFile.objects.create', return_value=SimpleNamespace(id=41)), \
+             patch('attendance.services.work_type_request_actions.WorkModeRequestDocumentVersionFile.objects.create'), \
+             patch.object(WorkModeRequestActions, '_touch_action', lambda *args, **kwargs: None), \
+             patch.object(WorkModeRequestActions, '_audit', lambda *args, **kwargs: None):
+            created = WorkModeRequestActions._create_document_version(req, actor=actor, uploaded_files=[SimpleNamespace(name='proof.pdf')])
+
+        manager.filter.assert_called_once_with(is_current=True)
+        manager.filter.return_value.update.assert_called_once_with(is_current=False)
+        create_version.assert_called_once()
+        self.assertIs(created, new_version)
+        self.assertIs(req.current_document_version, new_version)
+        self.assertEqual(created.version_number, 3)
+        self.assertEqual(created.status, WorkModeRequestDocumentStatus.PENDING_VERIFICATION)
+
+    def test_update_request_reupload_recomputes_once_for_approved_on_duty(self):
+        from attendance.services.work_type_request_actions import WorkModeRequestActions
+
+        req, _current, _manager = self._request_obj()
+        actor = SimpleNamespace(id=7)
+        new_version = SimpleNamespace(version_number=4, status=WorkModeRequestDocumentStatus.PENDING_VERIFICATION)
+        recompute_calls = []
+
+        with patch.object(WorkModeRequestActions, '_create_document_version', return_value=new_version), \
+             patch.object(WorkModeRequestActions, '_recompute', lambda request_obj: recompute_calls.append(request_obj)), \
+             patch.object(WorkModeRequestActions, '_audit', lambda *args, **kwargs: None), \
+             patch.object(WorkModeRequestActions, '_touch_action', lambda *args, **kwargs: None):
+            result = WorkModeRequestActions.update_request(req, actor=actor, uploaded_files=[SimpleNamespace(name='proof.pdf')])
+
+        self.assertTrue(result.recomputed)
+        self.assertEqual(recompute_calls, [req])
+
+    def test_verify_affects_only_current_document_version(self):
+        from attendance.services.work_type_request_actions import WorkModeRequestActions
+
+        req, current, _manager = self._request_obj()
+        older = SimpleNamespace(
+            status=WorkModeRequestDocumentStatus.REJECTED,
+            reviewed_by='old-reviewer',
+            reviewed_at='yesterday',
+            review_remark='keep me',
+        )
+        current.reviewed_by = None
+        current.reviewed_at = None
+        current.review_remark = None
+        actor = SimpleNamespace(id=88)
+        recompute_calls = []
+
+        with patch('attendance.services.work_type_request_actions.can_verify_document', return_value=True), \
+             patch.object(WorkModeRequestActions, '_recompute', lambda request_obj: recompute_calls.append(request_obj)), \
+             patch.object(WorkModeRequestActions, '_audit', lambda *args, **kwargs: None):
+            result = WorkModeRequestActions.verify_document(req, actor=actor, request=SimpleNamespace(user=SimpleNamespace()))
+
+        self.assertTrue(result.recomputed)
+        self.assertEqual(current.status, WorkModeRequestDocumentStatus.VERIFIED)
+        self.assertIs(current.reviewed_by, actor)
+        self.assertEqual(older.status, WorkModeRequestDocumentStatus.REJECTED)
+        self.assertEqual(older.review_remark, 'keep me')
+        self.assertEqual(recompute_calls, [req])
+
+    def test_reject_affects_only_current_document_version(self):
+        from attendance.services.work_type_request_actions import WorkModeRequestActions
+
+        req, current, _manager = self._request_obj()
+        current.reviewed_by = None
+        current.reviewed_at = None
+        current.review_remark = None
+        older = SimpleNamespace(status=WorkModeRequestDocumentStatus.VERIFIED, reviewed_by='old', reviewed_at='old-at', review_remark='keep verified')
+        actor = SimpleNamespace(id=44)
+
+        with patch('attendance.services.work_type_request_actions.can_reject_document', return_value=True), \
+             patch.object(WorkModeRequestActions, '_recompute', lambda *args, **kwargs: None), \
+             patch.object(WorkModeRequestActions, '_audit', lambda *args, **kwargs: None):
+            WorkModeRequestActions.reject_document(req, actor=actor, request=SimpleNamespace(user=SimpleNamespace()), remark='blurred')
+
+        self.assertEqual(current.status, WorkModeRequestDocumentStatus.REJECTED)
+        self.assertEqual(current.review_remark, 'blurred')
+        self.assertEqual(older.status, WorkModeRequestDocumentStatus.VERIFIED)
+        self.assertEqual(older.review_remark, 'keep verified')
+
+    def test_reopen_clears_review_metadata_and_restores_pending_verification(self):
+        from attendance.services.work_type_request_actions import WorkModeRequestActions
+
+        req, current, _manager = self._request_obj()
+        current.status = WorkModeRequestDocumentStatus.VERIFIED
+        current.reviewed_by = SimpleNamespace(id=5)
+        current.reviewed_at = timezone.now()
+        current.review_remark = 'verified before'
+        recompute_calls = []
+
+        with patch('attendance.services.work_type_request_actions.can_reopen_document', return_value=True), \
+             patch.object(WorkModeRequestActions, '_recompute', lambda request_obj: recompute_calls.append(request_obj)), \
+             patch.object(WorkModeRequestActions, '_audit', lambda *args, **kwargs: None):
+            result = WorkModeRequestActions.reopen_document(req, actor=SimpleNamespace(id=8), request=SimpleNamespace(user=SimpleNamespace()), remark='review again')
+
+        self.assertTrue(result.recomputed)
+        self.assertEqual(current.status, WorkModeRequestDocumentStatus.PENDING_VERIFICATION)
+        self.assertIsNone(current.reviewed_by)
+        self.assertIsNone(current.reviewed_at)
+        self.assertIsNone(current.review_remark)
+        self.assertEqual(recompute_calls, [req])
 
 
 class MonthlyPdfExportParityTests(SimpleTestCase):
