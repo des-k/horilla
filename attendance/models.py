@@ -94,6 +94,7 @@ class WorkModeRequestActionType(models.TextChoices):
     DOCUMENT_UPLOADED = "DOCUMENT_UPLOADED", _("Document Uploaded")
     APPROVED = "APPROVED", _("Approved")
     REJECTED = "REJECTED", _("Rejected")
+    AUTO_REJECTED = "AUTO_REJECTED", _("Auto Rejected")
     DOCUMENT_REJECTED = "DOCUMENT_REJECTED", _("Document Rejected")
     VERIFIED = "VERIFIED", _("Verified")
     REVOKED = "REVOKED", _("Revoked")
