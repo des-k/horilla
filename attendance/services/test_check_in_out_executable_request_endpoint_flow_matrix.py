@@ -317,3 +317,181 @@ class AttendanceRequestEndpointFlowExecutableTests(SimpleTestCase):
         self.assertIn(("log", "revoke_request"), revoke_sequence)
         self.assertTrue(any(item[0] == "restore" for item in revoke_sequence))
         self.assertTrue(any(item[0] == "recompute" for item in revoke_sequence))
+
+
+class RequestEndpointFlowPriorityTests(AttendanceRequestEndpointFlowExecutableTests):
+    def test_api_cancel_waiting_create_request_recomputes_only_requested_scope(self):
+        request = self.api_factory.put("/api/attendance/attendance-request-cancel/77", {}, format="json")
+        force_authenticate(request, user=self.owner_user)
+        attendance = FakeAttendance(owner_user=self.owner_user, request_type="create_request")
+        attendance.requested_data = {"attendance_clock_in": "09:00:00", "__meta": {"current_scope": "IN"}}
+        locked = FakeQuerySet(attendance)
+        final_attendance = FakeAttendance(owner_user=self.owner_user, request_type="cancel_request", is_validate_request=False)
+
+        with patch("horilla_api.api_views.attendance.views.Attendance.objects.select_for_update", return_value=locked), patch(
+            "horilla_api.api_views.attendance.views.get_requested_sessions",
+            return_value=(True, False),
+        ), patch(
+            "horilla_api.api_views.attendance.views.clear_request_override_and_recompute",
+            return_value=final_attendance,
+        ) as clear_reset, patch(
+            "horilla_api.api_views.attendance.views.AttendanceRequestSerializer",
+            return_value=SimpleNamespace(data={"request_type": "cancel_request"}),
+        ):
+            response = AttendanceRequestCancelView.as_view()(request, pk=attendance.id)
+
+        self.assertEqual(response.status_code, 200)
+        clear_reset.assert_called_once_with(attendance, include_in=True, include_out=False)
+
+    def test_api_cancel_waiting_update_request_keeps_raw_priority_without_canonical_reset(self):
+        request = self.api_factory.put("/api/attendance/attendance-request-cancel/77", {}, format="json")
+        force_authenticate(request, user=self.owner_user)
+        attendance = FakeAttendance(owner_user=self.owner_user, request_type="update_request")
+        attendance.requested_data = {"attendance_clock_in": "09:00:00", "__meta": {"current_scope": "IN"}}
+        locked = FakeQuerySet(attendance)
+
+        with patch("horilla_api.api_views.attendance.views.Attendance.objects.select_for_update", return_value=locked), patch(
+            "horilla_api.api_views.attendance.views.get_requested_sessions",
+            return_value=(True, False),
+        ), patch(
+            "horilla_api.api_views.attendance.views.clear_request_override_and_recompute",
+        ) as clear_reset, patch(
+            "horilla_api.api_views.attendance.views.AttendanceRequestSerializer",
+            return_value=SimpleNamespace(data={"request_type": "cancel_request"}),
+        ):
+            response = AttendanceRequestCancelView.as_view()(request, pk=attendance.id)
+
+        self.assertEqual(response.status_code, 200)
+        clear_reset.assert_not_called()
+        self.assertEqual(attendance.request_type, "cancel_request")
+
+    def test_api_approve_out_scope_only_updates_only_out_field_and_marks_request_channel(self):
+        request = self.api_factory.put("/api/attendance/attendance-request-approve/77", {}, format="json")
+        force_authenticate(request, user=self.manager_user)
+        attendance = FakeAttendance(owner_user=self.owner_user)
+        attendance.requested_data = {"attendance_clock_out": "17:30:00", "__meta": {"current_scope": "OUT"}}
+        locked = FakeQuerySet(attendance)
+        updated = FakeQuerySet(attendance)
+        sequence = []
+        final_attendance = FakeAttendance(owner_user=self.owner_user, attendance_clock_out_channel="approved_request")
+
+        with patch("horilla_api.api_views.attendance.views.Attendance.objects.select_for_update", return_value=locked), patch(
+            "horilla_api.api_views.attendance.views.Attendance.objects.filter",
+            return_value=updated,
+        ), patch(
+            "horilla_api.api_views.attendance.views.user_can_approve_request",
+            return_value=True,
+        ), patch(
+            "horilla_api.api_decorators.base.decorators.ManagerPermission.has_permission",
+            return_value=True,
+        ), patch(
+            "horilla_api.api_views.attendance.views.validate_requested_data_with_windows",
+            return_value=(True, None),
+        ), patch(
+            "horilla_api.api_views.attendance.views.get_requested_sessions",
+            return_value=(False, True),
+        ), patch(
+            "horilla_api.api_views.attendance.views._apply_request_override_snapshot",
+            side_effect=lambda *args, **kwargs: sequence.append("snapshot"),
+        ), patch(
+            "horilla_api.api_views.attendance.views._mark_approved_request_channels",
+            side_effect=lambda *args, **kwargs: sequence.append("mark"),
+        ), patch(
+            "horilla_api.api_views.attendance.views._detach_request_overridden_raw_links",
+            side_effect=lambda *args, **kwargs: sequence.append("detach"),
+        ), patch(
+            "horilla_api.api_views.attendance.views._log_attendance_request_status_change",
+            side_effect=lambda *args, **kwargs: sequence.append("log"),
+        ), patch(
+            "horilla_api.api_views.attendance.views.recompute_attendance",
+            side_effect=lambda *args, **kwargs: sequence.append("recompute") or SimpleNamespace(attendance=final_attendance),
+        ), patch(
+            "horilla_api.api_views.attendance.views.AttendanceRequestSerializer",
+            return_value=SimpleNamespace(data={"request_type": "approved", "clock_out_channel": "approved_request"}),
+        ):
+            response = AttendanceRequestApproveView.as_view()(request, pk=attendance.id)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(updated.updated[-1], {"attendance_clock_out": "17:30:00"})
+        self.assertEqual(sequence[:3], ["snapshot", "log", "mark"])
+        self.assertIn("detach", sequence)
+
+    def test_api_revoke_approved_request_restores_only_requested_scope_before_recompute(self):
+        request = self.api_factory.put("/api/attendance/attendance-request-revoke/77", {}, format="json")
+        force_authenticate(request, user=self.manager_user)
+        attendance = FakeAttendance(owner_user=self.owner_user, is_validate_request=False, is_validate_request_approved=True)
+        attendance.requested_data = {"attendance_clock_out": "17:30:00", "__meta": {"current_scope": "OUT"}}
+        locked = FakeQuerySet(attendance)
+        sequence = []
+
+        with patch("horilla_api.api_views.attendance.views.Attendance.objects.select_for_update", return_value=locked), patch(
+            "horilla_api.api_decorators.base.decorators.ManagerPermission.has_permission",
+            return_value=True,
+        ), patch(
+            "horilla_api.api_views.attendance.views._can_act_on_employee",
+            return_value=True,
+        ), patch(
+            "horilla_api.api_views.attendance.views.get_requested_sessions",
+            return_value=(False, True),
+        ), patch(
+            "horilla_api.api_views.attendance.views._restore_request_back_to_raw",
+            side_effect=lambda *args, **kwargs: sequence.append(("restore", kwargs)),
+        ), patch(
+            "horilla_api.api_views.attendance.views._log_attendance_request_status_change",
+            side_effect=lambda *args, **kwargs: sequence.append(("log", kwargs.get("new_status"))),
+        ), patch(
+            "horilla_api.api_views.attendance.views.recompute_attendance",
+            side_effect=lambda *args, **kwargs: sequence.append(("recompute", args[1])) or SimpleNamespace(attendance=attendance),
+        ), patch(
+            "horilla_api.api_views.attendance.views.AttendanceRequestSerializer",
+            return_value=SimpleNamespace(data={"request_type": "revoke_request"}),
+        ):
+            response = AttendanceRequestRevokeView.as_view()(request, pk=attendance.id)
+
+        self.assertEqual(response.status_code, 200)
+        restore_call = next(item for item in sequence if item[0] == "restore")
+        self.assertEqual(restore_call[1]["include_in"], False)
+        self.assertEqual(restore_call[1]["include_out"], True)
+        self.assertIn(("log", "revoke_request"), sequence)
+
+    def test_api_approve_flow_defers_final_truth_to_recompute_result(self):
+        request = self.api_factory.put("/api/attendance/attendance-request-approve/77", {}, format="json")
+        force_authenticate(request, user=self.manager_user)
+        attendance = FakeAttendance(owner_user=self.owner_user)
+        locked = FakeQuerySet(attendance)
+        updated = FakeQuerySet(attendance)
+        final_attendance = FakeAttendance(owner_user=self.owner_user, attendance_clock_in_channel="approved_request")
+        serializer = SimpleNamespace(data={"clock_in_channel": "approved_request"})
+
+        with patch("horilla_api.api_views.attendance.views.Attendance.objects.select_for_update", return_value=locked), patch(
+            "horilla_api.api_views.attendance.views.Attendance.objects.filter",
+            return_value=updated,
+        ), patch(
+            "horilla_api.api_views.attendance.views.user_can_approve_request",
+            return_value=True,
+        ), patch(
+            "horilla_api.api_decorators.base.decorators.ManagerPermission.has_permission",
+            return_value=True,
+        ), patch(
+            "horilla_api.api_views.attendance.views.validate_requested_data_with_windows",
+            return_value=(True, None),
+        ), patch(
+            "horilla_api.api_views.attendance.views.get_requested_sessions",
+            return_value=(True, False),
+        ), patch("horilla_api.api_views.attendance.views._apply_request_override_snapshot"), patch(
+            "horilla_api.api_views.attendance.views._mark_approved_request_channels"
+        ), patch("horilla_api.api_views.attendance.views._detach_request_overridden_raw_links"), patch(
+            "horilla_api.api_views.attendance.views._log_attendance_request_status_change"
+        ), patch(
+            "horilla_api.api_views.attendance.views.recompute_attendance",
+            return_value=SimpleNamespace(attendance=final_attendance),
+        ) as recompute, patch(
+            "horilla_api.api_views.attendance.views.AttendanceRequestSerializer",
+            return_value=serializer,
+        ) as serializer_cls:
+            response = AttendanceRequestApproveView.as_view()(request, pk=attendance.id)
+
+        self.assertEqual(response.status_code, 200)
+        recompute.assert_called_once_with(attendance.employee_id, attendance.attendance_date)
+        self.assertIs(serializer_cls.call_args.args[0], final_attendance)
+        self.assertIs(serializer_cls.call_args.kwargs["context"]["request"]._request, request)
