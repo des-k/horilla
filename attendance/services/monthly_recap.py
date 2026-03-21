@@ -1560,12 +1560,12 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
         if schedule_obj and half_day_kind in {"first_half", "second_half"}:
             if half_day_kind == "first_half":
                 half_day_cfg = {
-                    "enabled": bool(getattr(schedule_obj, "enable_first_half_leave_rule", False)),
+                    "enabled": bool(bool(schedule_obj)),
                     "threshold_time": getattr(schedule_obj, "first_half_leave_latest_check_in_time", None),
                 }
             elif half_day_kind == "second_half":
                 half_day_cfg = {
-                    "enabled": bool(getattr(schedule_obj, "enable_second_half_leave_rule", False)),
+                    "enabled": bool(bool(schedule_obj)),
                     "threshold_time": getattr(schedule_obj, "second_half_leave_earliest_check_out_time", None),
                 }
         first_half_threshold_dt = None
