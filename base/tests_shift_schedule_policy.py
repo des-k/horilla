@@ -7,6 +7,12 @@ from base.models import EmployeeShiftSchedule
 
 
 class ShiftSchedulePolicyFormTests(SimpleTestCase):
+    def test_shift_schedule_model_removes_legacy_fallback_fields(self):
+        model_field_names = {field.name for field in EmployeeShiftSchedule._meta.get_fields()}
+
+        self.assertNotIn("late_checkin_minutes", model_field_names)
+        self.assertNotIn("max_late_checkout_hours", model_field_names)
+
     def test_shift_schedule_forms_hide_legacy_fallback_fields_and_reorder_cutoffs(self):
         form = EmployeeShiftScheduleForm()
         update_form = EmployeeShiftScheduleUpdateForm(instance=EmployeeShiftSchedule())
