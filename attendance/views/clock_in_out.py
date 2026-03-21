@@ -166,9 +166,7 @@ def _resolve_window_config(schedule) -> WindowConfig:
 
     return WindowConfig(
         early_checkin_minutes=_get_int("early_checkin_minutes", 120),
-        late_checkin_minutes=_get_int("late_checkin_minutes", 120),
-        early_checkout_grace_minutes=_get_int("early_checkout_grace_minutes", 0),
-        max_late_checkout_hours=_get_int("max_late_checkout_hours", 12),
+        early_checkout_minutes=_get_int("early_checkout_grace_minutes", 0),
     )
 
 
@@ -620,9 +618,7 @@ def get_shift_rules(
         "check_out_window_end_dt": check_out_window_end_dt,
         "window_config": {
             "early_checkin_minutes": window_cfg.early_checkin_minutes,
-            "late_checkin_minutes": window_cfg.late_checkin_minutes,
-            "early_checkout_grace_minutes": window_cfg.early_checkout_grace_minutes,
-            "max_late_checkout_hours": window_cfg.max_late_checkout_hours,
+            "early_checkout_minutes": window_cfg.early_checkout_minutes,
         },
     }
 
