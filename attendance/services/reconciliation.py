@@ -309,7 +309,7 @@ def _resolve_leave_context(employee, attendance_date: date, ctx: ShiftContext) -
 
     if kind == "first_half":
         threshold_time = getattr(schedule, "first_half_leave_latest_check_in_time", None) if schedule else None
-        if getattr(schedule, "enable_first_half_leave_rule", False) and threshold_time is not None:
+        if bool(schedule) and threshold_time is not None:
             late_reference_dt = _time_to_shift_instance_dt(
                 threshold_time,
                 shift_start_dt=ctx.shift_start_dt,
@@ -318,7 +318,7 @@ def _resolve_leave_context(employee, attendance_date: date, ctx: ShiftContext) -
         minimum_hour = _half_minimum_hour(ctx.minimum_hour)
     elif kind == "second_half":
         threshold_time = getattr(schedule, "second_half_leave_earliest_check_out_time", None) if schedule else None
-        if getattr(schedule, "enable_second_half_leave_rule", False) and threshold_time is not None:
+        if bool(schedule) and threshold_time is not None:
             early_reference_dt = _time_to_shift_instance_dt(
                 threshold_time,
                 shift_start_dt=ctx.shift_start_dt,
