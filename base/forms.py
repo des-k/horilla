@@ -1156,10 +1156,6 @@ def _validate_half_day_threshold_requirement(cleaned_data):
 
 def _configure_shift_schedule_policy_fields(form):
     """Apply locked business-policy defaults and field ordering for shift schedules."""
-    # Remove legacy fallback window fields from the UI.
-    form.fields.pop("late_checkin_minutes", None)
-    form.fields.pop("max_late_checkout_hours", None)
-
     if "early_checkin_minutes" in form.fields:
         form.fields["early_checkin_minutes"].label = _("Early Check In Minutes")
     if "early_checkout_grace_minutes" in form.fields:
