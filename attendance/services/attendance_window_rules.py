@@ -15,7 +15,6 @@ Business rules (FINAL spec):
 
 Attendance policy decision:
 - ON_DUTY uses the same check-in/check-out window boundaries as normal attendance.
-- Legacy fallback fields late_checkin_minutes/max_late_checkout_hours are ignored.
 """
 
 from __future__ import annotations
