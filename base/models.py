@@ -699,11 +699,6 @@ class EmployeeShiftSchedule(HorillaModel):
         verbose_name=_("Early Check In Minutes"),
         help_text=_("Earliest check-in = start_time - this many minutes."),
     )
-    late_checkin_minutes = models.IntegerField(
-        default=120,
-        verbose_name=_("Late Check-In Minutes"),
-        help_text=_("If no cutoff-in is available, latest check-in = start_time + this many minutes."),
-    )
     early_checkout_grace_minutes = models.IntegerField(
         default=0,
         verbose_name=_("Early Check Out Minutes"),
@@ -740,11 +735,6 @@ class EmployeeShiftSchedule(HorillaModel):
         help_text=_("When enabled, employees who already checked in must check out before submitting second half leave."),
     )
 
-    max_late_checkout_hours = models.IntegerField(
-        default=12,
-        verbose_name=_("Max Late Check-Out Hours"),
-        help_text=_("Latest check-out = end_time + this many hours (unless a schedule cutoff-out exists)."),
-    )
     is_auto_punch_out_enabled = models.BooleanField(
         default=False,
         verbose_name=_("Enable Automatic Check Out"),
