@@ -1152,6 +1152,71 @@ def _validate_half_day_threshold_requirement(cleaned_data):
     if errors:
         raise ValidationError(errors)
 
+
+
+def _configure_shift_schedule_policy_fields(form):
+    """Apply locked business-policy defaults and field ordering for shift schedules."""
+    # Remove legacy fallback window fields from the UI.
+    form.fields.pop("late_checkin_minutes", None)
+    form.fields.pop("max_late_checkout_hours", None)
+
+    if "early_checkin_minutes" in form.fields:
+        form.fields["early_checkin_minutes"].label = _("Early Check In Minutes")
+    if "early_checkout_grace_minutes" in form.fields:
+        form.fields["early_checkout_grace_minutes"].label = _("Early Check Out Minutes")
+
+    if "enable_first_half_leave_rule" in form.fields:
+        form.fields["enable_first_half_leave_rule"].initial = True
+        form.fields["enable_first_half_leave_rule"].disabled = True
+    if "enable_second_half_leave_rule" in form.fields:
+        form.fields["enable_second_half_leave_rule"].initial = True
+        form.fields["enable_second_half_leave_rule"].disabled = True
+
+    if "is_auto_punch_out_enabled" in form.fields:
+        form.fields["is_auto_punch_out_enabled"].initial = False
+        form.fields["is_auto_punch_out_enabled"].disabled = True
+        form.fields["is_auto_punch_out_enabled"].help_text = _("Disabled by business policy.")
+    if "auto_punch_out_time" in form.fields:
+        form.fields["auto_punch_out_time"].required = False
+        form.fields["auto_punch_out_time"].disabled = True
+
+    preferred_order = [
+        "day",
+        "shift_id",
+        "minimum_working_hour",
+        "start_time",
+        "end_time",
+        "early_checkin_minutes",
+        "cutoff_check_in_offset",
+        "early_checkout_grace_minutes",
+        "cutoff_check_out_offset",
+        "grace_time_id",
+        "enable_first_half_leave_rule",
+        "first_half_leave_latest_check_in_time",
+        "enable_second_half_leave_rule",
+        "second_half_leave_earliest_check_out_time",
+        "require_check_out_before_second_half_leave",
+        "is_auto_punch_out_enabled",
+        "auto_punch_out_time",
+        "company_id",
+    ]
+    form.order_fields(preferred_order)
+
+
+def _enforce_shift_schedule_policy(cleaned_data):
+    cleaned_data["enable_first_half_leave_rule"] = True
+    cleaned_data["enable_second_half_leave_rule"] = True
+    cleaned_data["is_auto_punch_out_enabled"] = False
+    cleaned_data["auto_punch_out_time"] = None
+    return cleaned_data
+
+
+def _apply_shift_schedule_policy_to_instance(instance):
+    instance.enable_first_half_leave_rule = True
+    instance.enable_second_half_leave_rule = True
+    instance.is_auto_punch_out_enabled = False
+    instance.auto_punch_out_time = None
+    return instance
 class EmployeeShiftScheduleUpdateForm(ModelForm):
     """
     EmployeeShiftSchedule model's form
@@ -1183,9 +1248,6 @@ class EmployeeShiftScheduleUpdateForm(ModelForm):
             "early_checkin_minutes": forms.NumberInput(
                 attrs={"class": "oh-input w-100 form-control", "min": 0}
             ),
-            "late_checkin_minutes": forms.NumberInput(
-                attrs={"class": "oh-input w-100 form-control", "min": 0}
-            ),
             "early_checkout_grace_minutes": forms.NumberInput(
                 attrs={"class": "oh-input w-100 form-control", "min": 0}
             ),
@@ -1194,9 +1256,6 @@ class EmployeeShiftScheduleUpdateForm(ModelForm):
             ),
             "second_half_leave_earliest_check_out_time": forms.TimeInput(
                 attrs={"type": "time", "class": "oh-input w-100 form-control"}
-            ),
-            "max_late_checkout_hours": forms.NumberInput(
-                attrs={"class": "oh-input w-100 form-control", "min": 0}
             ),
         }
 
@@ -1246,6 +1305,7 @@ class EmployeeShiftScheduleUpdateForm(ModelForm):
                 self.fields["cutoff_check_out_offset"].initial = val
 
         _set_half_day_threshold_initials(self, instance if instance and getattr(instance, "pk", None) else None)
+        _configure_shift_schedule_policy_fields(self)
 
         # Attendance app-dependent fields
         if not apps.is_installed("attendance"):
@@ -1273,6 +1333,7 @@ class EmployeeShiftScheduleUpdateForm(ModelForm):
 
     def clean(self):
         cleaned_data = super().clean()
+        cleaned_data = _enforce_shift_schedule_policy(cleaned_data)
         _validate_half_day_threshold_requirement(cleaned_data)
         if apps.is_installed("attendance"):
             auto_punch_out_enabled = cleaned_data.get("is_auto_punch_out_enabled")
@@ -1298,6 +1359,13 @@ class EmployeeShiftScheduleUpdateForm(ModelForm):
                     )
 
         return cleaned_data
+
+    def save(self, commit=True):
+        instance = super().save(commit=False)
+        _apply_shift_schedule_policy_to_instance(instance)
+        if commit:
+            instance.save()
+        return instance
 
 
 class EmployeeShiftScheduleForm(ModelForm):
@@ -1335,9 +1403,6 @@ class EmployeeShiftScheduleForm(ModelForm):
             "early_checkin_minutes": forms.NumberInput(
                 attrs={"class": "oh-input w-100 form-control", "min": 0}
             ),
-            "late_checkin_minutes": forms.NumberInput(
-                attrs={"class": "oh-input w-100 form-control", "min": 0}
-            ),
             "early_checkout_grace_minutes": forms.NumberInput(
                 attrs={"class": "oh-input w-100 form-control", "min": 0}
             ),
@@ -1346,9 +1411,6 @@ class EmployeeShiftScheduleForm(ModelForm):
             ),
             "second_half_leave_earliest_check_out_time": forms.TimeInput(
                 attrs={"type": "time", "class": "oh-input w-100 form-control"}
-            ),
-            "max_late_checkout_hours": forms.NumberInput(
-                attrs={"class": "oh-input w-100 form-control", "min": 0}
             ),
         }
 
@@ -1402,6 +1464,7 @@ class EmployeeShiftScheduleForm(ModelForm):
                 self.fields["cutoff_check_out_offset"].initial = val
 
         _set_half_day_threshold_initials(self, instance if instance and getattr(instance, "pk", None) else None)
+        _configure_shift_schedule_policy_fields(self)
 
         # Attendance app-dependent fields
         if not apps.is_installed("attendance"):
@@ -1428,6 +1491,7 @@ class EmployeeShiftScheduleForm(ModelForm):
 
     def clean(self):
         cleaned_data = super().clean()
+        cleaned_data = _enforce_shift_schedule_policy(cleaned_data)
         _validate_half_day_threshold_requirement(cleaned_data)
         if apps.is_installed("attendance"):
             auto_punch_out_enabled = self.cleaned_data["is_auto_punch_out_enabled"]
@@ -1455,6 +1519,7 @@ class EmployeeShiftScheduleForm(ModelForm):
 
     def save(self, commit=True):
         instance = super().save(commit=False)
+        _apply_shift_schedule_policy_to_instance(instance)
         for day in self.data.getlist("day"):
             if int(day) != int(instance.day.id):
                 data_copy = self.data.copy()
@@ -1462,6 +1527,7 @@ class EmployeeShiftScheduleForm(ModelForm):
                 shift_schedule = EmployeeShiftScheduleUpdateForm(data_copy).save(
                     commit=False
                 )
+                _apply_shift_schedule_policy_to_instance(shift_schedule)
                 shift_schedule.save()
         if commit:
             instance.save()
