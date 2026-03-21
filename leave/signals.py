@@ -366,7 +366,7 @@ if apps.is_installed("attendance"):
         out_dt = _combine(getattr(attendance, "attendance_clock_out_date", None), getattr(attendance, "attendance_clock_out", None))
 
         if in_dt:
-            if breakdown == HALF_DAY_FIRST and getattr(schedule, "enable_first_half_leave_rule", False):
+            if breakdown == HALF_DAY_FIRST and bool(schedule):
                 ref_in = _threshold_dt(getattr(schedule, "first_half_leave_latest_check_in_time", None), shift_start, shift_end)
             else:
                 ref_in = shift_start + timedelta(seconds=grace_in_sec)
@@ -374,7 +374,7 @@ if apps.is_installed("attendance"):
                 AttendanceLateComeEarlyOut.objects.get_or_create(attendance_id=attendance, type="late_come", defaults={"employee_id": attendance.employee_id})
 
         if out_dt:
-            if breakdown == HALF_DAY_SECOND and getattr(schedule, "enable_second_half_leave_rule", False):
+            if breakdown == HALF_DAY_SECOND and bool(schedule):
                 ref_out = _threshold_dt(getattr(schedule, "second_half_leave_earliest_check_out_time", None), shift_start, shift_end)
             else:
                 ref_out = shift_end - timedelta(seconds=grace_out_sec)
