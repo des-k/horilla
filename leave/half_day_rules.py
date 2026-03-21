@@ -182,7 +182,7 @@ def get_half_day_schedule_config(employee, target_date: date, breakdown: str) ->
         return {
             "schedule": schedule,
             "attendance_date": context.get("attendance_date") or target_date,
-            "enabled": bool(getattr(schedule, "enable_first_half_leave_rule", False)),
+            "enabled": bool(bool(schedule)),
             "threshold_time": getattr(schedule, "first_half_leave_latest_check_in_time", None),
             "require_check_out_before_submit": False,
             "shift_start": context.get("shift_start"),
@@ -193,7 +193,7 @@ def get_half_day_schedule_config(employee, target_date: date, breakdown: str) ->
         return {
             "schedule": schedule,
             "attendance_date": context.get("attendance_date") or target_date,
-            "enabled": bool(getattr(schedule, "enable_second_half_leave_rule", False)),
+            "enabled": bool(bool(schedule)),
             "threshold_time": getattr(schedule, "second_half_leave_earliest_check_out_time", None),
             "require_check_out_before_submit": bool(
                 getattr(schedule, "require_check_out_before_second_half_leave", False)
