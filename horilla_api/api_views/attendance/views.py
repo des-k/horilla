@@ -626,7 +626,7 @@ def _build_mobile_header_note_context(employee, shift, attendance_date: date, da
 
     if leave_breakdown == "first_half":
         threshold_dt = None
-        if schedule and getattr(schedule, "enable_first_half_leave_rule", False):
+        if schedule and bool(schedule):
             threshold_dt = _note_time_to_shift_instance_dt(
                 getattr(schedule, "first_half_leave_latest_check_in_time", None),
                 shift_start_dt=shift_start_dt,
@@ -635,7 +635,7 @@ def _build_mobile_header_note_context(employee, shift, attendance_date: date, da
         effective_start_dt = threshold_dt or midpoint_dt
     elif leave_breakdown == "second_half":
         threshold_dt = None
-        if schedule and getattr(schedule, "enable_second_half_leave_rule", False):
+        if schedule and bool(schedule):
             threshold_dt = _note_time_to_shift_instance_dt(
                 getattr(schedule, "second_half_leave_earliest_check_out_time", None),
                 shift_start_dt=shift_start_dt,
@@ -3080,8 +3080,8 @@ class CheckingStatus(APIView):
         out_window_end = cutoff_out_dt or check_out_window_end_dt
 
         if out_mode == AttendanceWorkMode.ON_DUTY:
-            # ON_DUTY: start checkout AFTER check-in cutoff (avoid overlap at exact cutoff)
-            out_window_start = (cutoff_in_dt + timedelta(minutes=1)) if cutoff_in_dt else check_out_window_start_dt
+            # ON_DUTY uses the same checkout window boundaries as normal attendance.
+            out_window_start = check_out_window_start_dt
         else:
             # WFO/WFA: dynamic checkout start follows actual check-in time, but clamped:
             # - if checked-in earlier than shift start -> use shift start
@@ -3104,7 +3104,7 @@ class CheckingStatus(APIView):
                     shift_duration = shift_end_dt - shift_start_dt
                     dyn_end = eff_in + shift_duration
 
-                    early_grace_min = int(((rules or {}).get("window_config") or {}).get("early_checkout_grace_minutes") or 0)
+                    early_grace_min = int(((rules or {}).get("window_config") or {}).get("early_checkout_minutes") or 0)
                     out_window_start = dyn_end - timedelta(minutes=early_grace_min)
             except Exception:
                 pass
