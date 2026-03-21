@@ -194,6 +194,11 @@ class Department(HorillaModel):
 
     def clean(self):
         super().clean()
+
+        self.enable_first_half_leave_rule = True
+        self.enable_second_half_leave_rule = True
+        self.is_auto_punch_out_enabled = False
+        self.auto_punch_out_time = None
         request = getattr(_thread_locals, "request", None)
         if request and request.POST:
             company = request.POST.getlist("company_id", None)
@@ -296,6 +301,11 @@ class WorkType(HorillaModel):
 
     def clean(self):
         super().clean()
+
+        self.enable_first_half_leave_rule = True
+        self.enable_second_half_leave_rule = True
+        self.is_auto_punch_out_enabled = False
+        self.auto_punch_out_time = None
         request = getattr(_thread_locals, "request", None)
         if request and request.POST:
             company = request.POST.getlist("company_id", None)
@@ -529,6 +539,11 @@ class EmployeeType(HorillaModel):
 
     def clean(self):
         super().clean()
+
+        self.enable_first_half_leave_rule = True
+        self.enable_second_half_leave_rule = True
+        self.is_auto_punch_out_enabled = False
+        self.auto_punch_out_time = None
         request = getattr(_thread_locals, "request", None)
         if request and request.POST:
             company = request.POST.getlist("company_id", None)
@@ -620,6 +635,11 @@ class EmployeeShift(HorillaModel):
 
     def clean(self):
         super().clean()
+
+        self.enable_first_half_leave_rule = True
+        self.enable_second_half_leave_rule = True
+        self.is_auto_punch_out_enabled = False
+        self.auto_punch_out_time = None
         request = getattr(_thread_locals, "request", None)
         if request and request.POST:
             company = request.POST.getlist("company_id", None)
@@ -676,7 +696,7 @@ class EmployeeShiftSchedule(HorillaModel):
     # -----------------------------------------------------------------
     early_checkin_minutes = models.IntegerField(
         default=120,
-        verbose_name=_("Early Check-In Minutes"),
+        verbose_name=_("Early Check In Minutes"),
         help_text=_("Earliest check-in = start_time - this many minutes."),
     )
     late_checkin_minutes = models.IntegerField(
@@ -686,8 +706,8 @@ class EmployeeShiftSchedule(HorillaModel):
     )
     early_checkout_grace_minutes = models.IntegerField(
         default=0,
-        verbose_name=_("Early Check-Out Grace Minutes"),
-        help_text=_("Earliest check-out (WFO/WFA) = end_time - this many minutes."),
+        verbose_name=_("Early Check Out Minutes"),
+        help_text=_("Earliest check-out = end_time - this many minutes."),
     )
 
     enable_first_half_leave_rule = models.BooleanField(
@@ -806,6 +826,12 @@ class EmployeeShiftSchedule(HorillaModel):
         return f"{self.shift_id.employee_shift} {self.day}"
 
     def save(self, *args, **kwargs):
+        # Locked policy fields.
+        self.enable_first_half_leave_rule = True
+        self.enable_second_half_leave_rule = True
+        self.is_auto_punch_out_enabled = False
+        self.auto_punch_out_time = None
+
         # Night shift detection
         if self.start_time and self.end_time:
             self.is_night_shift = self.start_time > self.end_time
@@ -853,6 +879,11 @@ class EmployeeShiftSchedule(HorillaModel):
 
     def clean(self):
         super().clean()
+
+        self.enable_first_half_leave_rule = True
+        self.enable_second_half_leave_rule = True
+        self.is_auto_punch_out_enabled = False
+        self.auto_punch_out_time = None
     
         # Normalize + compute secs for validation purpose (before save)
         if self.cutoff_check_in_offset:
