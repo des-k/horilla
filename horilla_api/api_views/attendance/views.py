@@ -187,7 +187,12 @@ def _log_attendance_request_status_change(attendance: Attendance, request, *, ac
             remark=remark,
         )
     except Exception:
-        pass
+        logger.exception(
+            "Failed to log attendance request status change for request=%s action=%s",
+            getattr(attendance, "id", None),
+            action_type,
+        )
+        raise
 
 def _is_attendance_exempt_manager(employee) -> bool:
     """Return True if employee should be excluded from IN/OUT attendance.
