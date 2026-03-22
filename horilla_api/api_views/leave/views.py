@@ -792,7 +792,7 @@ class LeaveRequestRejectAPIView(APIView):
         except LeaveRequest.DoesNotExist as e:
             raise serializers.ValidationError(e)
 
-    def leave_calculation(self, leave_request, employee_id):
+    def leave_calculation(self, leave_request, employee_id, reject_reason=""):
         leave_type_id = leave_request.leave_type_id
         available_leave = AvailableLeave.objects.get(
             leave_type_id=leave_type_id, employee_id=employee_id
@@ -803,14 +803,17 @@ class LeaveRequestRejectAPIView(APIView):
         leave_request.approved_available_days = 0
         leave_request.approved_carryforward_days = 0
         leave_request.status = "rejected"
+        if hasattr(leave_request, "reject_reason"):
+            leave_request.reject_reason = (reject_reason or "").strip()
         leave_request.save()
 
     @manager_permission_required("leave.change_leaverequest")
     def put(self, request, pk):
         leave_request = self.get_leave_request(pk)
         employee_id = request.user.employee_get
+        reject_reason = (request.data.get("reason") or "").strip() if hasattr(request, "data") else ""
         if leave_request.status != "rejected":
-            self.leave_calculation(leave_request, employee_id)
+            self.leave_calculation(leave_request, employee_id, reject_reason=reject_reason)
             with contextlib.suppress(Exception):
                 notify.send(
                     request.user.employee_get,
