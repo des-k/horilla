@@ -41,6 +41,7 @@ from attendance.methods.utils import Request
 from attendance.models import AttendanceActivity
 from attendance.views.clock_in_out import clock_in, clock_out
 from attendance.services.punching_history import (
+    _biometric_replay_window_start,
     create_biometric_punch_history,
     humanize_biometric_error,
     reconcile_single_punch_against_attendance,
@@ -2466,15 +2467,15 @@ def zk_biometric_attendance_logs(device_or_devices):
 
             last_attendance_datetime = attendances[-1].timestamp
 
-            if device.last_fetch_date and device.last_fetch_time:
+            replay_window_start = _biometric_replay_window_start(
+                device.last_fetch_date,
+                device.last_fetch_time,
+            )
+            if replay_window_start is not None:
                 filtered = [
                     att
                     for att in attendances
-                    if (att.timestamp.date() > device.last_fetch_date)
-                    or (
-                        att.timestamp.date() == device.last_fetch_date
-                        and att.timestamp.time() > device.last_fetch_time
-                    )
+                    if att.timestamp >= replay_window_start
                 ]
             else:
                 filtered = attendances
