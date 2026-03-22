@@ -634,6 +634,43 @@ def create_mobile_punch_history(
     return instance
 
 
+
+
+def _biometric_replay_window_start(last_fetch_date, last_fetch_time, *, overlap_seconds: int = 120):
+    if not last_fetch_date or not last_fetch_time:
+        return None
+    return datetime.combine(last_fetch_date, last_fetch_time) - timedelta(seconds=max(0, overlap_seconds))
+
+
+def _matching_biometric_duplicate(
+    *,
+    device,
+    punch_timestamp: datetime,
+    direction: str,
+    employee=None,
+    raw_employee_identifier: Optional[str] = None,
+    punch_code: Optional[str] = None,
+):
+    device_info = (getattr(device, "name", None) or "-")[:255]
+    queryset = AttendancePunchingHistory.objects.filter(
+        source=AttendancePunchSource.BIOMETRIC,
+        punch_timestamp=punch_timestamp,
+        punch_direction=direction or AttendancePunchDirection.UNKNOWN,
+        device_info=device_info,
+    )
+    if employee is not None:
+        queryset = queryset.filter(employee_id=employee)
+    if raw_employee_identifier is not None:
+        queryset = queryset.filter(raw_employee_identifier=raw_employee_identifier)
+
+    expected_code = "" if punch_code is None else str(punch_code).strip()
+    for candidate in queryset.order_by("-id")[:5]:
+        payload = candidate.raw_payload if isinstance(candidate.raw_payload, dict) else {}
+        existing_code = "" if payload.get("punch_code") is None else str(payload.get("punch_code")).strip()
+        if existing_code == expected_code:
+            return candidate
+    return None
+
 def create_biometric_punch_history(
     *,
     device,
@@ -647,15 +684,28 @@ def create_biometric_punch_history(
     raw_payload: Optional[dict] = None,
 ) -> AttendancePunchingHistory:
     punch_timestamp = punch_timestamp or timezone.localtime(timezone.now())
+    normalized_direction = direction or AttendancePunchDirection.UNKNOWN
     payload = {"punch_code": punch_code, "device_id": str(getattr(device, "id", ""))}
     if raw_payload:
         payload["raw"] = raw_payload
+
+    duplicate = _matching_biometric_duplicate(
+        device=device,
+        punch_timestamp=punch_timestamp,
+        direction=normalized_direction,
+        employee=employee,
+        raw_employee_identifier=raw_employee_identifier,
+        punch_code=punch_code,
+    )
+    if duplicate:
+        return duplicate
+
     instance = AttendancePunchingHistory.objects.create(
         employee_id=employee,
         attendance_date=attendance_date,
         punch_timestamp=punch_timestamp,
         source=AttendancePunchSource.BIOMETRIC,
-        punch_direction=direction or AttendancePunchDirection.UNKNOWN,
+        punch_direction=normalized_direction,
         device_info=(getattr(device, "name", None) or "-")[:255],
         accepted_to_attendance=False,
         reason=reason,
