@@ -1726,8 +1726,8 @@ class AttendanceLateComeEarlyOut(HorillaModel):
         return self.penaltyaccounts_set.count()
 
     def save(self, *args, **kwargs) -> None:
-        super().save(*args, **kwargs)
-        self.employee_id = self.attendance_id.employee_id
+        if self.attendance_id_id:
+            self.employee_id = self.attendance_id.employee_id
         super().save(*args, **kwargs)
 
     class Meta:
