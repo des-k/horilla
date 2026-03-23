@@ -146,7 +146,7 @@
                 {% if r.can_reject_document %}
                   <button class="oh-btn oh-btn--danger"
                     hx-post="{% url 'attendance-work-type-request-document-action' r.id 'reject' %}"
-                    hx-vals='js:{remark: prompt("{% trans "Enter document rejection remark:" %}") || ""}'
+                    hx-vals='js:{remark:(function(){const v = prompt("{% trans "Enter document rejection remark:" %}") || ""; if(!v.trim()){ alert("{% trans "Document rejection reason is required." %}"); throw new Error("document-reject-reason-required"); } return v; })()}'
                     hx-target="#ohMessages" hx-swap="innerHTML" onclick="event.preventDefault()" title="{% trans 'Reject current document version' %}">
                     <ion-icon name="close-circle-outline"></ion-icon>
                   </button>
