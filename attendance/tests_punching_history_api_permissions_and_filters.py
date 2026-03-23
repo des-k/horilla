@@ -1,12 +1,13 @@
-from datetime import datetime
+from datetime import date, datetime
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.test import SimpleTestCase
 from django.utils import timezone
-from rest_framework.test import APIRequestFactory, force_authenticate
+from rest_framework.test import APITestCase, APIRequestFactory, force_authenticate
 
-from attendance.models import AttendancePunchSource
+from attendance.models import Attendance, AttendancePunchDirection, AttendancePunchSource, AttendancePunchingHistory, PunchDecisionStatus
+from attendance.tests_api_integration_base import AttendanceApiIntegrationMixin
 from horilla_api.api_views.attendance import views as api_views
 
 
@@ -117,3 +118,137 @@ class AttendancePunchingHistoryApiPermissionsAndFiltersTests(SimpleTestCase):
         ids = [item["id"] for item in response.data["results"]]
         self.assertEqual(ids, [21, 21])
         self.assertEqual(len(set(ids)), 1, "Duplicate raw rows would point to the same underlying event id")
+
+
+
+class AttendancePunchingHistoryApiIntegrationTests(AttendanceApiIntegrationMixin, APITestCase):
+    def _call(self, user, params=None):
+        request = self.factory.get('/api/attendance/punching-history/', params or {})
+        force_authenticate(request, user=user)
+        return api_views.AttendancePunchingHistoryAPIView.as_view()(request)
+
+    def test_punching_history_blocks_cross_employee_access(self):
+        owner_user, owner = self.create_employee('Owner')
+        _, outsider = self.create_employee('Outsider')
+        owner_punch = AttendancePunchingHistory.objects.create(
+            employee_id=owner,
+            attendance_date=timezone.localdate(),
+            punch_timestamp=timezone.make_aware(datetime(2026, 3, 14, 8, 0)),
+            source=AttendancePunchSource.MOBILE,
+            punch_direction=AttendancePunchDirection.IN,
+            accepted_to_attendance=True,
+            decision_status=PunchDecisionStatus.ACCEPTED,
+        )
+        AttendancePunchingHistory.objects.create(
+            employee_id=outsider,
+            attendance_date=timezone.localdate(),
+            punch_timestamp=timezone.make_aware(datetime(2026, 3, 14, 9, 0)),
+            source=AttendancePunchSource.BIOMETRIC,
+            punch_direction=AttendancePunchDirection.IN,
+        )
+
+        response = self._call(
+            owner_user,
+            params={'start_date': '2026-03-14', 'end_date': '2026-03-14', 'employee_id': outsider.id},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([item['id'] for item in response.data['results']], [owner_punch.id])
+        self.assertEqual(response.data['selected_employee_id'], owner.id)
+        self.assertFalse(response.data['show_employee_filter'])
+
+    def test_punching_history_manager_scope_is_subordinate_only(self):
+        manager_user, manager = self.create_employee('Manager')
+        _, subordinate = self.create_employee('Subordinate', manager=manager)
+        _, outsider = self.create_employee('Outsider')
+        subordinate_punch = AttendancePunchingHistory.objects.create(
+            employee_id=subordinate,
+            attendance_date=timezone.localdate(),
+            punch_timestamp=timezone.make_aware(datetime(2026, 3, 15, 9, 0)),
+            source=AttendancePunchSource.BIOMETRIC,
+            punch_direction=AttendancePunchDirection.IN,
+        )
+        AttendancePunchingHistory.objects.create(
+            employee_id=outsider,
+            attendance_date=timezone.localdate(),
+            punch_timestamp=timezone.make_aware(datetime(2026, 3, 15, 10, 0)),
+            source=AttendancePunchSource.MOBILE,
+            punch_direction=AttendancePunchDirection.IN,
+        )
+
+        response = self._call(
+            manager_user,
+            params={'start_date': '2026-03-15', 'end_date': '2026-03-15', 'employee_id': 'all'},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([item['id'] for item in response.data['results']], [subordinate_punch.id])
+        self.assertTrue(response.data['show_employee_filter'])
+        self.assertEqual({str(item['id']) for item in response.data['employee_options']}, {'all', str(manager.id), str(subordinate.id)})
+
+    def test_punching_history_filters_by_source_and_date_range(self):
+        admin_user, _ = self.create_employee('Admin', is_superuser=True)
+        owner_user, owner = self.create_employee('Owner')
+        AttendancePunchingHistory.objects.create(
+            employee_id=owner,
+            attendance_date=timezone.localdate(),
+            punch_timestamp=timezone.make_aware(datetime(2026, 3, 14, 8, 0)),
+            source=AttendancePunchSource.MOBILE,
+            punch_direction=AttendancePunchDirection.IN,
+        )
+        expected = AttendancePunchingHistory.objects.create(
+            employee_id=owner,
+            attendance_date=timezone.localdate(),
+            punch_timestamp=timezone.make_aware(datetime(2026, 3, 15, 9, 0)),
+            source=AttendancePunchSource.BIOMETRIC,
+            punch_direction=AttendancePunchDirection.OUT,
+        )
+
+        response = self._call(
+            admin_user,
+            params={
+                'employee_id': owner.id,
+                'start_date': '2026-03-15',
+                'end_date': '2026-03-15',
+                'source': AttendancePunchSource.BIOMETRIC,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([item['id'] for item in response.data['results']], [expected.id])
+        self.assertEqual(response.data['results'][0]['source'], 'Biometric')
+
+    def test_raw_punch_history_remains_visible_after_attendance_override(self):
+        owner_user, owner = self.create_employee('Owner')
+        attendance = Attendance.objects.create(
+            employee_id=owner,
+            attendance_date=date(2026, 3, 16),
+            attendance_clock_in_date=date(2026, 3, 16),
+            attendance_clock_in=datetime(2026, 3, 16, 8, 5).time(),
+        )
+        raw_punch = AttendancePunchingHistory.objects.create(
+            employee_id=owner,
+            attendance_id=attendance,
+            attendance_date=date(2026, 3, 16),
+            punch_timestamp=timezone.make_aware(datetime(2026, 3, 16, 8, 5)),
+            source=AttendancePunchSource.MOBILE,
+            punch_direction=AttendancePunchDirection.IN,
+            accepted_to_attendance=False,
+            decision_status=PunchDecisionStatus.NOT_ACCEPTED,
+            reason='raw mobile punch',
+        )
+        attendance.is_validate_request = False
+        attendance.is_validate_request_approved = True
+        attendance.request_type = 'update_request'
+        attendance.attendance_clock_in = datetime(2026, 3, 16, 9, 30).time()
+        attendance.save(update_fields=['is_validate_request', 'is_validate_request_approved', 'request_type', 'attendance_clock_in'])
+
+        response = self._call(
+            owner_user,
+            params={'start_date': '2026-03-16', 'end_date': '2026-03-16'},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([item['id'] for item in response.data['results']], [raw_punch.id])
+        self.assertFalse(response.data['results'][0]['accepted_to_attendance'])
+        self.assertEqual(response.data['results'][0]['reason'], 'raw mobile punch')
