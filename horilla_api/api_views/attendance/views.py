@@ -30,6 +30,7 @@ from geofencing.policy import geofencing_is_effectively_enabled
 
 logger = logging.getLogger(__name__)
 
+from attendance.filters import AttendanceActivityFilter
 from attendance.models import (
     Attendance,
     AttendanceActivity,
@@ -2458,6 +2459,7 @@ class AttendanceActivityView(APIView):
             serializer = AttendanceActivitySerializer(activity)
             return Response(serializer.data, status=200)
 
+        queryset = AttendanceActivityFilter(request.GET, queryset=queryset).qs
         serializer = AttendanceActivitySerializer(queryset.order_by("-attendance_date", "-id"), many=True)
         return Response(serializer.data, status=200)
 
