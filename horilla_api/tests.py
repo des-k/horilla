@@ -404,6 +404,9 @@ class MobileAttendanceActionParityTests(SimpleTestCase):
             "horilla_api.api_views.attendance.views.employee_exists",
             return_value=(self.employee, SimpleNamespace(shift_id="SHIFT-A")),
         ), patch(
+            "horilla_api.api_views.attendance.views.evaluate_attendance_access",
+            return_value=self.access,
+        ), patch(
             "horilla_api.api_views.attendance.views.create_mobile_punch_history",
             side_effect=ValidationError("Invalid image file."),
         ), patch("horilla_api.api_views.attendance.views.clock_in_attendance_and_activity", clock_in_attendance):
