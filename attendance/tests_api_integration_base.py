@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from django.contrib.auth.models import Permission, User
-from rest_framework.test import APIRequestFactory
+from rest_framework.test import APIClient, APIRequestFactory
 
 from base.models import Company
 from employee.models import Employee, EmployeeWorkInformation
@@ -65,3 +65,8 @@ class AttendanceApiIntegrationMixin:
             },
         )
         return user, employee
+    def auth_client(self, user):
+        client = APIClient()
+        client.force_authenticate(user=user)
+        return client
+
