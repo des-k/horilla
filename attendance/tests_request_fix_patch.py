@@ -485,6 +485,8 @@ class AttendanceRequestApiFlowTests(SimpleTestCase):
             "horilla_api.api_views.attendance.views.recompute_attendance",
             return_value=None,
         ), patch(
+            "horilla_api.api_views.attendance.views._log_attendance_request_status_change"
+        ), patch(
             "horilla_api.api_views.attendance.views.AttendanceRequestSerializer",
             return_value=SimpleNamespace(data={"status": "REVOKED"}),
         ):
