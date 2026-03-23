@@ -300,3 +300,27 @@ class COSECAttendanceArguments(models.Model):
 
     def __str__(self):
         return f"{self.device_id} - {self.last_fetch_roll_ovr_count} - {self.last_fetch_seq_number}"
+
+
+class BiometricEventKey(models.Model):
+    """Internal DB-level idempotency ledger for raw biometric intake events."""
+
+    event_key = models.CharField(max_length=255, unique=True, verbose_name=_("Event Key"))
+    vendor = models.CharField(max_length=32, verbose_name=_("Vendor"))
+    device = models.ForeignKey(
+        BiometricDevices, on_delete=models.CASCADE, null=True, blank=True, verbose_name=_("Device")
+    )
+    raw_employee_identifier = models.CharField(max_length=128, verbose_name=_("Raw Employee Identifier"))
+    punch_timestamp = models.DateTimeField(verbose_name=_("Punch Timestamp"))
+    raw_punch_code = models.CharField(max_length=64, null=True, blank=True, verbose_name=_("Raw Punch Code"))
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name=_("Created At"))
+
+    objects = models.Manager()
+
+    class Meta:
+        verbose_name = _("Biometric Event Key")
+        verbose_name_plural = _("Biometric Event Keys")
+        ordering = ["-created_at", "-id"]
+
+    def __str__(self):
+        return self.event_key
