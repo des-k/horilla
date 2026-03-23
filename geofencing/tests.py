@@ -32,6 +32,8 @@ def _fake_render(_request, template_name, context):
 
 
 class GeofencingPolicyTests(SimpleTestCase):
+    databases = {'default'}
+
     def setUp(self):
         self.factory = RequestFactory()
         self.api_factory = APIRequestFactory()
