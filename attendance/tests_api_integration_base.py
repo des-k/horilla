@@ -1,15 +1,24 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from django.contrib.auth.models import Permission, User
 from rest_framework.test import APIClient, APIRequestFactory
 
 from base.models import Company
 from employee.models import Employee, EmployeeWorkInformation
+from horilla.horilla_middlewares import _thread_locals
 
 
 class AttendanceApiIntegrationMixin:
+    @staticmethod
+    def _clear_request_context():
+        if hasattr(_thread_locals, 'request'):
+            delattr(_thread_locals, 'request')
+
     @classmethod
     def setUpTestData(cls):
+        cls._clear_request_context()
         super_method = getattr(super(), 'setUpTestData', None)
         if callable(super_method):
             super_method()
@@ -23,12 +32,20 @@ class AttendanceApiIntegrationMixin:
             is_default=True,
         )
         cls._employee_seq = 0
+        cls._clear_request_context()
 
     def setUp(self):
+        self._clear_request_context()
         super_method = getattr(super(), 'setUp', None)
         if callable(super_method):
             super_method()
         self.factory = APIRequestFactory()
+
+    def tearDown(self):
+        self._clear_request_context()
+        super_method = getattr(super(), 'tearDown', None)
+        if callable(super_method):
+            super_method()
 
     @classmethod
     def _next_seq(cls) -> int:
@@ -36,6 +53,7 @@ class AttendanceApiIntegrationMixin:
         return cls._employee_seq
 
     def create_employee(self, first_name, *, manager=None, is_superuser=False, permissions=None):
+        self._clear_request_context()
         seq = self.__class__._next_seq()
         username = f'{first_name.lower()}_{seq}'
         user = User.objects.create_user(
@@ -64,9 +82,18 @@ class AttendanceApiIntegrationMixin:
                 'reporting_manager_id': manager,
             },
         )
+        self._clear_request_context()
         return user, employee
+
     def auth_client(self, user):
+        self._clear_request_context()
         client = APIClient()
         client.force_authenticate(user=user)
         return client
+
+    def auth_request(self, user):
+        self._clear_request_context()
+        request = SimpleNamespace(user=user)
+        _thread_locals.request = request
+        return request
 
