@@ -681,7 +681,10 @@ def _register_biometric_event_key(*, device, raw_employee_identifier: Optional[s
         "raw_punch_code": (_normalize_biometric_raw_value(punch_code) or None),
     }
     try:
-        BiometricEventKey.objects.create(event_key=event_key, **defaults)
+        # Use an inner savepoint so duplicate-key collisions do not poison the
+        # surrounding transaction before we can look up an existing visible row.
+        with transaction.atomic():
+            BiometricEventKey.objects.create(event_key=event_key, **defaults)
         return event_key, False
     except IntegrityError:
         return event_key, True
