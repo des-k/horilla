@@ -5,8 +5,11 @@ from datetime import date, datetime, time, timedelta
 from typing import Optional
 
 from django.core.files.base import ContentFile
+from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.utils import timezone
+
+from biometric.models import BiometricEventKey, BiometricDevices
 
 from attendance.models import (
     Attendance,
@@ -642,11 +645,52 @@ def _biometric_replay_window_start(last_fetch_date, last_fetch_time, *, overlap_
     return datetime.combine(last_fetch_date, last_fetch_time) - timedelta(seconds=max(0, overlap_seconds))
 
 
+def _normalize_biometric_raw_value(value: Optional[object]) -> str:
+    return str(value or "").strip()
+
+
+def build_biometric_event_key(*, vendor: Optional[str], device_id: Optional[object], raw_employee_identifier: Optional[object], punch_timestamp: datetime, raw_punch_code: Optional[object]) -> str:
+    normalized_timestamp = punch_timestamp
+    if timezone.is_naive(normalized_timestamp):
+        normalized_timestamp = timezone.make_aware(normalized_timestamp, timezone.get_current_timezone())
+    normalized_timestamp = normalized_timestamp.astimezone(timezone.utc)
+    timestamp_text = normalized_timestamp.replace(microsecond=0).isoformat()
+    return "|".join([
+        _normalize_biometric_raw_value(vendor).lower(),
+        _normalize_biometric_raw_value(device_id),
+        _normalize_biometric_raw_value(raw_employee_identifier),
+        timestamp_text,
+        _normalize_biometric_raw_value(raw_punch_code),
+    ])
+
+
+def _register_biometric_event_key(*, device, raw_employee_identifier: Optional[str], punch_timestamp: datetime, punch_code: Optional[str]):
+    vendor = getattr(device, "machine_type", None) or getattr(device, "vendor", None) or AttendancePunchSource.BIOMETRIC
+    event_key = build_biometric_event_key(
+        vendor=vendor,
+        device_id=getattr(device, "id", None),
+        raw_employee_identifier=raw_employee_identifier,
+        punch_timestamp=punch_timestamp,
+        raw_punch_code=punch_code,
+    )
+    defaults = {
+        "vendor": _normalize_biometric_raw_value(vendor)[:32],
+        "device": device if isinstance(device, BiometricDevices) else None,
+        "raw_employee_identifier": _normalize_biometric_raw_value(raw_employee_identifier)[:128],
+        "punch_timestamp": punch_timestamp,
+        "raw_punch_code": (_normalize_biometric_raw_value(punch_code) or None),
+    }
+    try:
+        BiometricEventKey.objects.create(event_key=event_key, **defaults)
+        return event_key, False
+    except IntegrityError:
+        return event_key, True
+
+
 def _matching_biometric_duplicate(
     *,
     device,
     punch_timestamp: datetime,
-    direction: str,
     employee=None,
     raw_employee_identifier: Optional[str] = None,
     punch_code: Optional[str] = None,
@@ -655,7 +699,6 @@ def _matching_biometric_duplicate(
     queryset = AttendancePunchingHistory.objects.filter(
         source=AttendancePunchSource.BIOMETRIC,
         punch_timestamp=punch_timestamp,
-        punch_direction=direction or AttendancePunchDirection.UNKNOWN,
         device_info=device_info,
     )
     if employee is not None:
@@ -689,33 +732,41 @@ def create_biometric_punch_history(
     if raw_payload:
         payload["raw"] = raw_payload
 
-    duplicate = _matching_biometric_duplicate(
-        device=device,
-        punch_timestamp=punch_timestamp,
-        direction=normalized_direction,
-        employee=employee,
-        raw_employee_identifier=raw_employee_identifier,
-        punch_code=punch_code,
-    )
-    if duplicate:
-        return duplicate
+    with transaction.atomic():
+        event_key, is_duplicate_event = _register_biometric_event_key(
+            device=device,
+            raw_employee_identifier=raw_employee_identifier,
+            punch_timestamp=punch_timestamp,
+            punch_code=punch_code,
+        )
+        if is_duplicate_event:
+            duplicate = _matching_biometric_duplicate(
+                device=device,
+                punch_timestamp=punch_timestamp,
+                employee=employee,
+                raw_employee_identifier=raw_employee_identifier,
+                punch_code=punch_code,
+            )
+            if duplicate:
+                return duplicate
 
-    instance = AttendancePunchingHistory.objects.create(
-        employee_id=employee,
-        attendance_date=attendance_date,
-        punch_timestamp=punch_timestamp,
-        source=AttendancePunchSource.BIOMETRIC,
-        punch_direction=normalized_direction,
-        device_info=(getattr(device, "name", None) or "-")[:255],
-        accepted_to_attendance=False,
-        reason=reason,
-        raw_payload=payload,
-        raw_employee_identifier=raw_employee_identifier,
-    )
-    return instance
+        instance = AttendancePunchingHistory.objects.create(
+            employee_id=employee,
+            attendance_date=attendance_date,
+            punch_timestamp=punch_timestamp,
+            source=AttendancePunchSource.BIOMETRIC,
+            punch_direction=normalized_direction,
+            device_info=(getattr(device, "name", None) or "-")[:255],
+            accepted_to_attendance=False,
+            reason=reason,
+            raw_payload={**payload, "event_key": event_key},
+            raw_employee_identifier=raw_employee_identifier,
+        )
+        return instance
 
 
 def update_punch_history(
+
     punch: Optional[AttendancePunchingHistory],
     *,
     accepted: Optional[bool] = None,
