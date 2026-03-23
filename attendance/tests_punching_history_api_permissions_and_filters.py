@@ -40,20 +40,20 @@ class _FakePunchQuerySet(list):
             attr = key[1:] if reverse else key
             if attr == "punch_timestamp":
                 items.sort(key=lambda item: item.punch_timestamp, reverse=reverse)
-            elif attr == "id":
-                items.sort(key=lambda item: item.id, reverse=reverse)
+            else:
+                items.sort(key=lambda item: getattr(item, attr), reverse=reverse)
         return _FakePunchQuerySet(items)
 
 
 class AttendancePunchingHistoryApiPermissionsAndFiltersTests(SimpleTestCase):
     def setUp(self):
         self.factory = APIRequestFactory()
-        self.owner = SimpleNamespace(id=2, employee_first_name="Owner", employee_last_name="User")
-        self.subordinate = SimpleNamespace(id=3, employee_first_name="Sub", employee_last_name="User")
-        self.outsider = SimpleNamespace(id=4, employee_first_name="Out", employee_last_name="User")
-        self.owner_user = SimpleNamespace(is_authenticated=True, employee_get=self.owner, is_superuser=False, has_perm=lambda perm: False)
-        self.manager_user = SimpleNamespace(is_authenticated=True, employee_get=SimpleNamespace(id=1), is_superuser=False, has_perm=lambda perm: False)
-        self.admin_user = SimpleNamespace(is_authenticated=True, employee_get=SimpleNamespace(id=99), is_superuser=True, has_perm=lambda perm: True)
+        self.owner = SimpleNamespace(id=1)
+        self.subordinate = SimpleNamespace(id=2)
+        self.outsider = SimpleNamespace(id=3)
+        self.owner_user = SimpleNamespace(is_authenticated=True, employee_get=self.owner, has_perm=lambda perm: False, is_superuser=False)
+        self.manager_user = SimpleNamespace(is_authenticated=True, employee_get=self.owner, has_perm=lambda perm: False, is_superuser=False)
+        self.admin_user = SimpleNamespace(is_authenticated=True, employee_get=self.owner, has_perm=lambda perm: True, is_superuser=True)
         self.records = _FakePunchQuerySet([
             SimpleNamespace(id=21, employee_id=self.owner, punch_timestamp=timezone.make_aware(datetime(2026, 3, 14, 8, 0)), source=AttendancePunchSource.MOBILE, accepted_to_attendance=True),
             SimpleNamespace(id=22, employee_id=self.subordinate, punch_timestamp=timezone.make_aware(datetime(2026, 3, 15, 9, 0)), source=AttendancePunchSource.BIOMETRIC, accepted_to_attendance=False),
@@ -120,19 +120,21 @@ class AttendancePunchingHistoryApiPermissionsAndFiltersTests(SimpleTestCase):
         self.assertEqual(len(set(ids)), 1, "Duplicate raw rows would point to the same underlying event id")
 
 
-
 class AttendancePunchingHistoryApiIntegrationTests(AttendanceApiIntegrationMixin, APITestCase):
+    endpoint = '/api/attendance/punching-history/'
+
     def _call(self, user, params=None):
-        request = self.factory.get('/api/attendance/punching-history/', params or {})
-        force_authenticate(request, user=user)
-        return api_views.AttendancePunchingHistoryAPIView.as_view()(request)
+        return self.auth_client(user).get(self.endpoint, params or {}, format='json')
+
+    def _json(self, response):
+        return response.json()
 
     def test_punching_history_blocks_cross_employee_access(self):
         owner_user, owner = self.create_employee('Owner')
         _, outsider = self.create_employee('Outsider')
         owner_punch = AttendancePunchingHistory.objects.create(
             employee_id=owner,
-            attendance_date=timezone.localdate(),
+            attendance_date=date(2026, 3, 14),
             punch_timestamp=timezone.make_aware(datetime(2026, 3, 14, 8, 0)),
             source=AttendancePunchSource.MOBILE,
             punch_direction=AttendancePunchDirection.IN,
@@ -141,7 +143,7 @@ class AttendancePunchingHistoryApiIntegrationTests(AttendanceApiIntegrationMixin
         )
         AttendancePunchingHistory.objects.create(
             employee_id=outsider,
-            attendance_date=timezone.localdate(),
+            attendance_date=date(2026, 3, 14),
             punch_timestamp=timezone.make_aware(datetime(2026, 3, 14, 9, 0)),
             source=AttendancePunchSource.BIOMETRIC,
             punch_direction=AttendancePunchDirection.IN,
@@ -151,11 +153,12 @@ class AttendancePunchingHistoryApiIntegrationTests(AttendanceApiIntegrationMixin
             owner_user,
             params={'start_date': '2026-03-14', 'end_date': '2026-03-14', 'employee_id': outsider.id},
         )
+        data = self._json(response)
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual([item['id'] for item in response.data['results']], [owner_punch.id])
-        self.assertEqual(response.data['selected_employee_id'], owner.id)
-        self.assertFalse(response.data['show_employee_filter'])
+        self.assertEqual([item['id'] for item in data['results']], [owner_punch.id])
+        self.assertEqual(data['selected_employee_id'], owner.id)
+        self.assertFalse(data['show_employee_filter'])
 
     def test_punching_history_manager_scope_is_subordinate_only(self):
         manager_user, manager = self.create_employee('Manager')
@@ -163,14 +166,14 @@ class AttendancePunchingHistoryApiIntegrationTests(AttendanceApiIntegrationMixin
         _, outsider = self.create_employee('Outsider')
         subordinate_punch = AttendancePunchingHistory.objects.create(
             employee_id=subordinate,
-            attendance_date=timezone.localdate(),
+            attendance_date=date(2026, 3, 15),
             punch_timestamp=timezone.make_aware(datetime(2026, 3, 15, 9, 0)),
             source=AttendancePunchSource.BIOMETRIC,
             punch_direction=AttendancePunchDirection.IN,
         )
         AttendancePunchingHistory.objects.create(
             employee_id=outsider,
-            attendance_date=timezone.localdate(),
+            attendance_date=date(2026, 3, 15),
             punch_timestamp=timezone.make_aware(datetime(2026, 3, 15, 10, 0)),
             source=AttendancePunchSource.MOBILE,
             punch_direction=AttendancePunchDirection.IN,
@@ -180,25 +183,29 @@ class AttendancePunchingHistoryApiIntegrationTests(AttendanceApiIntegrationMixin
             manager_user,
             params={'start_date': '2026-03-15', 'end_date': '2026-03-15', 'employee_id': 'all'},
         )
+        data = self._json(response)
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual([item['id'] for item in response.data['results']], [subordinate_punch.id])
-        self.assertTrue(response.data['show_employee_filter'])
-        self.assertEqual({str(item['id']) for item in response.data['employee_options']}, {'all', str(manager.id), str(subordinate.id)})
+        self.assertEqual([item['id'] for item in data['results']], [subordinate_punch.id])
+        self.assertTrue(data['show_employee_filter'])
+        self.assertEqual(
+            {str(item['id']) for item in data['employee_options']},
+            {'all', str(manager.id), str(subordinate.id)},
+        )
 
     def test_punching_history_filters_by_source_and_date_range(self):
         admin_user, _ = self.create_employee('Admin', is_superuser=True)
-        owner_user, owner = self.create_employee('Owner')
+        _, owner = self.create_employee('Owner')
         AttendancePunchingHistory.objects.create(
             employee_id=owner,
-            attendance_date=timezone.localdate(),
+            attendance_date=date(2026, 3, 14),
             punch_timestamp=timezone.make_aware(datetime(2026, 3, 14, 8, 0)),
             source=AttendancePunchSource.MOBILE,
             punch_direction=AttendancePunchDirection.IN,
         )
         expected = AttendancePunchingHistory.objects.create(
             employee_id=owner,
-            attendance_date=timezone.localdate(),
+            attendance_date=date(2026, 3, 15),
             punch_timestamp=timezone.make_aware(datetime(2026, 3, 15, 9, 0)),
             source=AttendancePunchSource.BIOMETRIC,
             punch_direction=AttendancePunchDirection.OUT,
@@ -213,10 +220,12 @@ class AttendancePunchingHistoryApiIntegrationTests(AttendanceApiIntegrationMixin
                 'source': AttendancePunchSource.BIOMETRIC,
             },
         )
+        data = self._json(response)
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual([item['id'] for item in response.data['results']], [expected.id])
-        self.assertEqual(response.data['results'][0]['source'], 'Biometric')
+        self.assertEqual([item['id'] for item in data['results']], [expected.id])
+        self.assertEqual(data['results'][0]['source'], 'Biometric')
+        self.assertEqual(data['results'][0]['punch_date'], '2026-03-15')
 
     def test_raw_punch_history_remains_visible_after_attendance_override(self):
         owner_user, owner = self.create_employee('Owner')
@@ -247,8 +256,10 @@ class AttendancePunchingHistoryApiIntegrationTests(AttendanceApiIntegrationMixin
             owner_user,
             params={'start_date': '2026-03-16', 'end_date': '2026-03-16'},
         )
+        data = self._json(response)
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual([item['id'] for item in response.data['results']], [raw_punch.id])
-        self.assertFalse(response.data['results'][0]['accepted_to_attendance'])
-        self.assertEqual(response.data['results'][0]['reason'], 'raw mobile punch')
+        self.assertEqual([item['id'] for item in data['results']], [raw_punch.id])
+        self.assertFalse(data['results'][0]['accepted_to_attendance'])
+        self.assertEqual(data['results'][0]['reason'], 'raw mobile punch')
+        self.assertTrue(AttendancePunchingHistory.objects.filter(id=raw_punch.id).exists())
