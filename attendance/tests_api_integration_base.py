@@ -107,7 +107,7 @@ class AttendanceApiIntegrationMixin:
         second_half_earliest_check_out_time: time | None = None,
     ):
         seq = self.__class__._next_shift_seq()
-        day_obj = EmployeeShiftDay.objects.create(day=day_key)
+        day_obj, _ = EmployeeShiftDay.objects.get_or_create(day=day_key)
         day_obj.company_id.add(self.company)
 
         shift = EmployeeShift.objects.create(employee_shift=f'SHIFT-{seq}')
@@ -156,6 +156,7 @@ class AttendanceApiIntegrationMixin:
             user=user,
             session={'selected_company': selected_company},
             is_filtering=False,
+            POST={},
         )
         _thread_locals.request = request
         return request
