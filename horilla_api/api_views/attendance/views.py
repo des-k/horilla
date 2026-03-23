@@ -719,6 +719,13 @@ class ClockInAPIView(APIView):
                 update_punch_history(punch_log, accepted=False, reason=humanize_mobile_error(message, direction="in"))
             return Response({"error": message}, status=http_status)
 
+        if not employee or work_info is None:
+            return Response({"error": "Missing work information or employee details."}, status=status.HTTP_400_BAD_REQUEST)
+
+        access = evaluate_attendance_access(employee=employee, user=getattr(request, "user", None))
+        if not access.allowed:
+            return Response({"error": access.message or "Attendance is disabled for this employee."}, status=status.HTTP_403_FORBIDDEN)
+
         try:
             punch_log = create_mobile_punch_history(
                 request=request,
@@ -732,14 +739,6 @@ class ClockInAPIView(APIView):
             )
         except ValidationError as error:
             return Response({"error": _extract_error_message(error)}, status=status.HTTP_400_BAD_REQUEST)
-
-        if not employee or work_info is None:
-            return _reject("Missing work information or employee details.", status.HTTP_400_BAD_REQUEST)
-
-        access = evaluate_attendance_access(employee=employee, user=getattr(request, "user", None))
-        if not access.allowed:
-            update_punch_history(punch_log, attendance_date=dt_now.date())
-            return _reject(access.message or "Attendance is disabled for this employee.", status.HTTP_403_FORBIDDEN)
 
         shift = work_info.shift_id
         date_today = _api_today(request, dt_now)
@@ -886,6 +885,13 @@ class ClockOutAPIView(APIView):
                 )
             return Response({"error": message}, status=http_status)
 
+        if not employee or work_info is None:
+            return Response({"error": "Missing work information or employee details."}, status=status.HTTP_400_BAD_REQUEST)
+
+        access = evaluate_attendance_access(employee=employee, user=getattr(request, "user", None))
+        if not access.allowed:
+            return Response({"error": access.message or "Attendance is disabled for this employee."}, status=status.HTTP_403_FORBIDDEN)
+
         try:
             punch_log = create_mobile_punch_history(
                 request=request,
@@ -899,14 +905,6 @@ class ClockOutAPIView(APIView):
             )
         except ValidationError as error:
             return Response({"error": _extract_error_message(error)}, status=status.HTTP_400_BAD_REQUEST)
-
-        if not employee or work_info is None:
-            return _reject("Missing work information or employee details.", status.HTTP_400_BAD_REQUEST)
-
-        access = evaluate_attendance_access(employee=employee, user=getattr(request, "user", None))
-        if not access.allowed:
-            update_punch_history(punch_log, attendance_date=dt_now.date())
-            return _reject(access.message or "Attendance is disabled for this employee.", status.HTTP_403_FORBIDDEN)
 
         shift = work_info.shift_id
         attendance_date, day, minimum_hour, start_time_sec, end_time_sec, _, now_sec = _api_resolve_attendance_date_and_day(shift, dt_now)
