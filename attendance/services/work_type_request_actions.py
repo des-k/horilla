@@ -554,7 +554,7 @@ class WorkModeRequestActions:
         version.status = WorkModeRequestDocumentStatus.VERIFIED
         version.reviewed_by = actor
         version.reviewed_at = now_dt
-        version.review_remark = WorkModeRequestActions._remark(remark)
+        version.review_remark = normalized_remark
         version.save(update_fields=["status", "reviewed_by", "reviewed_at", "review_remark"])
         WorkModeRequestActions._apply_current_version_to_request(req, version)
         WorkModeRequestActions._touch_action(req, actor=actor, action_type=WorkModeRequestActionType.VERIFIED, remark=remark, when=now_dt)
@@ -583,6 +583,9 @@ class WorkModeRequestActions:
         version = WorkModeRequestActions._current_version(req)
         if version is None:
             raise WorkModeRequestActionError("No current document version found.")
+        normalized_remark = WorkModeRequestActions._remark(remark)
+        if not normalized_remark:
+            raise WorkModeRequestActionError("Document rejection reason is required.")
         old_status = req.document_status
         version.status = WorkModeRequestDocumentStatus.REJECTED
         version.reviewed_by = actor
@@ -590,9 +593,9 @@ class WorkModeRequestActions:
         version.review_remark = WorkModeRequestActions._remark(remark)
         version.save(update_fields=["status", "reviewed_by", "reviewed_at", "review_remark"])
         WorkModeRequestActions._apply_current_version_to_request(req, version)
-        WorkModeRequestActions._touch_action(req, actor=actor, action_type=WorkModeRequestActionType.DOCUMENT_REJECTED, remark=remark)
+        WorkModeRequestActions._touch_action(req, actor=actor, action_type=WorkModeRequestActionType.DOCUMENT_REJECTED, remark=normalized_remark)
         req.save(update_fields=["current_document_version", "document_status", "document_verified_by", "document_verified_at", "document_remark", "action_by", "action_at", "action_type", "action_reason"])
-        WorkModeRequestActions._audit(req, actor=actor, action_type=WorkModeRequestActionType.DOCUMENT_REJECTED, old_status=f"document:{old_status}", new_status=f"document:{req.document_status}", remark=remark, metadata={"version_number": version.version_number})
+        WorkModeRequestActions._audit(req, actor=actor, action_type=WorkModeRequestActionType.DOCUMENT_REJECTED, old_status=f"document:{old_status}", new_status=f"document:{req.document_status}", remark=normalized_remark, metadata={"version_number": version.version_number})
         WorkModeRequestActions._recompute(req)
         return WorkModeRequestActionResult(request=req, recomputed=True)
 
