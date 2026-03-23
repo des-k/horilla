@@ -91,9 +91,13 @@ class AttendanceApiIntegrationMixin:
         client.force_authenticate(user=user)
         return client
 
-    def auth_request(self, user):
+    def auth_request(self, user, *, selected_company='all'):
         self._clear_request_context()
-        request = SimpleNamespace(user=user)
+        request = SimpleNamespace(
+            user=user,
+            session={'selected_company': selected_company},
+            is_filtering=False,
+        )
         _thread_locals.request = request
         return request
 
