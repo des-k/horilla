@@ -93,15 +93,14 @@ class AttendanceActivityApiAndPermissionsTests(SimpleTestCase):
         self.assertIn("attendance_date_till", AttendanceActivityFilter.Meta.fields)
 
 
-
 class AttendanceActivityApiIntegrationTests(AttendanceApiIntegrationMixin, APITestCase):
-    def _call(self, user, params=None, pk=None):
-        request = self.factory.get('/api/attendance/attendance-activity/', params or {})
-        force_authenticate(request, user=user)
-        view = api_views.AttendanceActivityView.as_view()
-        if pk is not None:
-            return view(request, pk=pk)
-        return view(request)
+    endpoint = '/api/attendance/attendance-activity/'
+
+    def _call(self, user, params=None):
+        return self.auth_client(user).get(self.endpoint, params or {}, format='json')
+
+    def _json(self, response):
+        return response.json()
 
     def test_activity_list_blocks_cross_employee_access_for_regular_employee(self):
         owner_user, owner = self.create_employee('Owner')
@@ -110,10 +109,11 @@ class AttendanceActivityApiIntegrationTests(AttendanceApiIntegrationMixin, APITe
         AttendanceActivity.objects.create(employee_id=outsider, attendance_date=date(2026, 3, 14))
 
         response = self._call(owner_user)
+        data = self._json(response)
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual([item['id'] for item in response.data], [owner_activity.id])
-        self.assertEqual({item['employee_id'] for item in response.data}, {owner.id})
+        self.assertEqual([item['id'] for item in data], [owner_activity.id])
+        self.assertEqual({item['employee_id'] for item in data}, {owner.id})
 
     def test_activity_list_allows_manager_only_for_subordinates(self):
         manager_user, manager = self.create_employee('Manager')
@@ -126,10 +126,11 @@ class AttendanceActivityApiIntegrationTests(AttendanceApiIntegrationMixin, APITe
         AttendanceActivity.objects.create(employee_id=outsider, attendance_date=date(2026, 3, 14))
 
         response = self._call(manager_user)
+        data = self._json(response)
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual([item['id'] for item in response.data], [subordinate_activity.id])
-        self.assertEqual({item['employee_id'] for item in response.data}, {subordinate.id})
+        self.assertEqual([item['id'] for item in data], [subordinate_activity.id])
+        self.assertEqual({item['employee_id'] for item in data}, {subordinate.id})
 
     def test_activity_list_filters_by_employee_and_date_range(self):
         admin_user, _ = self.create_employee('Admin', is_superuser=True)
@@ -147,10 +148,11 @@ class AttendanceActivityApiIntegrationTests(AttendanceApiIntegrationMixin, APITe
                 'attendance_date_till': '2026-03-15',
             },
         )
+        data = self._json(response)
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual([item['id'] for item in response.data], [expected.id])
-        self.assertEqual(response.data[0]['attendance_date'], '2026-03-15')
+        self.assertEqual([item['id'] for item in data], [expected.id])
+        self.assertEqual(data[0]['attendance_date'], '2026-03-15')
 
     def test_activity_sync_after_attendance_request_approve(self):
         owner_user, owner = self.create_employee('Owner')
@@ -164,11 +166,85 @@ class AttendanceActivityApiIntegrationTests(AttendanceApiIntegrationMixin, APITe
             is_validate_request=False,
             is_validate_request_approved=True,
         )
-        activity = sync_single_session_activity(attendance)
+        sync_single_session_activity(attendance)
 
-        response = self._call(owner_user, pk=activity.id)
+        response = self._call(
+            owner_user,
+            params={
+                'employee_id': owner.id,
+                'attendance_date_from': '2026-03-16',
+                'attendance_date_till': '2026-03-16',
+            },
+        )
+        data = self._json(response)
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data['employee_id'], owner.id)
-        self.assertEqual(response.data['clock_in'], '09:30:00')
-        self.assertEqual(response.data['clock_in_channel'], AttendanceChannel.CORRECTION_REQUEST)
+        self.assertEqual(len(data), 1)
+        self.assertEqual(data[0]['employee_id'], owner.id)
+        self.assertEqual(data[0]['clock_in'], '09:30:00')
+        self.assertEqual(data[0]['clock_in_channel'], AttendanceChannel.CORRECTION_REQUEST)
+
+    def test_activity_sync_after_attendance_request_revoke(self):
+        owner_user, owner = self.create_employee('Owner')
+        attendance = Attendance.objects.create(
+            employee_id=owner,
+            attendance_date=date(2026, 3, 17),
+            attendance_clock_in_date=date(2026, 3, 17),
+            attendance_clock_in=time(8, 5),
+            attendance_clock_in_channel=AttendanceChannel.MOBILE,
+            attendance_validated=True,
+        )
+        sync_single_session_activity(attendance)
+
+        attendance.request_type = 'update_request'
+        attendance.is_validate_request = False
+        attendance.is_validate_request_approved = True
+        attendance.attendance_clock_in = time(9, 30)
+        attendance.attendance_clock_in_channel = AttendanceChannel.CORRECTION_REQUEST
+        attendance.save(update_fields=[
+            'request_type',
+            'is_validate_request',
+            'is_validate_request_approved',
+            'attendance_clock_in',
+            'attendance_clock_in_channel',
+        ])
+        sync_single_session_activity(attendance)
+
+        approved_response = self._call(
+            owner_user,
+            params={
+                'employee_id': owner.id,
+                'attendance_date_from': '2026-03-17',
+                'attendance_date_till': '2026-03-17',
+            },
+        )
+        approved_data = self._json(approved_response)
+        self.assertEqual(approved_data[0]['clock_in'], '09:30:00')
+        self.assertEqual(approved_data[0]['clock_in_channel'], AttendanceChannel.CORRECTION_REQUEST)
+
+        attendance.request_type = 'revoke_request'
+        attendance.attendance_clock_in = time(8, 5)
+        attendance.attendance_clock_in_channel = AttendanceChannel.MOBILE
+        attendance.save(update_fields=[
+            'request_type',
+            'attendance_clock_in',
+            'attendance_clock_in_channel',
+        ])
+        restored_activity = sync_single_session_activity(attendance)
+
+        response = self._call(
+            owner_user,
+            params={
+                'employee_id': owner.id,
+                'attendance_date_from': '2026-03-17',
+                'attendance_date_till': '2026-03-17',
+            },
+        )
+        data = self._json(response)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(data), 1)
+        self.assertEqual(data[0]['id'], restored_activity.id)
+        self.assertEqual(data[0]['clock_in'], '08:05:00')
+        self.assertEqual(data[0]['clock_in_channel'], AttendanceChannel.MOBILE)
+        self.assertEqual(AttendanceActivity.objects.filter(employee_id=owner, attendance_date=date(2026, 3, 17)).count(), 1)
