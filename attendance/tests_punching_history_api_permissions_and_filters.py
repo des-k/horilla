@@ -124,7 +124,9 @@ class AttendancePunchingHistoryApiIntegrationTests(AttendanceApiIntegrationMixin
     endpoint = '/api/attendance/punching-history/'
 
     def _call(self, user, params=None):
-        return self.auth_client(user).get(self.endpoint, params or {}, format='json')
+        response = self.auth_client(user).get(self.endpoint, params or {}, format='json')
+        self._clear_request_context()
+        return response
 
     def _json(self, response):
         return response.json()
@@ -229,6 +231,7 @@ class AttendancePunchingHistoryApiIntegrationTests(AttendanceApiIntegrationMixin
 
     def test_raw_punch_history_remains_visible_after_attendance_override(self):
         owner_user, owner = self.create_employee('Owner')
+        self.auth_request(owner_user)
         attendance = Attendance.objects.create(
             employee_id=owner,
             attendance_date=date(2026, 3, 16),
@@ -250,7 +253,9 @@ class AttendancePunchingHistoryApiIntegrationTests(AttendanceApiIntegrationMixin
         attendance.is_validate_request_approved = True
         attendance.request_type = 'update_request'
         attendance.attendance_clock_in = datetime(2026, 3, 16, 9, 30).time()
+        self.auth_request(owner_user)
         attendance.save(update_fields=['is_validate_request', 'is_validate_request_approved', 'request_type', 'attendance_clock_in'])
+        self._clear_request_context()
 
         response = self._call(
             owner_user,
