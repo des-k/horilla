@@ -275,6 +275,8 @@ class AttendanceRequestEndpointFlowExecutableTests(SimpleTestCase):
             "horilla_api.api_views.attendance.views.clear_request_override_and_recompute",
             return_value=canceled_final,
         ) as clear_reset, patch(
+            "horilla_api.api_views.attendance.views._log_attendance_request_status_change"
+        ), patch(
             "horilla_api.api_views.attendance.views.AttendanceRequestSerializer",
             return_value=SimpleNamespace(data={"request_type": "cancel_request"}),
         ):
@@ -335,6 +337,8 @@ class RequestEndpointFlowPriorityTests(AttendanceRequestEndpointFlowExecutableTe
             "horilla_api.api_views.attendance.views.clear_request_override_and_recompute",
             return_value=final_attendance,
         ) as clear_reset, patch(
+            "horilla_api.api_views.attendance.views._log_attendance_request_status_change"
+        ), patch(
             "horilla_api.api_views.attendance.views.AttendanceRequestSerializer",
             return_value=SimpleNamespace(data={"request_type": "cancel_request"}),
         ):
@@ -356,6 +360,8 @@ class RequestEndpointFlowPriorityTests(AttendanceRequestEndpointFlowExecutableTe
         ), patch(
             "horilla_api.api_views.attendance.views.clear_request_override_and_recompute",
         ) as clear_reset, patch(
+            "horilla_api.api_views.attendance.views._log_attendance_request_status_change"
+        ), patch(
             "horilla_api.api_views.attendance.views.AttendanceRequestSerializer",
             return_value=SimpleNamespace(data={"request_type": "cancel_request"}),
         ):
