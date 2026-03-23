@@ -14,7 +14,7 @@ from attendance.tests_api_integration_base import AttendanceApiIntegrationMixin
 class AttendanceExemptRolesEndpointTests(AttendanceApiIntegrationMixin, APITestCase):
     clock_in_endpoint = '/api/attendance/clock-in/'
     clock_out_endpoint = '/api/attendance/clock-out/'
-    status_endpoint = '/api/attendance/checking-status/'
+    status_endpoint = '/api/attendance/checking-in'
 
     def _configure_company_setting(self, *, allow_reporting_manager_attendance=False, allow_admin_attendance=False):
         AttendanceGeneralSetting.objects.update_or_create(
