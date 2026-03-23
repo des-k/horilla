@@ -7,6 +7,8 @@ from base.models import EmployeeShiftSchedule
 
 
 class ShiftSchedulePolicyFormTests(SimpleTestCase):
+    databases = {'default'}
+
     def test_shift_schedule_model_removes_legacy_fallback_fields(self):
         model_field_names = {field.name for field in EmployeeShiftSchedule._meta.get_fields()}
 
