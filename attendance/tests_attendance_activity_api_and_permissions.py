@@ -12,7 +12,13 @@ from attendance.tests_api_integration_base import AttendanceApiIntegrationMixin
 from horilla_api.api_views.attendance import views as api_views
 
 
+def _identity_filter(_data, queryset=None, **_kwargs):
+    return SimpleNamespace(qs=queryset)
+
+
 class _FakeActivityQuerySet(list):
+    model = AttendanceActivity
+
     def select_related(self, *args, **kwargs):
         return self
 
@@ -61,7 +67,8 @@ class AttendanceActivityApiAndPermissionsTests(SimpleTestCase):
         force_authenticate(request, user=self.owner_user)
         with patch.object(api_views.AttendanceActivity, "objects", self.activities), \
              patch.object(api_views, "permission_based_queryset", side_effect=Exception("fallback")), \
-             patch.object(api_views, "AttendanceActivitySerializer", side_effect=self._dummy_serializer):
+             patch.object(api_views, "AttendanceActivitySerializer", side_effect=self._dummy_serializer), \
+             patch.object(api_views, "AttendanceActivityFilter", side_effect=_identity_filter):
             response = api_views.AttendanceActivityView.as_view()(request)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data, [{"id": 11, "employee_id": 2, "attendance_date": "2026-03-14"}])
@@ -72,7 +79,8 @@ class AttendanceActivityApiAndPermissionsTests(SimpleTestCase):
         scoped = _FakeActivityQuerySet([self.activities[1]])
         with patch.object(api_views.AttendanceActivity, "objects", self.activities), \
              patch.object(api_views, "permission_based_queryset", return_value=scoped), \
-             patch.object(api_views, "AttendanceActivitySerializer", side_effect=self._dummy_serializer):
+             patch.object(api_views, "AttendanceActivitySerializer", side_effect=self._dummy_serializer), \
+             patch.object(api_views, "AttendanceActivityFilter", side_effect=_identity_filter):
             response = api_views.AttendanceActivityView.as_view()(request)
         self.assertEqual(response.status_code, 200)
         self.assertEqual([item["id"] for item in response.data], [12])
@@ -82,7 +90,8 @@ class AttendanceActivityApiAndPermissionsTests(SimpleTestCase):
         force_authenticate(request, user=self.admin_user)
         with patch.object(api_views.AttendanceActivity, "objects", self.activities), \
              patch.object(api_views, "permission_based_queryset", return_value=self.activities), \
-             patch.object(api_views, "AttendanceActivitySerializer", side_effect=self._dummy_serializer):
+             patch.object(api_views, "AttendanceActivitySerializer", side_effect=self._dummy_serializer), \
+             patch.object(api_views, "AttendanceActivityFilter", side_effect=_identity_filter):
             response = api_views.AttendanceActivityView.as_view()(request)
         self.assertEqual(response.status_code, 200)
         self.assertEqual({item["id"] for item in response.data}, {11, 12, 13})
@@ -97,7 +106,9 @@ class AttendanceActivityApiIntegrationTests(AttendanceApiIntegrationMixin, APITe
     endpoint = '/api/attendance/attendance-activity/'
 
     def _call(self, user, params=None):
-        return self.auth_client(user).get(self.endpoint, params or {}, format='json')
+        response = self.auth_client(user).get(self.endpoint, params or {}, format='json')
+        self._clear_request_context()
+        return response
 
     def _json(self, response):
         return response.json()
@@ -156,6 +167,7 @@ class AttendanceActivityApiIntegrationTests(AttendanceApiIntegrationMixin, APITe
 
     def test_activity_sync_after_attendance_request_approve(self):
         owner_user, owner = self.create_employee('Owner')
+        self.auth_request(owner_user)
         attendance = Attendance.objects.create(
             employee_id=owner,
             attendance_date=date(2026, 3, 16),
@@ -167,6 +179,7 @@ class AttendanceActivityApiIntegrationTests(AttendanceApiIntegrationMixin, APITe
             is_validate_request_approved=True,
         )
         sync_single_session_activity(attendance)
+        self._clear_request_context()
 
         response = self._call(
             owner_user,
@@ -186,6 +199,7 @@ class AttendanceActivityApiIntegrationTests(AttendanceApiIntegrationMixin, APITe
 
     def test_activity_sync_after_attendance_request_revoke(self):
         owner_user, owner = self.create_employee('Owner')
+        self.auth_request(owner_user)
         attendance = Attendance.objects.create(
             employee_id=owner,
             attendance_date=date(2026, 3, 17),
@@ -195,12 +209,14 @@ class AttendanceActivityApiIntegrationTests(AttendanceApiIntegrationMixin, APITe
             attendance_validated=True,
         )
         sync_single_session_activity(attendance)
+        self._clear_request_context()
 
         attendance.request_type = 'update_request'
         attendance.is_validate_request = False
         attendance.is_validate_request_approved = True
         attendance.attendance_clock_in = time(9, 30)
         attendance.attendance_clock_in_channel = AttendanceChannel.CORRECTION_REQUEST
+        self.auth_request(owner_user)
         attendance.save(update_fields=[
             'request_type',
             'is_validate_request',
@@ -209,6 +225,7 @@ class AttendanceActivityApiIntegrationTests(AttendanceApiIntegrationMixin, APITe
             'attendance_clock_in_channel',
         ])
         sync_single_session_activity(attendance)
+        self._clear_request_context()
 
         approved_response = self._call(
             owner_user,
@@ -225,12 +242,14 @@ class AttendanceActivityApiIntegrationTests(AttendanceApiIntegrationMixin, APITe
         attendance.request_type = 'revoke_request'
         attendance.attendance_clock_in = time(8, 5)
         attendance.attendance_clock_in_channel = AttendanceChannel.MOBILE
+        self.auth_request(owner_user)
         attendance.save(update_fields=[
             'request_type',
             'attendance_clock_in',
             'attendance_clock_in_channel',
         ])
         restored_activity = sync_single_session_activity(attendance)
+        self._clear_request_context()
 
         response = self._call(
             owner_user,
