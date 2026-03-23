@@ -551,6 +551,7 @@ class WorkModeRequestActions:
             raise WorkModeRequestActionError("No current document version found.")
         old_status = req.document_status
         now_dt = timezone.now()
+        normalized_remark = WorkModeRequestActions._remark(remark)
         version.status = WorkModeRequestDocumentStatus.VERIFIED
         version.reviewed_by = actor
         version.reviewed_at = now_dt
