@@ -480,50 +480,85 @@ def _apply_punch_decisions(attendance: Attendance, logs: list[AttendancePunching
         ])
 
 
-def _synchronize_canonical_punch_truth(attendance: Attendance, decisions: dict[int, tuple[bool, str]], source: str):
-    # Refresh canonical final truth from DB first so later updates do not rely on
-    # stale in-memory FK ids after multi-step recompute/request lifecycles.
-    attendance.refresh_from_db(fields=[
-        "attendance_date",
-        "attendance_clock_in_punch",
-        "attendance_clock_out_punch",
-    ])
+def _synchronize_canonical_punch_truth(
+    attendance: Attendance,
+    decisions: dict[int, tuple[bool, str]],
+    source: str,
+    *,
+    logs: Optional[list[AttendancePunchingHistory]] = None,
+    final_in_punch: Optional[AttendancePunchingHistory] = None,
+    final_out_punch: Optional[AttendancePunchingHistory] = None,
+):
+    # When the attendance row is a real model instance, refresh canonical final
+    # truth from DB. Some unit/integration tests use lightweight stubs that do
+    # not implement refresh_from_db, so we gracefully fall back to in-memory
+    # values in that case.
+    refresher = getattr(attendance, "refresh_from_db", None)
+    if callable(refresher):
+        refresher(fields=[
+            "attendance_date",
+            "attendance_clock_in_punch",
+            "attendance_clock_out_punch",
+        ])
 
     canonical_pairs = []
-    if getattr(attendance, "attendance_clock_in_punch_id", None):
-        canonical_pairs.append((attendance.attendance_clock_in_punch_id, NOTE_FINAL_IN))
-    if getattr(attendance, "attendance_clock_out_punch_id", None):
-        canonical_pairs.append((attendance.attendance_clock_out_punch_id, NOTE_FINAL_OUT))
+    final_in_punch_id = getattr(attendance, "attendance_clock_in_punch_id", None) or getattr(final_in_punch, "id", None)
+    final_out_punch_id = getattr(attendance, "attendance_clock_out_punch_id", None) or getattr(final_out_punch, "id", None)
+    if final_in_punch_id:
+        canonical_pairs.append((final_in_punch_id, NOTE_FINAL_IN))
+    if final_out_punch_id:
+        canonical_pairs.append((final_out_punch_id, NOTE_FINAL_OUT))
     if not canonical_pairs:
         return
 
     canonical_map = {punch_id: reason for punch_id, reason in canonical_pairs}
 
-    # Keep decision map aligned with canonical Attendance truth.
+    # Keep the in-memory decision map aligned with canonical Attendance truth.
     for punch_id, reason in canonical_pairs:
         decisions[punch_id] = (True, reason)
 
-    # Re-query directly from the base manager so this sync is immune to request /
-    # company-scoped queryset filtering and stale log objects from earlier in the recompute.
-    canonical_logs = AttendancePunchingHistory._base_manager.filter(id__in=list(canonical_map.keys()))
-    for log in canonical_logs:
-        final_reason = canonical_map.get(log.id, NOTE_FINAL_IN)
-        log.attendance_id = attendance
-        log.attendance_date = attendance.attendance_date
-        log.accepted_to_attendance = True
-        log.reason = (final_reason or "-")[:255]
+    # First sync any log objects already in memory (important for SimpleNamespace
+    # / dataclass tests and for callers that keep references to punch objects).
+    for log in logs or []:
+        if getattr(log, "id", None) not in canonical_map:
+            continue
+        final_reason = canonical_map[log.id]
+        setattr(log, "attendance_id", attendance)
+        setattr(log, "attendance_date", getattr(attendance, "attendance_date", None))
+        setattr(log, "accepted_to_attendance", True)
+        setattr(log, "reason", (final_reason or "-")[:255])
         if hasattr(log, "decision_status"):
-            log.decision_status = "accepted"
+            setattr(log, "decision_status", "accepted")
         if hasattr(log, "decision_source"):
-            log.decision_source = source
-        log.save(update_fields=[
-            "attendance_id",
-            "attendance_date",
-            "accepted_to_attendance",
-            "reason",
-            *( ["decision_status"] if hasattr(log, "decision_status") else []),
-            *( ["decision_source"] if hasattr(log, "decision_source") else []),
-        ])
+            setattr(log, "decision_source", source)
+        saver = getattr(log, "save", None)
+        if callable(saver):
+            saver(update_fields=[
+                "attendance_id",
+                "attendance_date",
+                "accepted_to_attendance",
+                "reason",
+                *( ["decision_status"] if hasattr(log, "decision_status") else []),
+                *( ["decision_source"] if hasattr(log, "decision_source") else []),
+            ])
+
+    # Then sync canonical truth directly in the database, bypassing scoped
+    # managers. We update by ID so the stored raw-punch flags always follow the
+    # final Attendance truth even in multi-step recompute lifecycles.
+    if getattr(attendance, "pk", None):
+        for punch_id, final_reason in canonical_pairs:
+            update_kwargs = {
+                "attendance_id": attendance,
+                "attendance_date": getattr(attendance, "attendance_date", None),
+                "accepted_to_attendance": True,
+                "reason": (final_reason or "-")[:255],
+            }
+            model = AttendancePunchingHistory
+            if hasattr(model, "decision_status"):
+                update_kwargs["decision_status"] = "accepted"
+            if hasattr(model, "decision_source"):
+                update_kwargs["decision_source"] = source
+            AttendancePunchingHistory._base_manager.filter(id=punch_id).update(**update_kwargs)
 
 def _set_late_early_rows(attendance: Attendance, late_minutes: int, early_minutes: int):
     attendance.late_come_early_out.filter(type="late_come").delete()
@@ -975,7 +1010,7 @@ def recompute_attendance(employee, attendance_date: date) -> ReconciliationResul
         decisions[log.id] = (False, "Ignored: not used in final attendance")
 
     _apply_punch_decisions(attendance, logs, decisions, source)
-    _synchronize_canonical_punch_truth(attendance, decisions, source)
+    _synchronize_canonical_punch_truth(attendance, decisions, source, logs=logs, final_in_punch=final_in_punch, final_out_punch=final_out_punch)
 
     return ReconciliationResult(attendance=attendance, activity=activity)
 
