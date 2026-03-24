@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
+import random
 
 from django.utils import timezone
 
@@ -121,6 +122,110 @@ class CanonicalRecomputeDecisionFlowTests(SimpleTestCase):
 
         return attendance, activity, sync_calls
 
+    RANDOMIZED_SOURCES = ("biometric", "mobile", "approved_request")
+
+    def _randomized_logs_for_recompute(self, rng: random.Random, scenario_id: int):
+        attendance_date = date(2026, 3, 14)
+        base_in = timezone.make_aware(datetime(2026, 3, 14, 8, 0))
+        base_out = timezone.make_aware(datetime(2026, 3, 14, 12, 0))
+        log_id = scenario_id * 1000 + 1
+        logs = []
+
+        def make_log(direction, dt, source):
+            nonlocal log_id
+            log = FakePunchLog(log_id, direction, dt, source=source)
+            log_id += 1
+            return log
+
+        in_count = rng.randint(1, 4)
+        out_count = rng.randint(1, 4)
+        invalid_in_count = rng.randint(0, 2)
+        invalid_out_count = rng.randint(0, 2)
+
+        dense_minutes = [0, 0, 1, 1, 2, 5, 10, 20]
+        out_minutes = [0, 0, 1, 5, 10, 40, 80, 120, 240]
+
+        for _ in range(in_count):
+            logs.append(make_log(AttendancePunchDirection.IN, base_in + timedelta(minutes=rng.choice(dense_minutes)), rng.choice(self.RANDOMIZED_SOURCES)))
+        for _ in range(out_count):
+            logs.append(make_log(AttendancePunchDirection.OUT, base_out + timedelta(minutes=rng.choice(out_minutes)), rng.choice(self.RANDOMIZED_SOURCES)))
+        for _ in range(invalid_in_count):
+            offset = rng.choice([1, 2, 5, 30, 90])
+            dt = base_in - timedelta(hours=2, minutes=offset) if rng.random() < 0.5 else base_in + timedelta(hours=6, minutes=offset)
+            logs.append(make_log(AttendancePunchDirection.IN, dt, rng.choice(self.RANDOMIZED_SOURCES)))
+        for _ in range(invalid_out_count):
+            offset = rng.choice([1, 2, 5, 30, 90])
+            dt = base_out - timedelta(hours=2, minutes=offset) if rng.random() < 0.5 else base_out + timedelta(hours=12, minutes=offset)
+            logs.append(make_log(AttendancePunchDirection.OUT, dt, rng.choice(self.RANDOMIZED_SOURCES)))
+
+        rng.shuffle(logs)
+        return attendance_date, logs
+
+
+
+    def test_randomized_same_day_sequences_keep_db_truth_single_and_consistent(self):
+        rng = random.Random(777331)
+        work_request = SimpleNamespace(mode=AttendanceWorkMode.WFA, status=WorkModeRequestStatus.APPROVED)
+
+        for scenario_id in range(1, 31):
+            attendance_date, logs = self._randomized_logs_for_recompute(rng, scenario_id)
+            attendance = SimpleNamespace(attendance_date=attendance_date, save=lambda *args, **kwargs: None)
+
+            _attendance, activity, sync_calls = self._run_recompute_with_logs(
+                attendance_date,
+                logs,
+                work_request=work_request,
+                attendance=attendance,
+            )
+
+            accepted_in = [
+                log for log in logs if log.punch_direction == AttendancePunchDirection.IN and log.accepted_to_attendance
+            ]
+            accepted_out = [
+                log for log in logs if log.punch_direction == AttendancePunchDirection.OUT and log.accepted_to_attendance
+            ]
+            self.assertLessEqual(len(accepted_in), 1)
+            self.assertLessEqual(len(accepted_out), 1)
+
+            valid_in = sorted(
+                [
+                    log for log in logs
+                    if log.punch_direction == AttendancePunchDirection.IN
+                    and timezone.make_naive(log.punch_timestamp).hour < 12
+                    and log.punch_timestamp >= timezone.make_aware(datetime(2026, 3, 14, 6, 0))
+                    and log.punch_timestamp <= timezone.make_aware(datetime(2026, 3, 14, 12, 0))
+                ],
+                key=lambda log: (log.punch_timestamp, log.id),
+            )
+            valid_out = sorted(
+                [
+                    log for log in logs
+                    if log.punch_direction == AttendancePunchDirection.OUT
+                    and log.punch_timestamp >= timezone.make_aware(datetime(2026, 3, 14, 12, 0))
+                    and log.punch_timestamp <= timezone.make_aware(datetime(2026, 3, 14, 23, 0))
+                ],
+                key=lambda log: (log.punch_timestamp, log.id),
+            )
+
+            if valid_in:
+                self.assertEqual([log.id for log in accepted_in], [valid_in[0].id])
+                self.assertEqual(sync_calls[-1]["final_in_dt"], valid_in[0].punch_timestamp)
+            else:
+                self.assertEqual(accepted_in, [])
+            if valid_out:
+                self.assertEqual([log.id for log in accepted_out], [valid_out[-1].id])
+                self.assertEqual(sync_calls[-1]["final_out_dt"], valid_out[-1].punch_timestamp)
+            else:
+                self.assertEqual(accepted_out, [])
+
+            self.assertIsNotNone(activity)
+            for log in logs:
+                self.assertEqual(log.attendance_id, attendance)
+                self.assertEqual(log.attendance_date, attendance_date)
+                self.assertIsNotNone(log.reason)
+            for log in logs:
+                if log not in accepted_out and log.punch_direction == AttendancePunchDirection.OUT and log in valid_out[:-1]:
+                    self.assertEqual(log.reason, reconciliation.NOTE_SUPERSEDED_CHECKOUT)
 
     def test_superseded_middle_out_remains_visible_but_not_accepted(self):
         attendance_date = date(2026, 3, 14)
