@@ -76,6 +76,9 @@ from base.methods import (
 )
 from base.models import EmployeeShift, EmployeeShiftDay, EmployeeShiftSchedule
 from employee.models import Employee
+from notifications.domain_notifications import (
+    send_attendance_request_notification,
+)
 from horilla.decorators import (
     hx_request_required,
     login_required,
@@ -1237,6 +1240,13 @@ def cancel_attendance_request(request, attendance_id):
                 include_out=wants_out,
             )
         messages.success(request, _("Attendance request canceled."))
+        send_attendance_request_notification(
+            actor=request.user,
+            recipient=attendance.employee_id.employee_user_id,
+            attendance=attendance,
+            event="attendance_request_canceled",
+            recipient_role="requester",
+        )
 
     except Attendance.DoesNotExist:
         messages.error(request, _("Attendance request not found"))
@@ -1310,6 +1320,14 @@ def reject_validate_attendance_request(request, attendance_id):
             )
 
         messages.success(request, _("Attendance request rejected."))
+        send_attendance_request_notification(
+            actor=request.user,
+            recipient=attendance.employee_id.employee_user_id,
+            attendance=attendance,
+            event="attendance_request_rejected",
+            recipient_role="requester",
+            reason=comment_text,
+        )
 
     except Attendance.DoesNotExist:
         messages.error(request, _("Attendance request not found"))
@@ -1477,16 +1495,12 @@ def bulk_approve_attendance_request(request):
         messages.success(request, _("Attendance request has been approved"))
 
         employee = attendance.employee_id
-        notify.send(
-            request.user,
+        send_attendance_request_notification(
+            actor=request.user,
             recipient=employee.employee_user_id,
-            verb=f"Your attendance request for {attendance.attendance_date} is validated",
-            verb_ar=f"تم التحقق من طلب حضورك في تاريخ {attendance.attendance_date}",
-            verb_de=f"Ihr Anwesenheitsantrag für das Datum {attendance.attendance_date} wurde bestätigt",
-            verb_es=f"Se ha validado su solicitud de asistencia para la fecha {attendance.attendance_date}",
-            verb_fr=f"Votre demande de présence pour la date {attendance.attendance_date} est validée",
-            redirect=reverse("request-attendance-view") + f"?id={attendance.id}",
-            icon="checkmark-circle-outline",
+            attendance=attendance,
+            event="attendance_request_approved",
+            recipient_role="requester",
         )
 
         if attendance.employee_id.employee_work_info.reporting_manager_id:
@@ -1494,31 +1508,12 @@ def bulk_approve_attendance_request(request):
                 attendance.employee_id.employee_work_info.reporting_manager_id.employee_user_id
             )
             user_last_name = get_employee_last_name(attendance)
-            notify.send(
-                request.user,
+            send_attendance_request_notification(
+                actor=request.user,
                 recipient=reporting_manager,
-                verb=(
-                    f"{employee.employee_first_name} {user_last_name}'s attendance request for "
-                    f"{attendance.attendance_date} is validated"
-                ),
-                verb_ar=(
-                    f"تم التحقق من طلب الحضور لـ {employee.employee_first_name} {user_last_name} "
-                    f"في {attendance.attendance_date}"
-                ),
-                verb_de=(
-                    f"Die Anwesenheitsanfrage von {employee.employee_first_name} {user_last_name} "
-                    f"für den {attendance.attendance_date} wurde validiert"
-                ),
-                verb_es=(
-                    f"Se ha validado la solicitud de asistencia de {employee.employee_first_name} "
-                    f"{user_last_name} para el {attendance.attendance_date}"
-                ),
-                verb_fr=(
-                    f"La demande de présence de {employee.employee_first_name} {user_last_name} "
-                    f"pour le {attendance.attendance_date} a été validée"
-                ),
-                redirect=reverse("request-attendance-view") + f"?id={attendance.id}",
-                icon="checkmark-circle-outline",
+                attendance=attendance,
+                event="attendance_request_approved",
+                recipient_role="approver",
             )
 
     return HttpResponse("success")
