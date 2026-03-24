@@ -21,6 +21,7 @@ from attendance.services import activity_sync
 from attendance.services.activity_sync import mark_approved_request_channels, sync_single_session_activity
 from attendance.services.punching_history import capture_request_restore_snapshot, clear_raw_links_for_request_override, restore_raw_state_after_request
 from attendance.services.reconciliation import recompute_attendance
+from attendance.services.work_type_request_actions import WorkModeRequestActions
 from attendance.tests_api_integration_base import AttendanceApiIntegrationMixin
 from leave.models import LeaveRequest, LeaveType
 
@@ -145,7 +146,7 @@ class CrossModuleAuditViewsConsistencyDbIntegrationTests(AttendanceApiIntegratio
     def _shift_rule_context(self):
         return self.patch_reconciliation_shift_rules(
             target_date=self.target_date,
-            schedule=self.schedule,
+            schedule=later_schedule,
             shift_start_dt=self.shift_start_dt,
             shift_end_dt=self.shift_end_dt,
             check_in_window_start_dt=self.in_window_start_dt,
@@ -327,6 +328,57 @@ class CrossModuleAuditViewsConsistencyDbIntegrationTests(AttendanceApiIntegratio
         self.assertTrue(out_punch.accepted_to_attendance)
         self.assertEqual(AttendancePunchingHistory.objects.filter(employee_id=self.employee).count(), 2)
 
+
+    def test_leave_reject_recompute_restores_raw_truth_without_losing_raw_audit_trail(self):
+        in_punch, out_punch = self._create_raw_punches()
+        leave_type = LeaveType.objects.create(name='Sick Leave', company_id=self.company)
+        leave_request = LeaveRequest.objects.create(
+            employee_id=self.employee,
+            leave_type_id=leave_type,
+            start_date=self.target_date,
+            end_date=self.target_date,
+            start_date_breakdown='full_day',
+            end_date_breakdown='full_day',
+            description='Medical leave',
+            status='approved',
+        )
+
+        with self._shift_rule_context():
+            recompute_attendance(self.employee, self.target_date)
+
+        attendance = self._attendance()
+        activity = self._activity()
+        self.assertIsNone(attendance.attendance_clock_in)
+        self.assertIsNone(attendance.attendance_clock_out)
+        self.assertEqual(attendance.reconciliation_note, 'Approved Full-Day Leave')
+        self.assertIsNone(activity.clock_in)
+        self.assertIsNone(activity.clock_out)
+        in_punch.refresh_from_db()
+        out_punch.refresh_from_db()
+        self.assertFalse(in_punch.accepted_to_attendance)
+        self.assertFalse(out_punch.accepted_to_attendance)
+
+        leave_request.status = 'rejected'
+        leave_request.reject_reason = 'Manager rejected retroactive leave'
+        leave_request.save(update_fields=['status', 'reject_reason'])
+        with self._shift_rule_context():
+            recompute_attendance(self.employee, self.target_date)
+
+        self._assert_layers(
+            in_time_value=time(8, 0),
+            out_time_value=time(17, 0),
+            in_channel=AttendanceChannel.BIOMETRIC,
+            out_channel=AttendanceChannel.BIOMETRIC,
+            in_punch_id=in_punch.id,
+            out_punch_id=out_punch.id,
+        )
+        self.assertEqual(Attendance.objects.filter(employee_id=self.employee, attendance_date=self.target_date).count(), 1)
+        in_punch.refresh_from_db()
+        out_punch.refresh_from_db()
+        self.assertTrue(in_punch.accepted_to_attendance)
+        self.assertTrue(out_punch.accepted_to_attendance)
+        self.assertEqual(AttendancePunchingHistory.objects.filter(employee_id=self.employee).count(), 2)
+
     def test_work_mode_request_approve_keeps_final_truth_activity_and_raw_trail_consistent(self):
         in_punch, out_punch = self._create_raw_punches(in_time_value=time(8, 20), out_time_value=time(16, 40), work_mode=AttendanceWorkMode.WFO)
         request = WorkModeRequest.objects.create(
@@ -374,3 +426,211 @@ class CrossModuleAuditViewsConsistencyDbIntegrationTests(AttendanceApiIntegratio
         self.assertTrue(in_punch.accepted_to_attendance)
         self.assertTrue(out_punch.accepted_to_attendance)
         self.assertEqual(AttendancePunchingHistory.objects.filter(employee_id=self.employee).count(), 2)
+
+
+    def test_work_mode_reject_and_cancel_keep_raw_truth_consistent_for_waiting_requests(self):
+        # Waiting requests do not become active truth, so reject/cancel must leave
+        # Attendance, AttendanceActivity, and raw punches unchanged.
+        reject_in, reject_out = self._create_raw_punches(work_mode=AttendanceWorkMode.WFO)
+        reject_request = WorkModeRequest.objects.create(
+            employee_id=self.employee,
+            mode=AttendanceWorkMode.WFA,
+            scope=WorkModeRequestScope.FULL,
+            start_date=self.target_date,
+            end_date=self.target_date,
+            status=WorkModeRequestStatus.WAITING_FOR_APPROVAL,
+            reason='WFH waiting approval',
+        )
+        with self._shift_rule_context():
+            recompute_attendance(self.employee, self.target_date)
+
+        WorkModeRequestActions.reject_request(reject_request, actor=self.employee, remark='Manager denied')
+
+        self._assert_layers(
+            in_time_value=time(8, 0),
+            out_time_value=time(17, 0),
+            in_channel=AttendanceChannel.BIOMETRIC,
+            out_channel=AttendanceChannel.BIOMETRIC,
+            in_punch_id=reject_in.id,
+            out_punch_id=reject_out.id,
+            in_mode=AttendanceWorkMode.WFO,
+            out_mode=AttendanceWorkMode.WFO,
+        )
+        reject_in.refresh_from_db()
+        reject_out.refresh_from_db()
+        self.assertTrue(reject_in.accepted_to_attendance)
+        self.assertTrue(reject_out.accepted_to_attendance)
+        reject_request.refresh_from_db()
+        self.assertEqual(reject_request.status, WorkModeRequestStatus.REJECTED)
+
+        later_date = date(2026, 3, 18)
+        later_weekday_key = later_date.strftime('%A').lower()
+        _, _, later_schedule = self.create_shift_with_schedule(
+            employee=self.employee,
+            day_key=later_weekday_key,
+            start_time=time(8, 0),
+            end_time=time(17, 0),
+            minimum_working_hour='08:00',
+            is_night_shift=False,
+        )
+        cancel_in = AttendancePunchingHistory.objects.create(
+            employee_id=self.employee,
+            attendance_date=later_date,
+            punch_timestamp=self.aware_dt(2026, 3, 18, 8, 0),
+            source=AttendancePunchSource.BIOMETRIC,
+            punch_direction=AttendancePunchDirection.IN,
+            raw_employee_identifier='AUD-1',
+            device_info='Main Gate',
+            work_mode=AttendanceWorkMode.WFO,
+        )
+        cancel_out = AttendancePunchingHistory.objects.create(
+            employee_id=self.employee,
+            attendance_date=later_date,
+            punch_timestamp=self.aware_dt(2026, 3, 18, 17, 0),
+            source=AttendancePunchSource.BIOMETRIC,
+            punch_direction=AttendancePunchDirection.OUT,
+            raw_employee_identifier='AUD-1',
+            device_info='Main Gate',
+            work_mode=AttendanceWorkMode.WFO,
+        )
+        cancel_request = WorkModeRequest.objects.create(
+            employee_id=self.employee,
+            mode=AttendanceWorkMode.WFA,
+            scope=WorkModeRequestScope.FULL,
+            start_date=later_date,
+            end_date=later_date,
+            status=WorkModeRequestStatus.WAITING_FOR_APPROVAL,
+            reason='Owner canceled waiting request',
+        )
+        shift_ctx = self.patch_reconciliation_shift_rules(
+            target_date=later_date,
+            schedule=later_schedule,
+            shift_start_dt=self.aware_dt(2026, 3, 18, 8, 0),
+            shift_end_dt=self.aware_dt(2026, 3, 18, 17, 0),
+            check_in_window_start_dt=self.aware_dt(2026, 3, 18, 6, 0),
+            check_in_window_end_dt=self.aware_dt(2026, 3, 18, 12, 0),
+            check_out_window_start_dt=self.aware_dt(2026, 3, 18, 12, 0),
+            check_out_window_end_dt=self.aware_dt(2026, 3, 18, 23, 0),
+            minimum_hour='08:00',
+        )
+        with shift_ctx:
+            recompute_attendance(self.employee, later_date)
+
+        WorkModeRequestActions.cancel_request(cancel_request, actor=self.employee, remark='Owner canceled')
+
+        later_attendance = Attendance.objects.get(employee_id=self.employee, attendance_date=later_date)
+        later_activity = activity_sync.AttendanceActivity.objects.get(employee_id=self.employee, attendance_date=later_date)
+        self.assertEqual(later_attendance.attendance_clock_in, time(8, 0))
+        self.assertEqual(later_attendance.attendance_clock_out, time(17, 0))
+        self.assertEqual(later_attendance.attendance_clock_in_mode, AttendanceWorkMode.WFO)
+        self.assertEqual(later_attendance.attendance_clock_out_mode, AttendanceWorkMode.WFO)
+        self.assertEqual(later_attendance.attendance_clock_in_punch_id, cancel_in.id)
+        self.assertEqual(later_attendance.attendance_clock_out_punch_id, cancel_out.id)
+        self.assertEqual(later_activity.clock_in, time(8, 0))
+        self.assertEqual(later_activity.clock_out, time(17, 0))
+        cancel_in.refresh_from_db()
+        cancel_out.refresh_from_db()
+        self.assertTrue(cancel_in.accepted_to_attendance)
+        self.assertTrue(cancel_out.accepted_to_attendance)
+        cancel_request.refresh_from_db()
+        self.assertEqual(cancel_request.status, WorkModeRequestStatus.CANCELED)
+
+    def test_work_mode_document_reject_reopen_and_revoke_keep_audit_views_consistent(self):
+        in_punch, out_punch = self._create_raw_punches(in_time_value=time(8, 20), out_time_value=time(16, 40), work_mode=AttendanceWorkMode.WFO)
+        request = WorkModeRequest.objects.create(
+            employee_id=self.employee,
+            mode=AttendanceWorkMode.ON_DUTY,
+            scope=WorkModeRequestScope.FULL,
+            start_date=self.target_date,
+            end_date=self.target_date,
+            status=WorkModeRequestStatus.APPROVED,
+            reason='Client visit',
+        )
+        version = WorkModeRequestDocumentVersion.objects.create(
+            work_mode_request=request,
+            version_number=1,
+            is_current=True,
+            status=WorkModeRequestDocumentStatus.VERIFIED,
+            submitted_by=self.employee,
+            reviewed_by=self.employee,
+            review_remark='Verified',
+        )
+        request.current_document_version = version
+        request.document_status = WorkModeRequestDocumentStatus.VERIFIED
+        request.save(update_fields=['current_document_version', 'document_status'])
+
+        with self._shift_rule_context():
+            recompute_attendance(self.employee, self.target_date)
+
+        self._assert_layers(
+            in_time_value=time(8, 20),
+            out_time_value=time(16, 40),
+            in_channel=AttendanceChannel.BIOMETRIC,
+            out_channel=AttendanceChannel.BIOMETRIC,
+            in_punch_id=in_punch.id,
+            out_punch_id=out_punch.id,
+            late_minutes=0,
+            early_minutes=0,
+            in_mode=AttendanceWorkMode.ON_DUTY,
+            out_mode=AttendanceWorkMode.ON_DUTY,
+        )
+
+        WorkModeRequestActions.reject_document(request, actor=self.employee, remark='Need clearer proof')
+        self._assert_layers(
+            in_time_value=time(8, 20),
+            out_time_value=time(16, 40),
+            in_channel=AttendanceChannel.BIOMETRIC,
+            out_channel=AttendanceChannel.BIOMETRIC,
+            in_punch_id=in_punch.id,
+            out_punch_id=out_punch.id,
+            in_mode=AttendanceWorkMode.WFO,
+            out_mode=AttendanceWorkMode.WFO,
+        )
+        request.refresh_from_db()
+        self.assertEqual(request.document_status, WorkModeRequestDocumentStatus.REJECTED)
+
+        WorkModeRequestActions.reopen_document(request, actor=self.employee, remark='Please review again')
+        self._assert_layers(
+            in_time_value=time(8, 20),
+            out_time_value=time(16, 40),
+            in_channel=AttendanceChannel.BIOMETRIC,
+            out_channel=AttendanceChannel.BIOMETRIC,
+            in_punch_id=in_punch.id,
+            out_punch_id=out_punch.id,
+            in_mode=AttendanceWorkMode.WFO,
+            out_mode=AttendanceWorkMode.WFO,
+        )
+        request.refresh_from_db()
+        self.assertEqual(request.document_status, WorkModeRequestDocumentStatus.PENDING_VERIFICATION)
+
+        WorkModeRequestActions.verify_document(request, actor=self.employee, remark='Verified again')
+        self._assert_layers(
+            in_time_value=time(8, 20),
+            out_time_value=time(16, 40),
+            in_channel=AttendanceChannel.BIOMETRIC,
+            out_channel=AttendanceChannel.BIOMETRIC,
+            in_punch_id=in_punch.id,
+            out_punch_id=out_punch.id,
+            late_minutes=0,
+            early_minutes=0,
+            in_mode=AttendanceWorkMode.ON_DUTY,
+            out_mode=AttendanceWorkMode.ON_DUTY,
+        )
+
+        WorkModeRequestActions.revoke_request(request, actor=self.employee, remark='Trip ended')
+        self._assert_layers(
+            in_time_value=time(8, 20),
+            out_time_value=time(16, 40),
+            in_channel=AttendanceChannel.BIOMETRIC,
+            out_channel=AttendanceChannel.BIOMETRIC,
+            in_punch_id=in_punch.id,
+            out_punch_id=out_punch.id,
+            in_mode=AttendanceWorkMode.WFO,
+            out_mode=AttendanceWorkMode.WFO,
+        )
+        request.refresh_from_db()
+        self.assertEqual(request.status, WorkModeRequestStatus.REVOKED)
+        in_punch.refresh_from_db()
+        out_punch.refresh_from_db()
+        self.assertTrue(in_punch.accepted_to_attendance)
+        self.assertTrue(out_punch.accepted_to_attendance)
