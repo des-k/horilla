@@ -1,13 +1,15 @@
-from datetime import date, datetime
+from datetime import date, datetime, time, timedelta
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APITestCase, APIRequestFactory, force_authenticate
 
-from attendance.models import Attendance, AttendancePunchDirection, AttendancePunchSource, AttendancePunchingHistory, PunchDecisionStatus
+from attendance.models import Attendance, AttendancePunchDirection, AttendancePunchSource, AttendancePunchingHistory, AttendanceWorkMode, PunchDecisionStatus
 from attendance.tests_api_integration_base import AttendanceApiIntegrationMixin
+from attendance.services.reconciliation import NOTE_SUPERSEDED_CHECKOUT, recompute_attendance
+from leave.models import AvailableLeave, LeaveRequest, LeaveType
 from horilla_api.api_views.attendance import views as api_views
 
 
@@ -268,3 +270,198 @@ class AttendancePunchingHistoryApiIntegrationTests(AttendanceApiIntegrationMixin
         self.assertFalse(data['results'][0]['accepted_to_attendance'])
         self.assertEqual(data['results'][0]['reason'], 'raw mobile punch')
         self.assertTrue(AttendancePunchingHistory.objects.filter(id=raw_punch.id).exists())
+
+
+@override_settings(ALLOWED_HOSTS=["testserver", "localhost", "127.0.0.1"])
+class AttendancePunchingHistoryApiRepresentationTests(AttendanceApiIntegrationMixin, APITestCase):
+    endpoint = '/api/attendance/punching-history/'
+
+    def setUp(self):
+        super().setUp()
+        self.target_date = date.today() + timedelta(days=11)
+        self.owner_user, self.employee = self.create_employee('HistoryOwner')
+        self.admin_user, self.admin_employee = self.create_employee('HistoryAdmin', is_superuser=True)
+        self.auth_request(self.owner_user)
+        weekday_key = self.target_date.strftime('%A').lower()
+        self.shift, self.day_obj, self.schedule = self.create_shift_with_schedule(
+            employee=self.employee,
+            day_key=weekday_key,
+            start_time=time(8, 0),
+            end_time=time(17, 0),
+            minimum_working_hour='08:00',
+            is_night_shift=False,
+        )
+        self.shift_ctx = self.patch_reconciliation_shift_rules(
+            target_date=self.target_date,
+            schedule=self.schedule,
+            shift_start_dt=self.aware_dt(self.target_date.year, self.target_date.month, self.target_date.day, 8, 0),
+            shift_end_dt=self.aware_dt(self.target_date.year, self.target_date.month, self.target_date.day, 17, 0),
+            check_in_window_start_dt=self.aware_dt(self.target_date.year, self.target_date.month, self.target_date.day, 6, 0),
+            check_in_window_end_dt=self.aware_dt(self.target_date.year, self.target_date.month, self.target_date.day, 23, 0),
+            check_out_window_start_dt=self.aware_dt(self.target_date.year, self.target_date.month, self.target_date.day, 6, 0),
+            check_out_window_end_dt=self.aware_dt(self.target_date.year, self.target_date.month, self.target_date.day, 23, 0),
+            minimum_hour='08:00',
+        )
+        self.leave_type = LeaveType.objects.create(name='History Leave', company_id=self.company)
+        AvailableLeave.objects.create(employee_id=self.employee, leave_type_id=self.leave_type, available_days=5, carryforward_days=1)
+        AvailableLeave.objects.create(employee_id=self.admin_employee, leave_type_id=self.leave_type, available_days=3, carryforward_days=1)
+
+    def _call(self, user, params=None):
+        response = self.auth_client(user).get(self.endpoint, params or {}, format='json')
+        self._clear_request_context()
+        return response
+
+    def _json(self, response):
+        return response.json()
+
+    def _attendance(self):
+        return Attendance.objects.get(employee_id=self.employee, attendance_date=self.target_date)
+
+    def _create_punch(self, *, hour, minute, direction, source, device='Main Gate', work_mode=AttendanceWorkMode.WFO):
+        return AttendancePunchingHistory.objects.create(
+            employee_id=self.employee,
+            attendance_date=self.target_date,
+            punch_timestamp=self.aware_dt(self.target_date.year, self.target_date.month, self.target_date.day, hour, minute),
+            source=source,
+            punch_direction=direction,
+            raw_employee_identifier='HISTORY-1',
+            device_info=device,
+            work_mode=work_mode,
+        )
+
+    def _create_requested_leave(self):
+        with patch('leave.signals._reconcile_leave_related_punches', return_value=None):
+            return LeaveRequest.objects.create(
+                employee_id=self.employee,
+                leave_type_id=self.leave_type,
+                start_date=self.target_date,
+                end_date=self.target_date,
+                start_date_breakdown='full_day',
+                end_date_breakdown='full_day',
+                description='API representation leave',
+                status='requested',
+            )
+
+    def _approve_leave(self, leave_request):
+        with self.shift_ctx:
+            return self.auth_client(self.admin_user).put(f'/api/leave/approve/{leave_request.id}/', {}, format='json')
+
+    def _cancel_leave(self, leave_request):
+        with self.shift_ctx:
+            return self.auth_client(self.owner_user).put(f'/api/leave/cancel/{leave_request.id}/', {}, format='json')
+
+    def _approve_correction_out(self, attendance, out_time_str='17:45:00'):
+        attendance.request_type = 'update_request'
+        attendance.is_validate_request = True
+        attendance.is_validate_request_approved = False
+        attendance.requested_data = {
+            'attendance_clock_out': out_time_str,
+            '__meta': {'current_scope': 'OUT'},
+        }
+        attendance.save(update_fields=['request_type', 'is_validate_request', 'is_validate_request_approved', 'requested_data'])
+        with self.shift_ctx:
+            return self.auth_client(self.admin_user).put(
+                f'/api/attendance/attendance-request-approve/{attendance.id}',
+                {},
+                format='json',
+            )
+
+    def _revoke_correction(self, attendance):
+        with self.shift_ctx:
+            return self.auth_client(self.admin_user).put(
+                f'/api/attendance/attendance-request-revoke/{attendance.id}',
+                {},
+                format='json',
+            )
+
+    @staticmethod
+    def _results_by_id(data):
+        return {item['id']: item for item in data['results']}
+
+    def test_mixed_source_leave_cancel_history_api_preserves_raw_visibility_and_final_flags(self):
+        in_punch = self._create_punch(hour=8, minute=0, direction=AttendancePunchDirection.IN, source=AttendancePunchSource.BIOMETRIC)
+        out_punch = self._create_punch(hour=17, minute=10, direction=AttendancePunchDirection.OUT, source=AttendancePunchSource.MOBILE, device='Mobile App')
+        leave_request = self._create_requested_leave()
+
+        approve = self._approve_leave(leave_request)
+        self.assertEqual(approve.status_code, 200)
+        cancel = self._cancel_leave(leave_request)
+        self.assertEqual(cancel.status_code, 200)
+
+        response = self._call(
+            self.owner_user,
+            params={'start_date': self.target_date.isoformat(), 'end_date': self.target_date.isoformat()},
+        )
+        data = self._json(response)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([item['id'] for item in data['results']], [out_punch.id, in_punch.id])
+        by_id = self._results_by_id(data)
+        in_punch.refresh_from_db()
+        out_punch.refresh_from_db()
+        self.assertEqual(len(data['results']), 2)
+        self.assertTrue(by_id[in_punch.id]['accepted_to_attendance'])
+        self.assertTrue(by_id[out_punch.id]['accepted_to_attendance'])
+        self.assertEqual(by_id[in_punch.id]['decision_status'], in_punch.decision_status)
+        self.assertEqual(by_id[out_punch.id]['decision_status'], out_punch.decision_status)
+        self.assertEqual(by_id[in_punch.id]['decision_source'], in_punch.decision_source)
+        self.assertEqual(by_id[out_punch.id]['decision_source'], out_punch.decision_source)
+        self.assertEqual(by_id[in_punch.id]['source'], 'Biometric')
+        self.assertEqual(by_id[out_punch.id]['source'], 'Mobile')
+        self.assertEqual(data['selected_employee_id'], self.employee.id)
+
+    def test_generated_out_revoke_history_api_restores_original_final_out_without_hiding_superseded_rows(self):
+        in_punch = self._create_punch(hour=8, minute=0, direction=AttendancePunchDirection.IN, source=AttendancePunchSource.BIOMETRIC)
+        early_out = self._create_punch(hour=16, minute=50, direction=AttendancePunchDirection.OUT, source=AttendancePunchSource.BIOMETRIC)
+        latest_out = self._create_punch(hour=17, minute=20, direction=AttendancePunchDirection.OUT, source=AttendancePunchSource.MOBILE, device='Mobile App')
+
+        with self.shift_ctx:
+            recompute_attendance(self.employee, self.target_date)
+        attendance = self._attendance()
+        approve = self._approve_correction_out(attendance)
+        self.assertEqual(approve.status_code, 200)
+        revoke = self._revoke_correction(attendance)
+        self.assertEqual(revoke.status_code, 200)
+
+        response = self._call(
+            self.owner_user,
+            params={'start_date': self.target_date.isoformat(), 'end_date': self.target_date.isoformat()},
+        )
+        data = self._json(response)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([item['id'] for item in data['results']], [latest_out.id, early_out.id, in_punch.id])
+        by_id = self._results_by_id(data)
+        self.assertEqual(len(data['results']), 3)
+        self.assertTrue(by_id[in_punch.id]['accepted_to_attendance'])
+        self.assertFalse(by_id[early_out.id]['accepted_to_attendance'])
+        self.assertTrue(by_id[latest_out.id]['accepted_to_attendance'])
+        self.assertEqual(by_id[early_out.id]['reason'], NOTE_SUPERSEDED_CHECKOUT)
+        self.assertEqual(by_id[latest_out.id]['source'], 'Mobile')
+        self.assertEqual(by_id[early_out.id]['source'], 'Biometric')
+
+    def test_invalid_transition_after_mixed_source_finalization_does_not_drift_history_api_representation(self):
+        in_punch = self._create_punch(hour=8, minute=0, direction=AttendancePunchDirection.IN, source=AttendancePunchSource.BIOMETRIC)
+        early_out = self._create_punch(hour=16, minute=50, direction=AttendancePunchDirection.OUT, source=AttendancePunchSource.BIOMETRIC)
+        latest_out = self._create_punch(hour=17, minute=20, direction=AttendancePunchDirection.OUT, source=AttendancePunchSource.MOBILE, device='Mobile App')
+
+        with self.shift_ctx:
+            recompute_attendance(self.employee, self.target_date)
+        attendance = self._attendance()
+        self.assertEqual(self._approve_correction_out(attendance).status_code, 200)
+        self.assertEqual(self._revoke_correction(attendance).status_code, 200)
+
+        baseline_response = self._call(
+            self.owner_user,
+            params={'start_date': self.target_date.isoformat(), 'end_date': self.target_date.isoformat()},
+        )
+        baseline_data = self._json(baseline_response)
+        second_revoke = self._revoke_correction(attendance)
+        self.assertEqual(second_revoke.status_code, 404)
+
+        response = self._call(
+            self.owner_user,
+            params={'start_date': self.target_date.isoformat(), 'end_date': self.target_date.isoformat()},
+        )
+        data = self._json(response)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(data['results'], baseline_data['results'])
+        self.assertEqual([item['id'] for item in data['results']], [latest_out.id, early_out.id, in_punch.id])
