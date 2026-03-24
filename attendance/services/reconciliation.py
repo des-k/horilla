@@ -891,6 +891,15 @@ def recompute_attendance(employee, attendance_date: date) -> ReconciliationResul
     decisions: dict[int, tuple[bool, str]] = {}
     final_in_punch_id = getattr(attendance, "attendance_clock_in_punch_id", None) or getattr(final_in_punch, "id", None)
     final_out_punch_id = getattr(attendance, "attendance_clock_out_punch_id", None) or getattr(final_out_punch, "id", None)
+
+    # The Attendance row is the canonical final truth. When a final punch id is
+    # persisted there, force the in-memory decision map to accept that punch as
+    # final even if earlier raw-selection branches classified it differently.
+    if final_in_punch_id:
+        decisions[final_in_punch_id] = (True, NOTE_FINAL_IN)
+    if final_out_punch_id:
+        decisions[final_out_punch_id] = (True, NOTE_FINAL_OUT)
+
     for log in logs:
         if leave_ctx.is_full_day:
             decisions[log.id] = (False, NOTE_IGNORED_FULL_DAY_LEAVE)
@@ -923,16 +932,40 @@ def recompute_attendance(employee, attendance_date: date) -> ReconciliationResul
     _apply_punch_decisions(attendance, logs, decisions, source)
 
     # Final safety net: the Attendance row is the canonical final truth.
-    # If a final punch id is persisted there, the matching raw punch must also
-    # be marked as accepted even when intermediate in-memory selection diverges
-    # during multi-step recompute/revoke/reopen flows.
+    # Re-apply the final accepted state directly on in-memory log objects first,
+    # then use the model base manager as a DB-level fallback. This avoids stale
+    # accepted flags when request/company-scoped managers or multi-step recompute
+    # flows diverge from the persisted Attendance punch ids.
     canonical_punch_updates = []
     if getattr(attendance, "attendance_clock_in_punch_id", None):
         canonical_punch_updates.append((attendance.attendance_clock_in_punch_id, NOTE_FINAL_IN))
     if getattr(attendance, "attendance_clock_out_punch_id", None):
         canonical_punch_updates.append((attendance.attendance_clock_out_punch_id, NOTE_FINAL_OUT))
+
+    canonical_map = {punch_id: reason for punch_id, reason in canonical_punch_updates}
+    for log in logs:
+        if log.id not in canonical_map:
+            continue
+        final_reason = canonical_map[log.id]
+        log.attendance_id = attendance
+        log.attendance_date = attendance.attendance_date
+        log.accepted_to_attendance = True
+        log.reason = (final_reason or '-')[:255]
+        if hasattr(log, 'decision_status'):
+            log.decision_status = 'accepted'
+        if hasattr(log, 'decision_source'):
+            log.decision_source = source
+        log.save(update_fields=[
+            'attendance_id',
+            'attendance_date',
+            'accepted_to_attendance',
+            'reason',
+            *( ['decision_status'] if hasattr(log, 'decision_status') else []),
+            *( ['decision_source'] if hasattr(log, 'decision_source') else []),
+        ])
+
     for punch_id, final_reason in canonical_punch_updates:
-        AttendancePunchingHistory.objects.filter(id=punch_id).update(
+        AttendancePunchingHistory._base_manager.filter(id=punch_id).update(
             attendance_id=attendance,
             attendance_date=attendance.attendance_date,
             accepted_to_attendance=True,
