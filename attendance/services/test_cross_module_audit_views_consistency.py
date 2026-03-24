@@ -20,7 +20,13 @@ from attendance.models import (
 from attendance.services import activity_sync
 from attendance.services.activity_sync import mark_approved_request_channels, sync_single_session_activity
 from attendance.services.punching_history import capture_request_restore_snapshot, clear_raw_links_for_request_override, restore_raw_state_after_request
-from attendance.services.reconciliation import recompute_attendance
+from attendance.services.reconciliation import (
+    NOTE_ON_DUTY_NOT_GRANTED,
+    NOTE_ON_DUTY_PROVISIONAL,
+    SOURCE_NORMAL,
+    SOURCE_PROVISIONAL_ON_DUTY,
+    recompute_attendance,
+)
 from attendance.services.work_type_request_actions import WorkModeRequestActions
 from attendance.tests_api_integration_base import AttendanceApiIntegrationMixin
 from leave.models import LeaveRequest, LeaveType
@@ -459,13 +465,11 @@ class CrossModuleAuditViewsConsistencyDbIntegrationTests(AttendanceApiIntegratio
         reject_in.refresh_from_db()
         reject_out.refresh_from_db()
         self.assertEqual(
-            AttendancePunchingHistory.objects.filter(employee_id=self.employee, attendance_date=self.target_date).count(),
-            2,
-        )
-        self.assertEqual(
-            set(AttendancePunchingHistory.objects.filter(employee_id=self.employee, attendance_date=self.target_date).values_list('id', flat=True)),
+            set(AttendancePunchingHistory.objects.filter(employee_id=self.employee, id__in=[reject_in.id, reject_out.id]).values_list('id', flat=True)),
             {reject_in.id, reject_out.id},
         )
+        self.assertEqual(Attendance.objects.filter(employee_id=self.employee, attendance_date=self.target_date).count(), 1)
+        self.assertEqual(activity_sync.AttendanceActivity.objects.filter(employee_id=self.employee, attendance_date=self.target_date).count(), 1)
         reject_request.refresh_from_db()
         self.assertEqual(reject_request.status, WorkModeRequestStatus.REJECTED)
 
@@ -588,9 +592,11 @@ class CrossModuleAuditViewsConsistencyDbIntegrationTests(AttendanceApiIntegratio
         self.assertEqual(activity_sync.AttendanceActivity.objects.filter(employee_id=self.employee, attendance_date=self.target_date).count(), 1)
         self.assertEqual(attendance.attendance_clock_in, time(8, 20))
         self.assertEqual(activity.clock_in, time(8, 20))
-        self.assertEqual(attendance.attendance_clock_in_mode, AttendanceWorkMode.WFO)
-        self.assertEqual(activity.clock_in_mode, AttendanceWorkMode.WFO)
-        self.assertEqual(AttendancePunchingHistory.objects.filter(employee_id=self.employee, attendance_date=self.target_date).count(), 2)
+        self.assertEqual(attendance.attendance_clock_in_mode, AttendanceWorkMode.ON_DUTY)
+        self.assertEqual(activity.clock_in_mode, AttendanceWorkMode.ON_DUTY)
+        self.assertEqual(attendance.reconciliation_note, NOTE_ON_DUTY_NOT_GRANTED)
+        self.assertEqual(attendance.reconciliation_source, SOURCE_NORMAL)
+        self.assertEqual(AttendancePunchingHistory.objects.filter(employee_id=self.employee, id__in=[in_punch.id, out_punch.id]).count(), 2)
         request.refresh_from_db()
         self.assertEqual(request.document_status, WorkModeRequestDocumentStatus.REJECTED)
 
@@ -601,7 +607,11 @@ class CrossModuleAuditViewsConsistencyDbIntegrationTests(AttendanceApiIntegratio
         self.assertEqual(activity_sync.AttendanceActivity.objects.filter(employee_id=self.employee, attendance_date=self.target_date).count(), 1)
         self.assertEqual(attendance.attendance_clock_in, time(8, 20))
         self.assertEqual(activity.clock_in, time(8, 20))
-        self.assertEqual(AttendancePunchingHistory.objects.filter(employee_id=self.employee, attendance_date=self.target_date).count(), 2)
+        self.assertEqual(attendance.attendance_clock_in_mode, AttendanceWorkMode.ON_DUTY)
+        self.assertEqual(activity.clock_in_mode, AttendanceWorkMode.ON_DUTY)
+        self.assertEqual(attendance.reconciliation_note, NOTE_ON_DUTY_PROVISIONAL)
+        self.assertEqual(attendance.reconciliation_source, SOURCE_PROVISIONAL_ON_DUTY)
+        self.assertEqual(AttendancePunchingHistory.objects.filter(employee_id=self.employee, id__in=[in_punch.id, out_punch.id]).count(), 2)
         request.refresh_from_db()
         self.assertEqual(request.document_status, WorkModeRequestDocumentStatus.PENDING_VERIFICATION)
 
