@@ -63,12 +63,20 @@ class RequestLifecycleFullChainEndpointTests(AttendanceApiIntegrationMixin, APIT
         self._clear_request_context()
         super().tearDown()
 
-    def _create_raw_punches(self, *, work_mode=AttendanceWorkMode.WFO, in_time_value=time(8, 0), out_time_value=time(17, 0)):
+    def _create_raw_punches(
+        self,
+        *,
+        work_mode=AttendanceWorkMode.WFO,
+        in_time_value=time(8, 0),
+        out_time_value=time(17, 0),
+        in_source=AttendancePunchSource.BIOMETRIC,
+        out_source=AttendancePunchSource.BIOMETRIC,
+    ):
         in_punch = AttendancePunchingHistory.objects.create(
             employee_id=self.employee,
             attendance_date=self.target_date,
             punch_timestamp=self.aware_dt(2026, 3, 21, in_time_value.hour, in_time_value.minute),
-            source=AttendancePunchSource.BIOMETRIC,
+            source=in_source,
             punch_direction=AttendancePunchDirection.IN,
             raw_employee_identifier='ENDPT-1',
             device_info='Gate A',
@@ -78,7 +86,7 @@ class RequestLifecycleFullChainEndpointTests(AttendanceApiIntegrationMixin, APIT
             employee_id=self.employee,
             attendance_date=self.target_date,
             punch_timestamp=self.aware_dt(2026, 3, 21, out_time_value.hour, out_time_value.minute),
-            source=AttendancePunchSource.BIOMETRIC,
+            source=out_source,
             punch_direction=AttendancePunchDirection.OUT,
             raw_employee_identifier='ENDPT-1',
             device_info='Gate A',
@@ -561,6 +569,74 @@ class RequestLifecycleFullChainEndpointTests(AttendanceApiIntegrationMixin, APIT
         self.assertEqual(request.document_status, WorkModeRequestDocumentStatus.PENDING_VERIFICATION)
         self.assertEqual(self._attendance_activity_snapshot(), baseline_snapshot)
         self.assertEqual(self._punch_snapshot(in_punch, out_punch), baseline_punch_snapshot)
+
+
+    def test_invalid_transition_after_mixed_source_finalization_keeps_reconciliation_and_raw_visibility_unchanged(self):
+        in_punch, out_punch = self._create_raw_punches(
+            work_mode=AttendanceWorkMode.WFO,
+            in_time_value=time(8, 20),
+            out_time_value=time(16, 40),
+            in_source=AttendancePunchSource.BIOMETRIC,
+            out_source=AttendancePunchSource.MOBILE,
+        )
+        request = WorkModeRequest.objects.create(
+            employee_id=self.employee,
+            mode=AttendanceWorkMode.ON_DUTY,
+            scope=WorkModeRequestScope.FULL,
+            start_date=self.target_date,
+            end_date=self.target_date,
+            status=WorkModeRequestStatus.APPROVED,
+            reason='Mixed-source client visit',
+            document_status=WorkModeRequestDocumentStatus.PENDING_VERIFICATION,
+        )
+        version = WorkModeRequestDocumentVersion.objects.create(
+            work_mode_request=request,
+            version_number=1,
+            is_current=True,
+            status=WorkModeRequestDocumentStatus.PENDING_VERIFICATION,
+            submitted_by=self.employee,
+        )
+        request.current_document_version = version
+        request.save(update_fields=['current_document_version'])
+
+        with self.shift_ctx:
+            recompute_attendance(self.employee, self.target_date)
+
+        with self.shift_ctx:
+            verify = self.auth_client(self.admin_user).put(
+                f'/api/attendance/work-mode-request-action/{request.id}/verify',
+                {'reason': 'verified'},
+                format='json',
+            )
+        self.assertEqual(verify.status_code, 200)
+        attendance = self._attendance()
+        self.assertEqual(attendance.attendance_clock_in_channel, AttendanceChannel.BIOMETRIC)
+        self.assertEqual(attendance.attendance_clock_out_channel, AttendanceChannel.MOBILE)
+
+        with self.shift_ctx:
+            revoke = self.auth_client(self.admin_user).put(
+                f'/api/attendance/work-mode-request-action/{request.id}/revoke',
+                {'remark': 'trip ended'},
+                format='json',
+            )
+        self.assertEqual(revoke.status_code, 200)
+        baseline_snapshot = self._attendance_activity_snapshot()
+        baseline_punch_snapshot = self._punch_snapshot(in_punch, out_punch)
+
+        with self.shift_ctx:
+            invalid_verify = self.auth_client(self.admin_user).put(
+                f'/api/attendance/work-mode-request-action/{request.id}/verify',
+                {'reason': 'should fail'},
+                format='json',
+            )
+        self.assertEqual(invalid_verify.status_code, 400)
+        request.refresh_from_db()
+        self.assertEqual(request.status, WorkModeRequestStatus.REVOKED)
+        self.assertEqual(self._attendance_activity_snapshot(), baseline_snapshot)
+        self.assertEqual(self._punch_snapshot(in_punch, out_punch), baseline_punch_snapshot)
+        attendance = self._attendance()
+        self.assertEqual(attendance.attendance_clock_in_channel, AttendanceChannel.BIOMETRIC)
+        self.assertEqual(attendance.attendance_clock_out_channel, AttendanceChannel.MOBILE)
 
     def test_invalid_transition_never_changes_raw_trail_visibility(self):
         in_punch, out_punch = self._create_raw_punches(work_mode=AttendanceWorkMode.WFO, in_time_value=time(8, 20), out_time_value=time(16, 40))
