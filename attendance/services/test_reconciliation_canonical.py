@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
+import random
 from types import SimpleNamespace
 
 from django.test import SimpleTestCase
@@ -78,6 +79,199 @@ class ReconciliationCanonicalTests(SimpleTestCase):
 
         reconciliation._apply_punch_decisions(attendance, logs, decisions, source)
         return decisions
+
+    RANDOMIZED_SOURCES = ("biometric", "mobile", "approved_request")
+
+    def _window_minutes(self, start_dt, end_dt):
+        return int((end_dt - start_dt).total_seconds() // 60)
+
+    def _build_randomized_logs(
+        self,
+        rng: random.Random,
+        scenario_id: int,
+        *,
+        valid_in_range=(0, 5),
+        valid_out_range=(0, 5),
+        invalid_in_range=(0, 3),
+        invalid_out_range=(0, 3),
+        dense: bool = False,
+    ):
+        ctx = self._default_ctx()
+        valid_in_count = rng.randint(*valid_in_range)
+        valid_out_count = rng.randint(*valid_out_range)
+        invalid_in_count = rng.randint(*invalid_in_range)
+        invalid_out_count = rng.randint(*invalid_out_range)
+
+        if valid_in_count == 0 and valid_out_count == 0:
+            valid_in_count = 1
+
+        log_id = scenario_id * 1000 + 1
+        logs = []
+
+        def make_log(direction, punch_dt, source):
+            nonlocal log_id
+            log = FakePunchLog(log_id, direction, punch_dt, source=source)
+            log_id += 1
+            return log
+
+        def choose_valid_dt(direction):
+            if direction == AttendancePunchDirection.IN:
+                start_dt = ctx.check_in_window_start_dt
+                end_dt = ctx.check_in_window_end_dt
+            else:
+                start_dt = ctx.check_out_window_start_dt
+                end_dt = ctx.check_out_window_end_dt
+            if dense:
+                candidate_minutes = [0, 0, 1, 1, 2, 3, 5, 10, 20, 35, 60]
+                minute_offset = min(self._window_minutes(start_dt, end_dt), rng.choice(candidate_minutes))
+            else:
+                minute_offset = rng.randint(0, self._window_minutes(start_dt, end_dt))
+            return start_dt + timedelta(minutes=minute_offset)
+
+        def choose_invalid_dt(direction):
+            if direction == AttendancePunchDirection.IN:
+                start_dt = ctx.check_in_window_start_dt
+                end_dt = ctx.check_in_window_end_dt
+            else:
+                start_dt = ctx.check_out_window_start_dt
+                end_dt = ctx.check_out_window_end_dt
+
+            if dense:
+                offsets = [1, 1, 2, 5, 10, 30, 90]
+            else:
+                offsets = [1, 2, 5, 10, 30, 60, 120]
+            offset = rng.choice(offsets)
+            if rng.random() < 0.5:
+                return start_dt - timedelta(minutes=offset)
+            return end_dt + timedelta(minutes=offset)
+
+        for _ in range(valid_in_count):
+            logs.append(
+                make_log(
+                    AttendancePunchDirection.IN,
+                    choose_valid_dt(AttendancePunchDirection.IN),
+                    rng.choice(self.RANDOMIZED_SOURCES),
+                )
+            )
+        for _ in range(valid_out_count):
+            logs.append(
+                make_log(
+                    AttendancePunchDirection.OUT,
+                    choose_valid_dt(AttendancePunchDirection.OUT),
+                    rng.choice(self.RANDOMIZED_SOURCES),
+                )
+            )
+        for _ in range(invalid_in_count):
+            logs.append(
+                make_log(
+                    AttendancePunchDirection.IN,
+                    choose_invalid_dt(AttendancePunchDirection.IN),
+                    rng.choice(self.RANDOMIZED_SOURCES),
+                )
+            )
+        for _ in range(invalid_out_count):
+            logs.append(
+                make_log(
+                    AttendancePunchDirection.OUT,
+                    choose_invalid_dt(AttendancePunchDirection.OUT),
+                    rng.choice(self.RANDOMIZED_SOURCES),
+                )
+            )
+
+        rng.shuffle(logs)
+        return ctx, logs
+
+    def _assert_randomized_canonical_invariants(self, ctx, attendance, logs, raw):
+        valid_in = sorted(
+            [
+                log
+                for log in logs
+                if log.punch_direction == AttendancePunchDirection.IN
+                and reconciliation._in_window(
+                    reconciliation._localize(log.punch_timestamp),
+                    ctx.check_in_window_start_dt,
+                    ctx.check_in_window_end_dt,
+                )
+            ],
+            key=lambda log: (reconciliation._localize(log.punch_timestamp), log.id),
+        )
+        valid_out = sorted(
+            [
+                log
+                for log in logs
+                if log.punch_direction == AttendancePunchDirection.OUT
+                and reconciliation._in_window(
+                    reconciliation._localize(log.punch_timestamp),
+                    ctx.check_out_window_start_dt,
+                    ctx.check_out_window_end_dt,
+                )
+            ],
+            key=lambda log: (reconciliation._localize(log.punch_timestamp), log.id),
+        )
+        invalid_in = [
+            log
+            for log in logs
+            if log.punch_direction == AttendancePunchDirection.IN and log not in valid_in
+        ]
+        invalid_out = [
+            log
+            for log in logs
+            if log.punch_direction == AttendancePunchDirection.OUT and log not in valid_out
+        ]
+
+        accepted_in = [
+            log for log in logs if log.punch_direction == AttendancePunchDirection.IN and log.accepted_to_attendance
+        ]
+        accepted_out = [
+            log for log in logs if log.punch_direction == AttendancePunchDirection.OUT and log.accepted_to_attendance
+        ]
+
+        self.assertLessEqual(len(accepted_in), 1)
+        self.assertLessEqual(len(accepted_out), 1)
+
+        if valid_in:
+            self.assertEqual(raw["final_in"].id, valid_in[0].id)
+            self.assertEqual([log.id for log in accepted_in], [valid_in[0].id])
+            self.assertEqual(valid_in[0].reason, reconciliation.NOTE_FINAL_IN)
+        else:
+            self.assertIsNone(raw["final_in"])
+            self.assertEqual(accepted_in, [])
+
+        if valid_out:
+            self.assertEqual(raw["final_out"].id, valid_out[-1].id)
+            self.assertEqual([log.id for log in accepted_out], [valid_out[-1].id])
+            self.assertEqual(valid_out[-1].reason, reconciliation.NOTE_FINAL_OUT)
+        else:
+            self.assertIsNone(raw["final_out"])
+            self.assertEqual(accepted_out, [])
+
+        self.assertEqual([log.id for log in raw["extra_in"]], [log.id for log in valid_in[1:]])
+        self.assertEqual([log.id for log in raw["extra_out"]], [log.id for log in valid_out[:-1]])
+
+        for log in valid_in[1:]:
+            self.assertFalse(log.accepted_to_attendance)
+            self.assertEqual(log.reason, reconciliation.NOTE_DUPLICATE_CHECKIN)
+            self.assertEqual(log.decision_status, "not_accepted")
+        for log in valid_out[:-1]:
+            self.assertFalse(log.accepted_to_attendance)
+            self.assertEqual(log.reason, reconciliation.NOTE_SUPERSEDED_CHECKOUT)
+            self.assertEqual(log.decision_status, "superseded")
+
+        for log in invalid_in:
+            self.assertFalse(log.accepted_to_attendance)
+            self.assertEqual(log.reason, reconciliation.NOTE_INVALID_IN_WINDOW)
+            self.assertEqual(log.decision_status, "invalid")
+        for log in invalid_out:
+            self.assertFalse(log.accepted_to_attendance)
+            self.assertEqual(log.reason, reconciliation.NOTE_INVALID_OUT_WINDOW)
+            self.assertEqual(log.decision_status, "invalid")
+
+        for log in logs:
+            self.assertEqual(log.attendance_id, attendance)
+            self.assertEqual(log.attendance_date, ctx.attendance_date)
+            self.assertIsNotNone(log.reason)
+            self.assertEqual(log.decision_source, reconciliation.SOURCE_NORMAL)
+
     def test_overnight_threshold_maps_to_next_calendar_day(self):
         shift_start = timezone.make_aware(datetime(2026, 3, 14, 22, 0))
         shift_end = timezone.make_aware(datetime(2026, 3, 15, 6, 0))
@@ -388,6 +582,109 @@ class ReconciliationCanonicalTests(SimpleTestCase):
         self.assertTrue(logs[3].accepted_to_attendance)
         self.assertEqual(logs[1].reason, reconciliation.NOTE_SUPERSEDED_CHECKOUT)
         self.assertEqual(logs[2].reason, reconciliation.NOTE_DUPLICATE_CHECKIN)
+
+    def test_randomized_canonical_selection_always_keeps_earliest_valid_in_and_latest_valid_out(self):
+        rng = random.Random(12345)
+
+        for scenario_id in range(1, 121):
+            ctx, logs = self._build_randomized_logs(rng, scenario_id, dense=(scenario_id % 2 == 0))
+            attendance = SimpleNamespace(attendance_date=ctx.attendance_date)
+            raw = reconciliation._pick_raw_sessions(logs, ctx)
+
+            self._apply_decisions_from_raw(attendance, logs, raw)
+
+            self._assert_randomized_canonical_invariants(ctx, attendance, logs, raw)
+
+    def test_randomized_mixed_source_sequences_never_create_multiple_accepted_in_or_out(self):
+        rng = random.Random(22334)
+
+        for scenario_id in range(1, 101):
+            ctx, logs = self._build_randomized_logs(
+                rng,
+                scenario_id,
+                valid_in_range=(1, 5),
+                valid_out_range=(1, 5),
+                invalid_in_range=(0, 2),
+                invalid_out_range=(0, 2),
+                dense=True,
+            )
+            attendance = SimpleNamespace(attendance_date=ctx.attendance_date)
+            raw = reconciliation._pick_raw_sessions(logs, ctx)
+
+            self._apply_decisions_from_raw(attendance, logs, raw)
+
+            accepted_in = [
+                log.id for log in logs if log.punch_direction == AttendancePunchDirection.IN and log.accepted_to_attendance
+            ]
+            accepted_out = [
+                log.id for log in logs if log.punch_direction == AttendancePunchDirection.OUT and log.accepted_to_attendance
+            ]
+            self.assertLessEqual(len(accepted_in), 1)
+            self.assertLessEqual(len(accepted_out), 1)
+            self._assert_randomized_canonical_invariants(ctx, attendance, logs, raw)
+
+    def test_randomized_dense_sequences_preserve_nonfinal_punch_visibility(self):
+        rng = random.Random(99881)
+
+        for scenario_id in range(1, 81):
+            ctx, logs = self._build_randomized_logs(
+                rng,
+                scenario_id,
+                valid_in_range=(2, 5),
+                valid_out_range=(2, 5),
+                invalid_in_range=(1, 3),
+                invalid_out_range=(1, 3),
+                dense=True,
+            )
+            attendance = SimpleNamespace(attendance_date=ctx.attendance_date)
+            raw = reconciliation._pick_raw_sessions(logs, ctx)
+
+            self._apply_decisions_from_raw(attendance, logs, raw)
+
+            nonfinal_logs = [log for log in logs if not log.accepted_to_attendance]
+            self.assertTrue(nonfinal_logs)
+            for log in nonfinal_logs:
+                self.assertEqual(log.attendance_id, attendance)
+                self.assertEqual(log.attendance_date, ctx.attendance_date)
+                self.assertIsNotNone(log.reason)
+                self.assertFalse(log.accepted_to_attendance)
+            self._assert_randomized_canonical_invariants(ctx, attendance, logs, raw)
+
+    def test_randomized_outside_window_candidates_never_override_valid_canonical_truth(self):
+        rng = random.Random(445566)
+
+        for scenario_id in range(1, 81):
+            ctx, logs = self._build_randomized_logs(
+                rng,
+                scenario_id,
+                valid_in_range=(1, 4),
+                valid_out_range=(1, 4),
+                invalid_in_range=(1, 4),
+                invalid_out_range=(1, 4),
+                dense=(scenario_id % 3 == 0),
+            )
+            attendance = SimpleNamespace(attendance_date=ctx.attendance_date)
+            raw = reconciliation._pick_raw_sessions(logs, ctx)
+
+            self._apply_decisions_from_raw(attendance, logs, raw)
+
+            accepted_in = [
+                log for log in logs if log.punch_direction == AttendancePunchDirection.IN and log.accepted_to_attendance
+            ]
+            accepted_out = [
+                log for log in logs if log.punch_direction == AttendancePunchDirection.OUT and log.accepted_to_attendance
+            ]
+            for log in accepted_in + accepted_out:
+                localized = reconciliation._localize(log.punch_timestamp)
+                if log.punch_direction == AttendancePunchDirection.IN:
+                    self.assertTrue(
+                        reconciliation._in_window(localized, ctx.check_in_window_start_dt, ctx.check_in_window_end_dt)
+                    )
+                else:
+                    self.assertTrue(
+                        reconciliation._in_window(localized, ctx.check_out_window_start_dt, ctx.check_out_window_end_dt)
+                    )
+            self._assert_randomized_canonical_invariants(ctx, attendance, logs, raw)
 
     def test_apply_punch_decisions_marks_duplicate_checkin_as_not_accepted(self):
         attendance = SimpleNamespace(attendance_date=date(2026, 3, 14))
