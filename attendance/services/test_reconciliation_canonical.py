@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from django.test import SimpleTestCase
 from django.utils import timezone
 
-from attendance.models import AttendancePunchDirection
+from attendance.models import AttendancePunchDirection, AttendanceWorkMode, WorkModeRequestDocumentStatus, WorkModeRequestStatus
 from attendance.services import reconciliation
 
 
@@ -95,6 +95,81 @@ class ReconciliationCanonicalTests(SimpleTestCase):
 
         self.assertEqual(late_minutes, 0)
         self.assertEqual(early_minutes, 0)
+
+
+    def test_pick_raw_sessions_exposes_first_in_and_last_out_across_all_candidates(self):
+        ctx = reconciliation.ShiftContext(
+            employee="EMP-1",
+            attendance_date=date(2026, 3, 14),
+            day=None,
+            shift=None,
+            schedule=None,
+            shift_start_dt=timezone.make_aware(datetime(2026, 3, 14, 8, 0)),
+            shift_end_dt=timezone.make_aware(datetime(2026, 3, 14, 17, 0)),
+            check_in_window_start_dt=timezone.make_aware(datetime(2026, 3, 14, 8, 0)),
+            check_in_window_end_dt=timezone.make_aware(datetime(2026, 3, 14, 9, 0)),
+            check_out_window_start_dt=timezone.make_aware(datetime(2026, 3, 14, 12, 0)),
+            check_out_window_end_dt=timezone.make_aware(datetime(2026, 3, 14, 15, 0)),
+            minimum_hour="08:00",
+            grace_seconds=0,
+            grace_clock_in_type="after",
+        )
+        logs = [
+            FakePunchLog(10, AttendancePunchDirection.IN, timezone.make_aware(datetime(2026, 3, 14, 7, 55))),
+            FakePunchLog(11, AttendancePunchDirection.IN, timezone.make_aware(datetime(2026, 3, 14, 8, 20))),
+            FakePunchLog(12, AttendancePunchDirection.OUT, timezone.make_aware(datetime(2026, 3, 14, 15, 5))),
+            FakePunchLog(13, AttendancePunchDirection.OUT, timezone.make_aware(datetime(2026, 3, 14, 16, 40))),
+        ]
+
+        raw = reconciliation._pick_raw_sessions(logs, ctx)
+
+        self.assertEqual(raw["any_in"].id, 10)
+        self.assertEqual(raw["final_in"].id, 11)
+        self.assertEqual(raw["any_out"].id, 13)
+        self.assertIsNone(raw["final_out"])
+
+    def test_on_duty_raw_truth_selection_uses_first_and_last_punch_even_when_window_valid_selection_is_missing(self):
+        raw = {
+            "any_in": SimpleNamespace(id=21),
+            "final_in": None,
+            "any_out": SimpleNamespace(id=22),
+            "final_out": None,
+        }
+
+        selected_in = reconciliation._select_raw_truth_punch(
+            raw,
+            AttendancePunchDirection.IN,
+            preserve_raw_truth=True,
+        )
+        selected_out = reconciliation._select_raw_truth_punch(
+            raw,
+            AttendancePunchDirection.OUT,
+            preserve_raw_truth=True,
+        )
+
+        self.assertEqual(selected_in.id, 21)
+        self.assertEqual(selected_out.id, 22)
+
+    def test_on_duty_status_variants_preserve_raw_truth_selection(self):
+        for status, document_status in [
+            (WorkModeRequestStatus.APPROVED, WorkModeRequestDocumentStatus.VERIFIED),
+            (WorkModeRequestStatus.APPROVED, WorkModeRequestDocumentStatus.PENDING_VERIFICATION),
+            (WorkModeRequestStatus.APPROVED, WorkModeRequestDocumentStatus.REJECTED),
+            (WorkModeRequestStatus.REVOKED, WorkModeRequestDocumentStatus.REJECTED),
+        ]:
+            req = SimpleNamespace(
+                mode=AttendanceWorkMode.ON_DUTY,
+                status=status,
+                effective_document_status=lambda ds=document_status: ds,
+            )
+            self.assertTrue(reconciliation._should_preserve_on_duty_raw_truth(req))
+
+    def test_non_on_duty_or_non_active_requests_do_not_force_raw_truth_fallback(self):
+        waiting_req = SimpleNamespace(mode=AttendanceWorkMode.ON_DUTY, status=WorkModeRequestStatus.WAITING_FOR_APPROVAL)
+        wfa_req = SimpleNamespace(mode=AttendanceWorkMode.WFA, status=WorkModeRequestStatus.APPROVED)
+
+        self.assertFalse(reconciliation._should_preserve_on_duty_raw_truth(waiting_req))
+        self.assertFalse(reconciliation._should_preserve_on_duty_raw_truth(wfa_req))
 
     def test_multiple_valid_checkouts_choose_latest_and_supersede_older(self):
         ctx = reconciliation.ShiftContext(
