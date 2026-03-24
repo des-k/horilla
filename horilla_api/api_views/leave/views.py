@@ -22,6 +22,24 @@ from ...api_decorators.base.decorators import manager_permission_required
 from ...api_methods.base.methods import groupby_queryset
 
 
+def _refresh_leave_attendance_truth(leave_request):
+    with contextlib.suppress(Exception):
+        from attendance.services.reconciliation import recompute_attendance_range
+        from leave.half_day_rules import impacted_attendance_dates_for_leave_request
+
+        attendance_dates = impacted_attendance_dates_for_leave_request(
+            employee=leave_request.employee_id,
+            start_date=leave_request.start_date,
+            end_date=leave_request.end_date,
+        )
+        if attendance_dates:
+            recompute_attendance_range(
+                leave_request.employee_id,
+                min(attendance_dates),
+                max(attendance_dates),
+            )
+
+
 class EmployeeAvailableLeaveGetAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -737,6 +755,7 @@ class LeaveRequestApproveAPIView(APIView):
             self.leave_approve_calculation(leave_request, available_leave)
             leave_request.status = "approved"
             leave_request.save()
+            _refresh_leave_attendance_truth(leave_request)
         else:
             conditional_requests = leave_request.multiple_approvals()
             approver = [
@@ -753,6 +772,7 @@ class LeaveRequestApproveAPIView(APIView):
                 self.leave_approve_calculation(leave_request, available_leave)
                 leave_request.status = "approved"
                 leave_request.save()
+                _refresh_leave_attendance_truth(leave_request)
 
     @manager_permission_required("leave.change_leaverequest")
     def put(self, request, pk):
@@ -764,6 +784,7 @@ class LeaveRequestApproveAPIView(APIView):
                 self.leave_approve_calculation(leave_request, available_leave)
                 leave_request.status = "approved"
                 leave_request.save()
+                _refresh_leave_attendance_truth(leave_request)
             else:
                 self.leave_multiple_approve(request, leave_request, available_leave)
             with contextlib.suppress(Exception):
@@ -814,6 +835,7 @@ class LeaveRequestRejectAPIView(APIView):
         reject_reason = (request.data.get("reason") or "").strip() if hasattr(request, "data") else ""
         if leave_request.status != "rejected":
             self.leave_calculation(leave_request, employee_id, reject_reason=reject_reason)
+            _refresh_leave_attendance_truth(leave_request)
             with contextlib.suppress(Exception):
                 notify.send(
                     request.user.employee_get,
@@ -851,6 +873,7 @@ class LeaveRequestCancelAPIView(APIView):
             if start_date >= curr_date:
                 leave_request.status = "cancelled"
                 leave_request.save()
+                _refresh_leave_attendance_truth(leave_request)
                 return Response(status=200)
             raise serializers.ValidationError("Nothing to cancel.")
         raise serializers.ValidationError("Access Denied.")
