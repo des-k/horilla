@@ -30,6 +30,54 @@ class FakePunchLog:
 
 
 class ReconciliationCanonicalTests(SimpleTestCase):
+
+
+    def _default_ctx(self):
+        return reconciliation.ShiftContext(
+            employee="EMP-1",
+            attendance_date=date(2026, 3, 14),
+            day=None,
+            shift=None,
+            schedule=None,
+            shift_start_dt=timezone.make_aware(datetime(2026, 3, 14, 8, 0)),
+            shift_end_dt=timezone.make_aware(datetime(2026, 3, 14, 17, 0)),
+            check_in_window_start_dt=timezone.make_aware(datetime(2026, 3, 14, 6, 0)),
+            check_in_window_end_dt=timezone.make_aware(datetime(2026, 3, 14, 12, 0)),
+            check_out_window_start_dt=timezone.make_aware(datetime(2026, 3, 14, 12, 0)),
+            check_out_window_end_dt=timezone.make_aware(datetime(2026, 3, 14, 23, 0)),
+            minimum_hour="08:00",
+            grace_seconds=0,
+            grace_clock_in_type="after",
+        )
+
+    def _apply_decisions_from_raw(self, attendance, logs, raw, source=reconciliation.SOURCE_NORMAL):
+        decisions = {}
+        if raw.get("final_in") is not None:
+            decisions[raw["final_in"].id] = (True, reconciliation.NOTE_FINAL_IN)
+        if raw.get("final_out") is not None:
+            decisions[raw["final_out"].id] = (True, reconciliation.NOTE_FINAL_OUT)
+
+        for log in logs:
+            if raw.get("final_in") is not None and log.id == raw["final_in"].id:
+                continue
+            if raw.get("final_out") is not None and log.id == raw["final_out"].id:
+                continue
+            if log in raw.get("extra_in", []):
+                decisions[log.id] = (False, reconciliation.NOTE_DUPLICATE_CHECKIN)
+                continue
+            if log in raw.get("extra_out", []):
+                decisions[log.id] = (False, reconciliation.NOTE_SUPERSEDED_CHECKOUT)
+                continue
+            if log in raw.get("invalid_in", []):
+                decisions[log.id] = (False, reconciliation.NOTE_INVALID_IN_WINDOW)
+                continue
+            if log in raw.get("invalid_out", []):
+                decisions[log.id] = (False, reconciliation.NOTE_INVALID_OUT_WINDOW)
+                continue
+            decisions[log.id] = (False, "Ignored: not used in final attendance")
+
+        reconciliation._apply_punch_decisions(attendance, logs, decisions, source)
+        return decisions
     def test_overnight_threshold_maps_to_next_calendar_day(self):
         shift_start = timezone.make_aware(datetime(2026, 3, 14, 22, 0))
         shift_end = timezone.make_aware(datetime(2026, 3, 15, 6, 0))
@@ -198,6 +246,83 @@ class ReconciliationCanonicalTests(SimpleTestCase):
 
         self.assertEqual(raw["final_out"].id, 3)
         self.assertEqual([log.id for log in raw["extra_out"]], [2])
+
+
+
+    def test_mixed_mobile_and_biometric_multiple_ins_and_outs_still_pick_first_in_and_last_out(self):
+        ctx = self._default_ctx()
+        attendance = SimpleNamespace(attendance_date=ctx.attendance_date)
+        logs = [
+            FakePunchLog(1, AttendancePunchDirection.IN, timezone.make_aware(datetime(2026, 3, 14, 8, 0)), source="biometric"),
+            FakePunchLog(2, AttendancePunchDirection.IN, timezone.make_aware(datetime(2026, 3, 14, 8, 4)), source="mobile"),
+            FakePunchLog(3, AttendancePunchDirection.OUT, timezone.make_aware(datetime(2026, 3, 14, 16, 35)), source="mobile"),
+            FakePunchLog(4, AttendancePunchDirection.OUT, timezone.make_aware(datetime(2026, 3, 14, 17, 12)), source="biometric"),
+        ]
+
+        raw = reconciliation._pick_raw_sessions(logs, ctx)
+        decisions = self._apply_decisions_from_raw(attendance, logs, raw)
+
+        self.assertEqual(raw["any_in"].id, 1)
+        self.assertEqual(raw["final_in"].id, 1)
+        self.assertEqual(raw["any_out"].id, 4)
+        self.assertEqual(raw["final_out"].id, 4)
+        self.assertTrue(logs[0].accepted_to_attendance)
+        self.assertFalse(logs[1].accepted_to_attendance)
+        self.assertFalse(logs[2].accepted_to_attendance)
+        self.assertTrue(logs[3].accepted_to_attendance)
+        self.assertEqual(logs[1].reason, reconciliation.NOTE_DUPLICATE_CHECKIN)
+        self.assertEqual(logs[2].reason, reconciliation.NOTE_SUPERSEDED_CHECKOUT)
+        self.assertEqual(logs[1].decision_status, "not_accepted")
+        self.assertEqual(logs[2].decision_status, "superseded")
+        self.assertEqual(logs[2].decision_source, reconciliation.SOURCE_NORMAL)
+        self.assertEqual(decisions[1], (True, reconciliation.NOTE_FINAL_IN))
+        self.assertEqual(decisions[4], (True, reconciliation.NOTE_FINAL_OUT))
+
+    def test_identical_minute_punches_prefer_stable_order_without_duplicate_acceptance(self):
+        ctx = self._default_ctx()
+        attendance = SimpleNamespace(attendance_date=ctx.attendance_date)
+        same_minute = timezone.make_aware(datetime(2026, 3, 14, 8, 0))
+        same_out_minute = timezone.make_aware(datetime(2026, 3, 14, 17, 0))
+        logs = [
+            FakePunchLog(5, AttendancePunchDirection.IN, same_minute, source="mobile"),
+            FakePunchLog(1, AttendancePunchDirection.IN, same_minute, source="biometric"),
+            FakePunchLog(8, AttendancePunchDirection.OUT, same_out_minute, source="mobile"),
+            FakePunchLog(2, AttendancePunchDirection.OUT, same_out_minute, source="biometric"),
+        ]
+
+        raw = reconciliation._pick_raw_sessions(logs, ctx)
+        self._apply_decisions_from_raw(attendance, logs, raw)
+
+        self.assertEqual(raw["final_in"].id, 1)
+        self.assertEqual([log.id for log in raw["extra_in"]], [5])
+        self.assertEqual(raw["final_out"].id, 8)
+        self.assertEqual([log.id for log in raw["extra_out"]], [2])
+        self.assertTrue(next(log for log in logs if log.id == 1).accepted_to_attendance)
+        self.assertFalse(next(log for log in logs if log.id == 5).accepted_to_attendance)
+        self.assertTrue(next(log for log in logs if log.id == 8).accepted_to_attendance)
+        self.assertFalse(next(log for log in logs if log.id == 2).accepted_to_attendance)
+
+    def test_request_generated_punches_do_not_override_earlier_valid_in_or_later_valid_out_without_rule(self):
+        ctx = self._default_ctx()
+        attendance = SimpleNamespace(attendance_date=ctx.attendance_date)
+        logs = [
+            FakePunchLog(1, AttendancePunchDirection.IN, timezone.make_aware(datetime(2026, 3, 14, 8, 5)), source="biometric"),
+            FakePunchLog(2, AttendancePunchDirection.IN, timezone.make_aware(datetime(2026, 3, 14, 8, 20)), source="approved_request"),
+            FakePunchLog(3, AttendancePunchDirection.OUT, timezone.make_aware(datetime(2026, 3, 14, 16, 45)), source="approved_request"),
+            FakePunchLog(4, AttendancePunchDirection.OUT, timezone.make_aware(datetime(2026, 3, 14, 17, 10)), source="mobile"),
+        ]
+
+        raw = reconciliation._pick_raw_sessions(logs, ctx)
+        self._apply_decisions_from_raw(attendance, logs, raw)
+
+        self.assertEqual(raw["final_in"].id, 1)
+        self.assertEqual(raw["final_out"].id, 4)
+        self.assertTrue(logs[0].accepted_to_attendance)
+        self.assertFalse(logs[1].accepted_to_attendance)
+        self.assertFalse(logs[2].accepted_to_attendance)
+        self.assertTrue(logs[3].accepted_to_attendance)
+        self.assertEqual(logs[1].reason, reconciliation.NOTE_DUPLICATE_CHECKIN)
+        self.assertEqual(logs[2].reason, reconciliation.NOTE_SUPERSEDED_CHECKOUT)
 
     def test_apply_punch_decisions_marks_duplicate_checkin_as_not_accepted(self):
         attendance = SimpleNamespace(attendance_date=date(2026, 3, 14))
