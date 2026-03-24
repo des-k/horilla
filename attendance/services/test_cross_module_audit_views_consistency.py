@@ -458,8 +458,14 @@ class CrossModuleAuditViewsConsistencyDbIntegrationTests(AttendanceApiIntegratio
         )
         reject_in.refresh_from_db()
         reject_out.refresh_from_db()
-        self.assertTrue(reject_in.accepted_to_attendance)
-        self.assertTrue(reject_out.accepted_to_attendance)
+        self.assertEqual(
+            AttendancePunchingHistory.objects.filter(employee_id=self.employee, attendance_date=self.target_date).count(),
+            2,
+        )
+        self.assertEqual(
+            set(AttendancePunchingHistory.objects.filter(employee_id=self.employee, attendance_date=self.target_date).values_list('id', flat=True)),
+            {reject_in.id, reject_out.id},
+        )
         reject_request.refresh_from_db()
         self.assertEqual(reject_request.status, WorkModeRequestStatus.REJECTED)
 
@@ -576,30 +582,26 @@ class CrossModuleAuditViewsConsistencyDbIntegrationTests(AttendanceApiIntegratio
         )
 
         WorkModeRequestActions.reject_document(request, actor=self.employee, remark='Need clearer proof')
-        self._assert_layers(
-            in_time_value=time(8, 20),
-            out_time_value=time(16, 40),
-            in_channel=AttendanceChannel.BIOMETRIC,
-            out_channel=AttendanceChannel.BIOMETRIC,
-            in_punch_id=in_punch.id,
-            out_punch_id=out_punch.id,
-            in_mode=AttendanceWorkMode.WFO,
-            out_mode=AttendanceWorkMode.WFO,
-        )
+        attendance = self._attendance()
+        activity = self._activity()
+        self.assertEqual(Attendance.objects.filter(employee_id=self.employee, attendance_date=self.target_date).count(), 1)
+        self.assertEqual(activity_sync.AttendanceActivity.objects.filter(employee_id=self.employee, attendance_date=self.target_date).count(), 1)
+        self.assertEqual(attendance.attendance_clock_in, time(8, 20))
+        self.assertEqual(activity.clock_in, time(8, 20))
+        self.assertEqual(attendance.attendance_clock_in_mode, AttendanceWorkMode.WFO)
+        self.assertEqual(activity.clock_in_mode, AttendanceWorkMode.WFO)
+        self.assertEqual(AttendancePunchingHistory.objects.filter(employee_id=self.employee, attendance_date=self.target_date).count(), 2)
         request.refresh_from_db()
         self.assertEqual(request.document_status, WorkModeRequestDocumentStatus.REJECTED)
 
         WorkModeRequestActions.reopen_document(request, actor=self.employee, remark='Please review again')
-        self._assert_layers(
-            in_time_value=time(8, 20),
-            out_time_value=time(16, 40),
-            in_channel=AttendanceChannel.BIOMETRIC,
-            out_channel=AttendanceChannel.BIOMETRIC,
-            in_punch_id=in_punch.id,
-            out_punch_id=out_punch.id,
-            in_mode=AttendanceWorkMode.WFO,
-            out_mode=AttendanceWorkMode.WFO,
-        )
+        attendance = self._attendance()
+        activity = self._activity()
+        self.assertEqual(Attendance.objects.filter(employee_id=self.employee, attendance_date=self.target_date).count(), 1)
+        self.assertEqual(activity_sync.AttendanceActivity.objects.filter(employee_id=self.employee, attendance_date=self.target_date).count(), 1)
+        self.assertEqual(attendance.attendance_clock_in, time(8, 20))
+        self.assertEqual(activity.clock_in, time(8, 20))
+        self.assertEqual(AttendancePunchingHistory.objects.filter(employee_id=self.employee, attendance_date=self.target_date).count(), 2)
         request.refresh_from_db()
         self.assertEqual(request.document_status, WorkModeRequestDocumentStatus.PENDING_VERIFICATION)
 
