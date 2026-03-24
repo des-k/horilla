@@ -889,15 +889,17 @@ def recompute_attendance(employee, attendance_date: date) -> ReconciliationResul
     _set_late_early_rows(attendance, late_minutes, early_minutes)
 
     decisions: dict[int, tuple[bool, str]] = {}
+    final_in_punch_id = getattr(attendance, "attendance_clock_in_punch_id", None)
+    final_out_punch_id = getattr(attendance, "attendance_clock_out_punch_id", None)
     for log in logs:
         if leave_ctx.is_full_day:
             decisions[log.id] = (False, NOTE_IGNORED_FULL_DAY_LEAVE)
             continue
 
-        if final_in_punch and log.id == final_in_punch.id:
+        if final_in_punch_id and log.id == final_in_punch_id:
             decisions[log.id] = (True, NOTE_FINAL_IN)
             continue
-        if final_out_punch and log.id == final_out_punch.id:
+        if final_out_punch_id and log.id == final_out_punch_id:
             decisions[log.id] = (True, NOTE_FINAL_OUT)
             continue
 
