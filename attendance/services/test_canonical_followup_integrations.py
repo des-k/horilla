@@ -242,7 +242,7 @@ class CanonicalRecomputeDecisionFlowTests(SimpleTestCase):
         logs = [
             FakePunchLog(31, AttendancePunchDirection.IN, timezone.make_aware(datetime(2026, 3, 14, 8, 0)), source="biometric"),
             FakePunchLog(32, AttendancePunchDirection.IN, timezone.make_aware(datetime(2026, 3, 14, 8, 1)), source="mobile"),
-            FakePunchLog(33, AttendancePunchDirection.OUT, timezone.make_aware(datetime(2026, 3, 14, 10, 0)), source="mobile"),
+            FakePunchLog(33, AttendancePunchDirection.OUT, timezone.make_aware(datetime(2026, 3, 14, 12, 30)), source="mobile"),
             FakePunchLog(34, AttendancePunchDirection.IN, timezone.make_aware(datetime(2026, 3, 14, 10, 5)), source="approved_request"),
             FakePunchLog(35, AttendancePunchDirection.OUT, timezone.make_aware(datetime(2026, 3, 14, 16, 30)), source="approved_request"),
             FakePunchLog(36, AttendancePunchDirection.OUT, timezone.make_aware(datetime(2026, 3, 14, 17, 10)), source="biometric"),
