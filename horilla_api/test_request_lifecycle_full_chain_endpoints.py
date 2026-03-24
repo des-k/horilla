@@ -92,6 +92,61 @@ class RequestLifecycleFullChainEndpointTests(AttendanceApiIntegrationMixin, APIT
     def _activity(self):
         return AttendanceActivity.objects.get(employee_id=self.employee, attendance_date=self.target_date)
 
+    def _attendance_activity_snapshot(self):
+        attendance = self._attendance()
+        activity = self._activity()
+        return {
+            'attendance': (
+                attendance.request_type,
+                attendance.attendance_clock_in,
+                attendance.attendance_clock_out,
+                attendance.attendance_clock_in_channel,
+                attendance.attendance_clock_out_channel,
+                attendance.attendance_clock_in_punch_id,
+                attendance.attendance_clock_out_punch_id,
+                attendance.attendance_clock_in_mode,
+                attendance.attendance_clock_out_mode,
+                attendance.late_minutes,
+                attendance.early_out_minutes,
+                attendance.reconciliation_source,
+                attendance.reconciliation_note,
+            ),
+            'activity': (
+                activity.clock_in,
+                activity.clock_out,
+                activity.clock_in_channel,
+                activity.clock_out_channel,
+                activity.clock_in_mode,
+                activity.clock_out_mode,
+                activity.late_minutes,
+                activity.early_out_minutes,
+                activity.work_mode_request_id_id,
+            ),
+            'counts': (
+                Attendance.objects.filter(employee_id=self.employee, attendance_date=self.target_date).count(),
+                AttendanceActivity.objects.filter(employee_id=self.employee, attendance_date=self.target_date).count(),
+                AttendancePunchingHistory.objects.filter(employee_id=self.employee, attendance_date=self.target_date).count(),
+            ),
+        }
+
+    @staticmethod
+    def _punch_snapshot(*punches):
+        snapshot = []
+        for punch in punches:
+            punch.refresh_from_db()
+            snapshot.append(
+                (
+                    punch.id,
+                    punch.accepted_to_attendance,
+                    punch.reason,
+                    punch.decision_status,
+                    punch.decision_source,
+                    punch.attendance_id_id,
+                    punch.related_work_mode_request_id,
+                )
+            )
+        return tuple(snapshot)
+
     def test_attendance_correction_approve_and_revoke_endpoints_update_final_truth_and_keep_raw_trail(self):
         in_punch, out_punch = self._create_raw_punches()
         with self.shift_ctx:
@@ -159,6 +214,52 @@ class RequestLifecycleFullChainEndpointTests(AttendanceApiIntegrationMixin, APIT
         self.assertTrue(out_punch.accepted_to_attendance)
         self.assertEqual(AttendancePunchingHistory.objects.filter(employee_id=self.employee).count(), 2)
 
+    def test_attendance_correction_revoke_twice_is_blocked_or_idempotent_without_data_corruption(self):
+        in_punch, out_punch = self._create_raw_punches()
+        with self.shift_ctx:
+            recompute_attendance(self.employee, self.target_date)
+
+        attendance = self._attendance()
+        attendance.request_type = 'update_request'
+        attendance.is_validate_request = True
+        attendance.is_validate_request_approved = False
+        attendance.requested_data = {
+            'attendance_clock_in': '08:30:00',
+            'attendance_clock_out': '17:30:00',
+            '__meta': {'current_scope': 'FULL'},
+        }
+        attendance.save(update_fields=['request_type', 'is_validate_request', 'is_validate_request_approved', 'requested_data'])
+
+        with self.shift_ctx:
+            approve = self.auth_client(self.admin_user).put(
+                f'/api/attendance/attendance-request-approve/{attendance.id}',
+                {},
+                format='json',
+            )
+        self.assertEqual(approve.status_code, 200)
+
+        with self.shift_ctx:
+            first_revoke = self.auth_client(self.admin_user).put(
+                f'/api/attendance/attendance-request-revoke/{attendance.id}',
+                {},
+                format='json',
+            )
+        self.assertEqual(first_revoke.status_code, 200)
+        baseline_snapshot = self._attendance_activity_snapshot()
+        baseline_punch_snapshot = self._punch_snapshot(in_punch, out_punch)
+
+        with self.shift_ctx:
+            second_revoke = self.auth_client(self.admin_user).put(
+                f'/api/attendance/attendance-request-revoke/{attendance.id}',
+                {},
+                format='json',
+            )
+        self.assertEqual(second_revoke.status_code, 404)
+        self.assertEqual(self._attendance_activity_snapshot(), baseline_snapshot)
+        self.assertEqual(self._punch_snapshot(in_punch, out_punch), baseline_punch_snapshot)
+        attendance = self._attendance()
+        self.assertEqual(attendance.request_type, 'revoke_request')
+
     def test_work_mode_approve_and_revoke_endpoints_update_modes_without_orphaning_raw_trail(self):
         in_punch, out_punch = self._create_raw_punches(work_mode=AttendanceWorkMode.WFO, in_time_value=time(8, 20), out_time_value=time(16, 40))
         with self.shift_ctx:
@@ -219,6 +320,44 @@ class RequestLifecycleFullChainEndpointTests(AttendanceApiIntegrationMixin, APIT
         self.assertTrue(in_punch.accepted_to_attendance)
         self.assertTrue(out_punch.accepted_to_attendance)
         self.assertEqual(AttendancePunchingHistory.objects.filter(employee_id=self.employee).count(), 2)
+
+    def test_work_mode_reject_after_final_state_is_cleanly_blocked(self):
+        in_punch, out_punch = self._create_raw_punches(work_mode=AttendanceWorkMode.WFO, in_time_value=time(8, 20), out_time_value=time(16, 40))
+        with self.shift_ctx:
+            recompute_attendance(self.employee, self.target_date)
+
+        request = WorkModeRequest.objects.create(
+            employee_id=self.employee,
+            mode=AttendanceWorkMode.WFA,
+            scope=WorkModeRequestScope.FULL,
+            start_date=self.target_date,
+            end_date=self.target_date,
+            status=WorkModeRequestStatus.WAITING_FOR_APPROVAL,
+            reason='Remote work approved by manager',
+        )
+
+        with self.shift_ctx:
+            approve = self.auth_client(self.admin_user).put(
+                f'/api/attendance/work-mode-request-approve/{request.id}',
+                {},
+                format='json',
+            )
+        self.assertEqual(approve.status_code, 200)
+
+        baseline_snapshot = self._attendance_activity_snapshot()
+        baseline_punch_snapshot = self._punch_snapshot(in_punch, out_punch)
+
+        with self.shift_ctx:
+            reject = self.auth_client(self.admin_user).put(
+                f'/api/attendance/work-mode-request-reject/{request.id}',
+                {'reason': 'too late to reject'},
+                format='json',
+            )
+        self.assertEqual(reject.status_code, 400)
+        request.refresh_from_db()
+        self.assertEqual(request.status, WorkModeRequestStatus.APPROVED)
+        self.assertEqual(self._attendance_activity_snapshot(), baseline_snapshot)
+        self.assertEqual(self._punch_snapshot(in_punch, out_punch), baseline_punch_snapshot)
 
     def test_on_duty_document_verify_and_revoke_endpoints_keep_first_in_last_out_truth(self):
         in_punch, out_punch = self._create_raw_punches(work_mode=AttendanceWorkMode.WFO, in_time_value=time(8, 20), out_time_value=time(16, 40))
@@ -352,4 +491,131 @@ class RequestLifecycleFullChainEndpointTests(AttendanceApiIntegrationMixin, APIT
         out_punch.refresh_from_db()
         self.assertTrue(in_punch.accepted_to_attendance)
         self.assertTrue(out_punch.accepted_to_attendance)
+
+
+    def test_work_mode_reopen_after_verified_status_follows_supported_transition_only(self):
+        in_punch, out_punch = self._create_raw_punches(work_mode=AttendanceWorkMode.WFO, in_time_value=time(8, 20), out_time_value=time(16, 40))
+        request = WorkModeRequest.objects.create(
+            employee_id=self.employee,
+            mode=AttendanceWorkMode.ON_DUTY,
+            scope=WorkModeRequestScope.FULL,
+            start_date=self.target_date,
+            end_date=self.target_date,
+            status=WorkModeRequestStatus.APPROVED,
+            reason='Client visit',
+            document_status=WorkModeRequestDocumentStatus.PENDING_VERIFICATION,
+        )
+        version = WorkModeRequestDocumentVersion.objects.create(
+            work_mode_request=request,
+            version_number=1,
+            is_current=True,
+            status=WorkModeRequestDocumentStatus.PENDING_VERIFICATION,
+            submitted_by=self.employee,
+        )
+        request.current_document_version = version
+        request.save(update_fields=['current_document_version'])
+
+        with self.shift_ctx:
+            recompute_attendance(self.employee, self.target_date)
+
+        with self.shift_ctx:
+            verify = self.auth_client(self.admin_user).put(
+                f'/api/attendance/work-mode-request-action/{request.id}/verify',
+                {'reason': 'verified'},
+                format='json',
+            )
+        self.assertEqual(verify.status_code, 200)
+
+        with self.shift_ctx:
+            reopen = self.auth_client(self.admin_user).put(
+                f'/api/attendance/work-mode-request-action/{request.id}/reopen-document',
+                {'remark': 'review again'},
+                format='json',
+            )
+        self.assertEqual(reopen.status_code, 200)
+        request.refresh_from_db()
+        self.assertEqual(request.document_status, WorkModeRequestDocumentStatus.PENDING_VERIFICATION)
+        attendance = self._attendance()
+        activity = self._activity()
+        self.assertEqual(attendance.attendance_clock_in, time(8, 20))
+        self.assertEqual(attendance.attendance_clock_out, time(16, 40))
+        self.assertEqual(attendance.attendance_clock_in_mode, AttendanceWorkMode.ON_DUTY)
+        self.assertEqual(attendance.attendance_clock_out_mode, AttendanceWorkMode.ON_DUTY)
+        self.assertEqual(attendance.late_minutes, 20)
+        self.assertEqual(attendance.early_out_minutes, 20)
+        self.assertEqual(attendance.reconciliation_source, SOURCE_PROVISIONAL_ON_DUTY)
+        self.assertEqual(attendance.reconciliation_note, NOTE_ON_DUTY_PROVISIONAL)
+        self.assertEqual(activity.clock_in, time(8, 20))
+        self.assertEqual(activity.clock_out, time(16, 40))
+        baseline_snapshot = self._attendance_activity_snapshot()
+        baseline_punch_snapshot = self._punch_snapshot(in_punch, out_punch)
+
+        with self.shift_ctx:
+            second_reopen = self.auth_client(self.admin_user).put(
+                f'/api/attendance/work-mode-request-action/{request.id}/reopen-document',
+                {'remark': 'still review again'},
+                format='json',
+            )
+        self.assertEqual(second_reopen.status_code, 400)
+        request.refresh_from_db()
+        self.assertEqual(request.document_status, WorkModeRequestDocumentStatus.PENDING_VERIFICATION)
+        self.assertEqual(self._attendance_activity_snapshot(), baseline_snapshot)
+        self.assertEqual(self._punch_snapshot(in_punch, out_punch), baseline_punch_snapshot)
+
+    def test_invalid_transition_never_changes_raw_trail_visibility(self):
+        in_punch, out_punch = self._create_raw_punches(work_mode=AttendanceWorkMode.WFO, in_time_value=time(8, 20), out_time_value=time(16, 40))
+        request = WorkModeRequest.objects.create(
+            employee_id=self.employee,
+            mode=AttendanceWorkMode.ON_DUTY,
+            scope=WorkModeRequestScope.FULL,
+            start_date=self.target_date,
+            end_date=self.target_date,
+            status=WorkModeRequestStatus.APPROVED,
+            reason='Client visit',
+            document_status=WorkModeRequestDocumentStatus.PENDING_VERIFICATION,
+        )
+        version = WorkModeRequestDocumentVersion.objects.create(
+            work_mode_request=request,
+            version_number=1,
+            is_current=True,
+            status=WorkModeRequestDocumentStatus.PENDING_VERIFICATION,
+            submitted_by=self.employee,
+        )
+        request.current_document_version = version
+        request.save(update_fields=['current_document_version'])
+
+        with self.shift_ctx:
+            recompute_attendance(self.employee, self.target_date)
+
+        with self.shift_ctx:
+            verify = self.auth_client(self.admin_user).put(
+                f'/api/attendance/work-mode-request-action/{request.id}/verify',
+                {'reason': 'verified'},
+                format='json',
+            )
+        self.assertEqual(verify.status_code, 200)
+
+        with self.shift_ctx:
+            revoke = self.auth_client(self.admin_user).put(
+                f'/api/attendance/work-mode-request-action/{request.id}/revoke',
+                {'remark': 'trip ended'},
+                format='json',
+            )
+        self.assertEqual(revoke.status_code, 200)
+        request.refresh_from_db()
+        self.assertEqual(request.status, WorkModeRequestStatus.REVOKED)
+        baseline_snapshot = self._attendance_activity_snapshot()
+        baseline_punch_snapshot = self._punch_snapshot(in_punch, out_punch)
+
+        with self.shift_ctx:
+            invalid_verify = self.auth_client(self.admin_user).put(
+                f'/api/attendance/work-mode-request-action/{request.id}/verify',
+                {'reason': 'should fail'},
+                format='json',
+            )
+        self.assertEqual(invalid_verify.status_code, 400)
+        request.refresh_from_db()
+        self.assertEqual(request.status, WorkModeRequestStatus.REVOKED)
+        self.assertEqual(self._attendance_activity_snapshot(), baseline_snapshot)
+        self.assertEqual(self._punch_snapshot(in_punch, out_punch), baseline_punch_snapshot)
 
