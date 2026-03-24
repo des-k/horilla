@@ -43,6 +43,7 @@ from attendance.services.work_type_request_rules import (
 )
 from attendance.views.clock_in_out import get_shift_rules
 from attendance.methods.utils import shift_schedule_today
+from notifications.domain_notifications import send_work_mode_request_notification
 
 
 class WorkModeRequestActionError(ValidationError):
@@ -221,6 +222,16 @@ class WorkModeRequestActions:
         recompute_attendance_range(req.employee_id, req.start_date, req.end_date)
 
     @staticmethod
+    def _notify_work_mode(req: WorkModeRequest, *, actor, event: str, recipient_role: str = 'requester', reason: Optional[str] = None) -> None:
+        send_work_mode_request_notification(
+            actor=actor,
+            req=req,
+            event=event,
+            recipient_role=recipient_role,
+            reason=reason,
+        )
+
+    @staticmethod
     def _cutoff_due_datetime(req: WorkModeRequest, *, now_dt: Optional[datetime] = None) -> Optional[datetime]:
         if req.mode != AttendanceWorkMode.WFA:
             return None
@@ -300,6 +311,7 @@ class WorkModeRequestActions:
             },
         )
         apply_rejection_to_attendance(req)
+        WorkModeRequestActions._notify_work_mode(req, actor=actor or req.employee_id, event="work_mode_request_auto_rejected", recipient_role="requester", reason=str(reason_code))
         return WorkModeRequestActionResult(request=req, recomputed=True, auto_rejected=True)
 
     @staticmethod
@@ -370,6 +382,7 @@ class WorkModeRequestActions:
                 "end_date": req.end_date.isoformat(),
             },
         )
+        WorkModeRequestActions._notify_work_mode(req, actor=actor, event="work_mode_request_created", recipient_role="approver")
         return req
 
     @staticmethod
@@ -439,6 +452,8 @@ class WorkModeRequestActions:
         recomputed = bool(changed and req.mode == AttendanceWorkMode.ON_DUTY and req.status == WorkModeRequestStatus.APPROVED)
         if recomputed:
             WorkModeRequestActions._recompute(req)
+        if changed:
+            WorkModeRequestActions._notify_work_mode(req, actor=actor, event="work_mode_document_uploaded", recipient_role="approver")
         return WorkModeRequestActionResult(request=req, recomputed=recomputed)
 
     @staticmethod
@@ -454,6 +469,7 @@ class WorkModeRequestActions:
         req.save(update_fields=["status", "action_by", "action_at", "action_type", "action_reason"])
         WorkModeRequestActions._audit(req, actor=actor, action_type=WorkModeRequestActionType.CANCELED, old_status=old_status, new_status=req.status, remark=remark)
         WorkModeRequestActions._recompute(req)
+        WorkModeRequestActions._notify_work_mode(req, actor=actor, event="work_mode_request_canceled", recipient_role="requester", reason=remark)
         return WorkModeRequestActionResult(request=req, recomputed=True)
 
     @staticmethod
@@ -488,6 +504,7 @@ class WorkModeRequestActions:
         req.save()
         WorkModeRequestActions._audit(req, actor=actor, action_type=WorkModeRequestActionType.APPROVED, old_status=old_status, new_status=req.status)
         WorkModeRequestActions._recompute(req)
+        WorkModeRequestActions._notify_work_mode(req, actor=actor, event="work_mode_request_approved", recipient_role="requester")
         return WorkModeRequestActionResult(request=req, recomputed=True)
 
     @staticmethod
@@ -522,6 +539,7 @@ class WorkModeRequestActions:
         ])
         WorkModeRequestActions._audit(req, actor=actor, action_type=WorkModeRequestActionType.REJECTED, old_status=old_status, new_status=req.status, remark=remark)
         apply_rejection_to_attendance(req)
+        WorkModeRequestActions._notify_work_mode(req, actor=actor, event="work_mode_request_rejected", recipient_role="requester", reason=remark or reason_code)
         return WorkModeRequestActionResult(request=req, recomputed=True)
 
     @staticmethod
@@ -537,6 +555,7 @@ class WorkModeRequestActions:
         req.save(update_fields=["status", "action_by", "action_at", "action_type", "action_reason"])
         WorkModeRequestActions._audit(req, actor=actor, action_type=WorkModeRequestActionType.REVOKED, old_status=old_status, new_status=req.status, remark=remark)
         WorkModeRequestActions._recompute(req)
+        WorkModeRequestActions._notify_work_mode(req, actor=actor, event="work_mode_request_revoked", recipient_role="requester", reason=remark)
         return WorkModeRequestActionResult(request=req, recomputed=True)
 
     @staticmethod
@@ -572,6 +591,7 @@ class WorkModeRequestActions:
         ])
         WorkModeRequestActions._audit(req, actor=actor, action_type=WorkModeRequestActionType.VERIFIED, old_status=f"document:{old_status}", new_status=f"document:{req.document_status}", remark=remark, metadata={"version_number": version.version_number})
         WorkModeRequestActions._recompute(req)
+        WorkModeRequestActions._notify_work_mode(req, actor=actor, event="work_mode_document_verified", recipient_role="requester", reason=remark)
         return WorkModeRequestActionResult(request=req, recomputed=True)
 
     @staticmethod
@@ -598,6 +618,7 @@ class WorkModeRequestActions:
         req.save(update_fields=["current_document_version", "document_status", "document_verified_by", "document_verified_at", "document_remark", "action_by", "action_at", "action_type", "action_reason"])
         WorkModeRequestActions._audit(req, actor=actor, action_type=WorkModeRequestActionType.DOCUMENT_REJECTED, old_status=f"document:{old_status}", new_status=f"document:{req.document_status}", remark=normalized_remark, metadata={"version_number": version.version_number})
         WorkModeRequestActions._recompute(req)
+        WorkModeRequestActions._notify_work_mode(req, actor=actor, event="work_mode_document_rejected", recipient_role="requester", reason=normalized_remark)
         return WorkModeRequestActionResult(request=req, recomputed=True)
 
     @staticmethod
