@@ -5,10 +5,19 @@ from unittest.mock import patch
 from django.test import SimpleTestCase, TestCase
 
 from attendance.models import Attendance, AttendanceChannel, AttendancePunchDirection, AttendancePunchSource, AttendancePunchingHistory
+from leave.models import LeaveRequest, LeaveType
 from attendance.services import activity_sync, monthly_recap
 from attendance.services.activity_sync import mark_approved_request_channels, sync_single_session_activity
 from attendance.services.punching_history import capture_request_restore_snapshot, clear_raw_links_for_request_override, restore_raw_state_after_request
-from attendance.services.reconciliation import recompute_attendance, recompute_attendance_range
+from attendance.services.reconciliation import (
+    NOTE_APPROVED_ATTENDANCE_REQUEST,
+    NOTE_FULL_DAY_LEAVE,
+    SOURCE_ATTENDANCE_REQUEST,
+    SOURCE_LEAVE,
+    SOURCE_NORMAL,
+    recompute_attendance,
+    recompute_attendance_range,
+) 
 from attendance.tests_api_integration_base import AttendanceApiIntegrationMixin
 
 
@@ -92,6 +101,240 @@ class CheckInOutExecutableOvernightMatrixTests(SimpleTestCase):
             recompute_attendance_range(self.employee, date(2026, 3, 14), date(2026, 3, 14), expand_for_overnight=True)
         called_dates = [call.args[1] for call in mocked.call_args_list]
         self.assertEqual(called_dates, [date(2026, 3, 13), date(2026, 3, 14), date(2026, 3, 15)])
+
+
+
+
+class CheckInOutExecutableMonthBoundaryOvernightDbIntegrationTests(AttendanceApiIntegrationMixin, TestCase):
+    attendance_date = date(2026, 3, 31)
+
+    def setUp(self):
+        super().setUp()
+        self.user, self.employee = self.create_employee('MonthBoundary')
+        weekday_key = self.attendance_date.strftime('%A').lower()
+        self.shift, self.day_obj, self.schedule = self.create_shift_with_schedule(
+            employee=self.employee,
+            day_key=weekday_key,
+            start_time=time(22, 0),
+            end_time=time(6, 0),
+            minimum_working_hour='08:00',
+            is_night_shift=True,
+        )
+        self.shift_start_dt = self.aware_dt(2026, 3, 31, 22, 0)
+        self.shift_end_dt = self.aware_dt(2026, 4, 1, 6, 0)
+        self.in_window_start_dt = self.aware_dt(2026, 3, 31, 20, 0)
+        self.in_window_end_dt = self.aware_dt(2026, 4, 1, 2, 0)
+        self.out_window_start_dt = self.aware_dt(2026, 4, 1, 4, 0)
+        self.out_window_end_dt = self.aware_dt(2026, 4, 1, 10, 0)
+
+    def _shift_rule_context(self):
+        return self.patch_reconciliation_shift_rules(
+            target_date=self.attendance_date,
+            schedule=self.schedule,
+            shift_start_dt=self.shift_start_dt,
+            shift_end_dt=self.shift_end_dt,
+            check_in_window_start_dt=self.in_window_start_dt,
+            check_in_window_end_dt=self.in_window_end_dt,
+            check_out_window_start_dt=self.out_window_start_dt,
+            check_out_window_end_dt=self.out_window_end_dt,
+            minimum_hour='08:00',
+        )
+
+    def _recap_rule_context(self):
+        return self.patch_monthly_recap_shift_rules(
+            target_date=self.attendance_date,
+            schedule=self.schedule,
+            shift_start_dt=self.shift_start_dt,
+            shift_end_dt=self.shift_end_dt,
+            check_in_window_start_dt=self.in_window_start_dt,
+            check_in_window_end_dt=self.in_window_end_dt,
+            check_out_window_start_dt=self.out_window_start_dt,
+            check_out_window_end_dt=self.out_window_end_dt,
+        )
+
+    def _create_raw_punches(self, *, in_dt, out_dt):
+        in_punch = AttendancePunchingHistory.objects.create(
+            employee_id=self.employee,
+            attendance_date=self.attendance_date,
+            punch_timestamp=in_dt,
+            source=AttendancePunchSource.BIOMETRIC,
+            punch_direction=AttendancePunchDirection.IN,
+            raw_employee_identifier='BIO-MONTH',
+            device_info='Night Gate',
+        )
+        out_punch = AttendancePunchingHistory.objects.create(
+            employee_id=self.employee,
+            attendance_date=self.attendance_date,
+            punch_timestamp=out_dt,
+            source=AttendancePunchSource.BIOMETRIC,
+            punch_direction=AttendancePunchDirection.OUT,
+            raw_employee_identifier='BIO-MONTH',
+            device_info='Night Gate',
+        )
+        return in_punch, out_punch
+
+    def _get_recap_for_month(self, month):
+        with patch.object(monthly_recap, 'is_holiday', lambda target_date: False), \
+             patch.object(monthly_recap.timezone, 'localdate', lambda: date(2026, 4, 30)), \
+             self._recap_rule_context():
+            return monthly_recap.get_monthly_attendance_recap(self.employee, month)
+
+    @staticmethod
+    def _row_for_date(recap, target_date):
+        return next(row for row in recap['rows'] if row.attendance_date == target_date)
+
+    def test_month_boundary_override_then_revoke_recomputes_recap_without_stale_totals(self):
+        in_punch, out_punch = self._create_raw_punches(
+            in_dt=self.aware_dt(2026, 3, 31, 22, 15),
+            out_dt=self.aware_dt(2026, 4, 1, 5, 30),
+        )
+
+        with self._shift_rule_context():
+            result = recompute_attendance(self.employee, self.attendance_date)
+
+        attendance = result.attendance
+        march_before = self._get_recap_for_month('2026-03')
+        april_before = self._get_recap_for_month('2026-04')
+        row_march_before = self._row_for_date(march_before, self.attendance_date)
+        self.assertEqual(row_march_before.check_out, '05:30 D+1')
+        self.assertEqual(march_before['summary']['late_minutes'], 15)
+        self.assertEqual(march_before['summary']['early_out_minutes'], 30)
+        self.assertEqual(april_before['summary']['late_minutes'], 0)
+        self.assertEqual(april_before['summary']['early_out_minutes'], 0)
+
+        capture_request_restore_snapshot(attendance, include_out=True)
+        attendance.request_type = 'update_request'
+        attendance.is_validate_request = True
+        attendance.is_validate_request_approved = True
+        attendance.requested_data = {
+            'attendance_clock_out': '06:30:00',
+            'attendance_clock_out_date': '2026-04-01',
+            '__meta': {'approved_scopes': ['OUT'], 'current_scope': 'OUT'},
+        }
+        attendance.attendance_clock_out_date = date(2026, 4, 1)
+        attendance.attendance_clock_out = time(6, 30)
+        mark_approved_request_channels(attendance)
+        clear_raw_links_for_request_override(attendance, include_out=True)
+        attendance.save()
+
+        with self._shift_rule_context():
+            approved = recompute_attendance(self.employee, self.attendance_date)
+
+        attendance.refresh_from_db()
+        out_punch.refresh_from_db()
+        self.assertEqual(approved.attendance.reconciliation_source, SOURCE_ATTENDANCE_REQUEST)
+        self.assertEqual(approved.attendance.reconciliation_note, NOTE_APPROVED_ATTENDANCE_REQUEST)
+        self.assertEqual(approved.attendance.attendance_clock_out_date, date(2026, 4, 1))
+        self.assertEqual(approved.attendance.attendance_clock_out, time(6, 30))
+        self.assertFalse(out_punch.accepted_to_attendance)
+
+        march_approved = self._get_recap_for_month('2026-03')
+        april_approved = self._get_recap_for_month('2026-04')
+        row_march_approved = self._row_for_date(march_approved, self.attendance_date)
+        self.assertEqual(row_march_approved.check_out, '06:30 D+1')
+        self.assertEqual(march_approved['summary']['late_minutes'], 15)
+        self.assertEqual(march_approved['summary']['early_out_minutes'], 0)
+        self.assertEqual(april_approved['summary']['late_minutes'], 0)
+        self.assertEqual(april_approved['summary']['early_out_minutes'], 0)
+
+        restore_raw_state_after_request(attendance, include_out=True)
+        attendance.request_type = 'revoke_request'
+        attendance.is_validate_request = False
+        attendance.is_validate_request_approved = False
+        attendance.save(update_fields=['request_type', 'is_validate_request', 'is_validate_request_approved'])
+
+        with self._shift_rule_context():
+            revoked = recompute_attendance(self.employee, self.attendance_date)
+
+        attendance.refresh_from_db()
+        out_punch.refresh_from_db()
+        self.assertEqual(revoked.attendance.reconciliation_source, SOURCE_NORMAL)
+        self.assertEqual(revoked.attendance.reconciliation_note, 'Present')
+        self.assertEqual(revoked.attendance.attendance_clock_out_date, date(2026, 4, 1))
+        self.assertEqual(revoked.attendance.attendance_clock_out, time(5, 30))
+        self.assertEqual(revoked.attendance.attendance_clock_out_channel, AttendanceChannel.BIOMETRIC)
+        self.assertEqual(revoked.attendance.attendance_clock_out_punch_id, out_punch.id)
+        self.assertTrue(out_punch.accepted_to_attendance)
+        self.assertEqual(Attendance.objects.filter(employee_id=self.employee, attendance_date=self.attendance_date).count(), 1)
+        self.assertEqual(AttendancePunchingHistory.objects.filter(id__in=[in_punch.id, out_punch.id]).count(), 2)
+
+        march_revoked = self._get_recap_for_month('2026-03')
+        april_revoked = self._get_recap_for_month('2026-04')
+        row_march_revoked = self._row_for_date(march_revoked, self.attendance_date)
+        self.assertEqual(row_march_revoked.check_out, '05:30 D+1')
+        self.assertEqual(march_revoked['summary']['late_minutes'], 15)
+        self.assertEqual(march_revoked['summary']['early_out_minutes'], 30)
+        self.assertEqual(april_revoked['summary']['late_minutes'], 0)
+        self.assertEqual(april_revoked['summary']['early_out_minutes'], 0)
+
+    def test_month_boundary_leave_cancel_restores_daily_and_monthly_truth_without_duplicate_totals(self):
+        in_punch, out_punch = self._create_raw_punches(
+            in_dt=self.aware_dt(2026, 3, 31, 22, 15),
+            out_dt=self.aware_dt(2026, 4, 1, 5, 30),
+        )
+        leave_type = LeaveType.objects.create(name='Month Boundary Leave', company_id=self.company)
+        leave_request = LeaveRequest.objects.create(
+            employee_id=self.employee,
+            leave_type_id=leave_type,
+            start_date=self.attendance_date,
+            end_date=self.attendance_date,
+            start_date_breakdown='full_day',
+            end_date_breakdown='full_day',
+            description='Full day overnight leave',
+            status='approved',
+        )
+
+        with self._shift_rule_context():
+            approved_leave = recompute_attendance(self.employee, self.attendance_date)
+
+        attendance = approved_leave.attendance
+        in_punch.refresh_from_db()
+        out_punch.refresh_from_db()
+        self.assertEqual(attendance.reconciliation_source, SOURCE_LEAVE)
+        self.assertEqual(attendance.reconciliation_note, NOTE_FULL_DAY_LEAVE)
+        self.assertIsNone(attendance.attendance_clock_in)
+        self.assertIsNone(attendance.attendance_clock_out)
+        self.assertFalse(in_punch.accepted_to_attendance)
+        self.assertFalse(out_punch.accepted_to_attendance)
+
+        march_leave = self._get_recap_for_month('2026-03')
+        april_leave = self._get_recap_for_month('2026-04')
+        row_march_leave = self._row_for_date(march_leave, self.attendance_date)
+        self.assertEqual(row_march_leave.note, NOTE_FULL_DAY_LEAVE)
+        self.assertEqual(row_march_leave.check_in, '-')
+        self.assertEqual(row_march_leave.check_out, '-')
+        self.assertEqual(march_leave['summary']['late_minutes'], 0)
+        self.assertEqual(march_leave['summary']['early_out_minutes'], 0)
+        self.assertEqual(april_leave['summary']['late_minutes'], 0)
+        self.assertEqual(april_leave['summary']['early_out_minutes'], 0)
+
+        leave_request.status = 'cancelled'
+        leave_request.save(update_fields=['status'])
+
+        with self._shift_rule_context():
+            restored = recompute_attendance(self.employee, self.attendance_date)
+
+        attendance.refresh_from_db()
+        in_punch.refresh_from_db()
+        out_punch.refresh_from_db()
+        self.assertEqual(restored.attendance.reconciliation_source, SOURCE_NORMAL)
+        self.assertEqual(restored.attendance.reconciliation_note, 'Present')
+        self.assertEqual(restored.attendance.attendance_clock_out_date, date(2026, 4, 1))
+        self.assertEqual(restored.attendance.attendance_clock_out, time(5, 30))
+        self.assertTrue(in_punch.accepted_to_attendance)
+        self.assertTrue(out_punch.accepted_to_attendance)
+        self.assertEqual(Attendance.objects.filter(employee_id=self.employee, attendance_date=self.attendance_date).count(), 1)
+        self.assertEqual(AttendancePunchingHistory.objects.filter(id__in=[in_punch.id, out_punch.id]).count(), 2)
+
+        march_restored = self._get_recap_for_month('2026-03')
+        april_restored = self._get_recap_for_month('2026-04')
+        row_march_restored = self._row_for_date(march_restored, self.attendance_date)
+        self.assertEqual(row_march_restored.check_in, '22:15')
+        self.assertEqual(row_march_restored.check_out, '05:30 D+1')
+        self.assertEqual(march_restored['summary']['late_minutes'], 15)
+        self.assertEqual(march_restored['summary']['early_out_minutes'], 30)
+        self.assertEqual(april_restored['summary']['late_minutes'], 0)
+        self.assertEqual(april_restored['summary']['early_out_minutes'], 0)
 
 
 class CheckInOutExecutableOvernightDbIntegrationTests(AttendanceApiIntegrationMixin, TestCase):
