@@ -146,7 +146,7 @@ class CrossModuleAuditViewsConsistencyDbIntegrationTests(AttendanceApiIntegratio
     def _shift_rule_context(self):
         return self.patch_reconciliation_shift_rules(
             target_date=self.target_date,
-            schedule=later_schedule,
+            schedule=self.schedule,
             shift_start_dt=self.shift_start_dt,
             shift_end_dt=self.shift_end_dt,
             check_in_window_start_dt=self.in_window_start_dt,
@@ -504,7 +504,7 @@ class CrossModuleAuditViewsConsistencyDbIntegrationTests(AttendanceApiIntegratio
         )
         shift_ctx = self.patch_reconciliation_shift_rules(
             target_date=later_date,
-            schedule=later_schedule,
+            schedule=self.schedule,
             shift_start_dt=self.aware_dt(2026, 3, 18, 8, 0),
             shift_end_dt=self.aware_dt(2026, 3, 18, 17, 0),
             check_in_window_start_dt=self.aware_dt(2026, 3, 18, 6, 0),
