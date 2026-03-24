@@ -66,6 +66,7 @@ from leave.models import *
 from leave.models import leave_requested_dates
 from leave.threading import LeaveMailSendThread
 from notifications.signals import notify
+from notifications.domain_notifications import send_leave_request_notification
 
 
 def generate_error_report(error_list, error_data, file_name):
@@ -475,16 +476,12 @@ def leave_request_creation(request, type_id=None, emp_id=None):
                     for manager in conditional_requests["managers"]:
                         managers.append(manager.employee_user_id)
                     with contextlib.suppress(Exception):
-                        notify.send(
-                            request.user.employee_get,
+                        send_leave_request_notification(
+                            actor=request.user.employee_get,
                             recipient=managers[0],
-                            verb="You have a new leave request to validate.",
-                            verb_ar="لديك طلب إجازة جديد يجب التحقق منه.",
-                            verb_de="Sie haben eine neue Urlaubsanfrage zur Validierung.",
-                            verb_es="Tiene una nueva solicitud de permiso que debe validar.",
-                            verb_fr="Vous avez une nouvelle demande de congé à valider.",
-                            icon="people-circle",
-                            redirect=f"/leave/request-view?id={leave_request.id}",
+                            leave_request=leave_request,
+                            event="leave_request_created",
+                            recipient_role="approver",
                         )
 
                 mail_thread = LeaveMailSendThread(
@@ -493,16 +490,12 @@ def leave_request_creation(request, type_id=None, emp_id=None):
                 mail_thread.start()
                 messages.success(request, _("Leave request created successfully.."))
                 with contextlib.suppress(Exception):
-                    notify.send(
-                        request.user.employee_get,
+                    send_leave_request_notification(
+                        actor=request.user.employee_get,
                         recipient=leave_request.employee_id.employee_work_info.reporting_manager_id.employee_user_id,
-                        verb=f"New leave request created for {leave_request.employee_id}.",
-                        verb_ar=f"تم إنشاء طلب إجازة جديد لـ {leave_request.employee_id}.",
-                        verb_de=f"Neuer Urlaubsantrag erstellt für {leave_request.employee_id}.",
-                        verb_es=f"Nueva solicitud de permiso creada para {leave_request.employee_id}.",
-                        verb_fr=f"Nouvelle demande de congé créée pour {leave_request.employee_id}.",
-                        icon="people-circle",
-                        redirect=reverse("request-view") + f"?id={leave_request.id}",
+                        leave_request=leave_request,
+                        event="leave_request_created",
+                        recipient_role="approver",
                     )
                 form = LeaveRequestCreationForm()
                 if referer_parts[-2] == "employee-view":
@@ -1052,16 +1045,12 @@ def leave_request_approve(request, id, emp_id=None):
                         managers.append(manager.employee_user_id)
                     if len(managers) > condition_approval.sequence:
                         with contextlib.suppress(Exception):
-                            notify.send(
-                                request.user.employee_get,
+                            send_leave_request_notification(
+                                actor=request.user.employee_get,
                                 recipient=managers[condition_approval.sequence],
-                                verb="You have a new leave request to validate.",
-                                verb_ar="لديك طلب إجازة جديد يجب التحقق منه.",
-                                verb_de="Sie haben eine neue Urlaubsanfrage zur Validierung.",
-                                verb_es="Tiene una nueva solicitud de permiso que debe validar.",
-                                verb_fr="Vous avez une nouvelle demande de congé à valider.",
-                                icon="people-circle",
-                                redirect=f"/leave/request-view?id={leave_request.id}",
+                                leave_request=leave_request,
+                                event="leave_request_created",
+                                recipient_role="approver",
                             )
 
                     condition_approval.save()
@@ -1072,17 +1061,12 @@ def leave_request_approve(request, id, emp_id=None):
             messages.success(request, _("Leave request approved successfully.."))
             if send_notification:
                 with contextlib.suppress(Exception):
-                    notify.send(
-                        request.user.employee_get,
+                    send_leave_request_notification(
+                        actor=request.user.employee_get,
                         recipient=leave_request.employee_id.employee_user_id,
-                        verb="Your Leave request has been approved",
-                        verb_ar="تمت الموافقة على طلب الإجازة الخاص بك",
-                        verb_de="Ihr Urlaubsantrag wurde genehmigt",
-                        verb_es="Se ha aprobado su solicitud de permiso",
-                        verb_fr="Votre demande de congé a été approuvée",
-                        icon="people-circle",
-                        redirect=reverse("user-request-view")
-                        + f"?id={leave_request.id}",
+                        leave_request=leave_request,
+                        event="leave_request_approved",
+                        recipient_role="requester",
                     )
 
                 mail_thread = LeaveMailSendThread(
@@ -1220,17 +1204,13 @@ def leave_request_cancel(request, id, emp_id=None):
 
                 messages.success(request, _("Leave request rejected successfully.."))
                 with contextlib.suppress(Exception):
-                    notify.send(
-                        request.user.employee_get,
+                    send_leave_request_notification(
+                        actor=request.user.employee_get,
                         recipient=leave_request.employee_id.employee_user_id,
-                        verb="Your leave request has been rejected.",
-                        verb_ar="تم رفض طلب الإجازة الخاص بك",
-                        verb_de="Ihr Urlaubsantrag wurde abgelehnt",
-                        verb_es="Tu solicitud de permiso ha sido rechazada",
-                        verb_fr="Votre demande de congé a été rejetée",
-                        icon="people-circle",
-                        redirect=reverse("user-request-view")
-                        + f"?id={leave_request.id}",
+                        leave_request=leave_request,
+                        event="leave_request_rejected",
+                        recipient_role="requester",
+                        reason=leave_request.reject_reason,
                     )
 
                 mail_thread = LeaveMailSendThread(request, leave_request, type="reject")
@@ -1279,6 +1259,15 @@ def user_leave_cancel(request, id):
                     messages.success(
                         request, _("Leave request cancelled successfully..")
                     )
+                    with contextlib.suppress(Exception):
+                        send_leave_request_notification(
+                            actor=request.user.employee_get,
+                            recipient=leave_request.employee_id.employee_work_info.reporting_manager_id.employee_user_id if leave_request.employee_id.employee_work_info.reporting_manager_id else leave_request.employee_id.employee_user_id,
+                            leave_request=leave_request,
+                            event="leave_request_canceled",
+                            recipient_role="approver" if leave_request.employee_id.employee_work_info.reporting_manager_id else "requester",
+                            reason=leave_request.reject_reason,
+                        )
 
                     mail_thread = LeaveMailSendThread(
                         request, leave_request, type="cancel"
@@ -2273,16 +2262,12 @@ def user_leave_request(request, id):
                     for manager in conditional_requests["managers"]:
                         managers.append(manager.employee_user_id)
                     with contextlib.suppress(Exception):
-                        notify.send(
-                            request.user.employee_get,
+                        send_leave_request_notification(
+                            actor=request.user.employee_get,
                             recipient=managers[0],
-                            verb="You have a new leave request to validate.",
-                            verb_ar="لديك طلب إجازة جديد يجب التحقق منه.",
-                            verb_de="Sie haben eine neue Urlaubsanfrage zur Validierung.",
-                            verb_es="Tiene una nueva solicitud de permiso que debe validar.",
-                            verb_fr="Vous avez une nouvelle demande de congé à valider.",
-                            icon="people-circle",
-                            redirect=f"/leave/request-view?id={leave_request.id}",
+                            leave_request=leave_request,
+                            event="leave_request_created",
+                            recipient_role="approver",
                         )
                 mail_thread = LeaveMailSendThread(
                     request, leave_request, type="request"
