@@ -1055,8 +1055,11 @@ def recompute_attendance_range(employee, start_date: date, end_date: date, *, ex
     # canonical attendance truth. This protects multi-step lifecycle flows
     # (reject/reopen/verify/revoke) from leaving the final OUT/IN punch flagged
     # as not accepted even though Attendance already points to it.
+    employee_lookup = employee
+    if not isinstance(employee_lookup, int):
+        employee_lookup = getattr(employee_lookup, 'pk', None) or getattr(employee_lookup, 'id', employee_lookup)
     for attendance in Attendance.objects.filter(
-        employee_id=employee,
+        employee_id=employee_lookup,
         attendance_date__gte=processed_start,
         attendance_date__lte=processed_end,
     ):
