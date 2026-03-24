@@ -2,11 +2,29 @@ from __future__ import annotations
 
 from typing import Iterable, Optional
 
+from django.db.models import Model
 from django.urls import reverse
 from notifications.signals import notify
 
 from attendance.models import AttendanceWorkMode
 
+
+
+
+def _is_model_instance(value) -> bool:
+    return isinstance(value, Model) and getattr(value, 'pk', None) is not None
+
+
+def _safe_sender(actor, recipient=None):
+    if _is_model_instance(actor):
+        return actor
+    if _is_model_instance(recipient):
+        return recipient
+    return None
+
+
+def _safe_recipient(recipient):
+    return recipient if _is_model_instance(recipient) else None
 
 def _employee_user(employee):
     return getattr(employee, 'employee_user_id', None)
@@ -22,7 +40,9 @@ def _employee_name(employee) -> str:
 
 
 def _notify_domain_event(*, actor, recipient, verb: str, redirect: str, icon: str, payload: dict, translations: Optional[dict] = None):
-    if recipient is None:
+    recipient = _safe_recipient(recipient)
+    sender = _safe_sender(actor, recipient=recipient)
+    if recipient is None or sender is None:
         return []
     kwargs = dict(payload)
     kwargs['redirect'] = redirect
@@ -30,7 +50,7 @@ def _notify_domain_event(*, actor, recipient, verb: str, redirect: str, icon: st
     for key, value in (translations or {}).items():
         if value:
             kwargs[key] = value
-    return notify.send(actor, recipient=recipient, verb=verb, **kwargs)
+    return notify.send(sender, recipient=recipient, verb=verb, **kwargs)
 
 
 def _attendance_payload(attendance, *, event: str, status: str, message: str, recipient_role: str, actor_name: Optional[str] = None, reason: Optional[str] = None):
@@ -183,8 +203,23 @@ def _requester_user(req):
 
 def _approver_user(req):
     employee = getattr(req, 'employee_id', None)
-    work_info = getattr(employee, 'employee_work_info', None)
+    work_info = None
+    if employee is not None:
+        try:
+            work_info = employee.employee_work_info
+        except Exception:
+            work_info = None
     manager = getattr(work_info, 'reporting_manager_id', None)
+    if manager is None:
+        try:
+            from employee.models import EmployeeWorkInformation
+
+            employee_id = getattr(req, 'employee_id_id', None) or getattr(employee, 'id', None)
+            if employee_id:
+                work_info = EmployeeWorkInformation.objects.filter(employee_id=employee_id).select_related('reporting_manager_id__employee_user_id').first()
+                manager = getattr(work_info, 'reporting_manager_id', None)
+        except Exception:
+            manager = None
     return _employee_user(manager)
 
 
