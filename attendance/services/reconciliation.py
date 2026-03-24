@@ -411,29 +411,37 @@ def _in_window(log_dt: datetime, start_dt: Optional[datetime], end_dt: Optional[
 
 
 def _pick_raw_sessions(logs: list[AttendancePunchingHistory], ctx: ShiftContext):
+    all_in = []
     valid_in = []
     invalid_in = []
+    all_out = []
     valid_out = []
     invalid_out = []
     for log in logs:
         log_dt = _localize(log.punch_timestamp)
         if log.punch_direction == AttendancePunchDirection.IN:
+            all_in.append(log)
             if _in_window(log_dt, ctx.check_in_window_start_dt, ctx.check_in_window_end_dt):
                 valid_in.append(log)
             else:
                 invalid_in.append(log)
         elif log.punch_direction == AttendancePunchDirection.OUT:
+            all_out.append(log)
             if _in_window(log_dt, ctx.check_out_window_start_dt, ctx.check_out_window_end_dt):
                 valid_out.append(log)
             else:
                 invalid_out.append(log)
 
+    all_in.sort(key=lambda x: (_localize(x.punch_timestamp), x.id))
     valid_in.sort(key=lambda x: (_localize(x.punch_timestamp), x.id))
+    all_out.sort(key=lambda x: (_localize(x.punch_timestamp), x.id))
     valid_out.sort(key=lambda x: (_localize(x.punch_timestamp), x.id))
     return {
+        "any_in": all_in[0] if all_in else None,
         "final_in": valid_in[0] if valid_in else None,
         "extra_in": valid_in[1:] if len(valid_in) > 1 else [],
         "invalid_in": invalid_in,
+        "any_out": all_out[-1] if all_out else None,
         "final_out": valid_out[-1] if valid_out else None,
         "extra_out": valid_out[:-1] if len(valid_out) > 1 else [],
         "invalid_out": invalid_out,
@@ -548,6 +556,24 @@ def _resolve_final_work_mode(
 
     resolved = resolve_biometric_work_mode(employee, attendance_date)
     return resolved.mode or AttendanceWorkMode.WFO
+
+
+def _should_preserve_on_duty_raw_truth(req: Optional[WorkModeRequest]) -> bool:
+    if not req or getattr(req, "mode", None) != AttendanceWorkMode.ON_DUTY:
+        return False
+    return getattr(req, "status", None) in {
+        WorkModeRequestStatus.APPROVED,
+        WorkModeRequestStatus.REVOKED,
+    }
+
+
+def _select_raw_truth_punch(raw: dict, direction: str, *, preserve_raw_truth: bool = False):
+    final_key = "final_in" if direction == AttendancePunchDirection.IN else "final_out"
+    any_key = "any_in" if direction == AttendancePunchDirection.IN else "any_out"
+    selected = raw.get(final_key)
+    if selected is None and preserve_raw_truth:
+        selected = raw.get(any_key)
+    return selected
 
 
 def _minimum_for_final(ctx: ShiftContext, leave_ctx: LeaveContext, is_presence_only: bool) -> str:
@@ -718,15 +744,30 @@ def recompute_attendance(employee, attendance_date: date) -> ReconciliationResul
         source = SOURCE_LEAVE
         note = NOTE_FULL_DAY_LEAVE
     else:
+        preserve_on_duty_in_raw_truth = (
+            _should_preserve_on_duty_raw_truth(final_in_request)
+            or _should_preserve_on_duty_raw_truth(revoked_request)
+        )
+        preserve_on_duty_out_raw_truth = (
+            _should_preserve_on_duty_raw_truth(final_out_request)
+            or _should_preserve_on_duty_raw_truth(revoked_request)
+        )
+
         if _request_is_approved_request_override(attendance, AttendancePunchDirection.IN):
             final_in_dt = _session_dt_from_attendance(attendance, AttendancePunchDirection.IN)
             source = SOURCE_ATTENDANCE_REQUEST
             note = NOTE_APPROVED_ATTENDANCE_REQUEST
             request_override_in_mode = _session_mode_from_attendance(attendance, AttendancePunchDirection.IN)
             final_in_request = None
-        elif raw.get("final_in") is not None:
-            final_in_punch = raw.get("final_in")
-            final_in_dt = _localize(final_in_punch.punch_timestamp)
+        else:
+            selected_in_punch = _select_raw_truth_punch(
+                raw,
+                AttendancePunchDirection.IN,
+                preserve_raw_truth=preserve_on_duty_in_raw_truth,
+            )
+            if selected_in_punch is not None:
+                final_in_punch = selected_in_punch
+                final_in_dt = _localize(final_in_punch.punch_timestamp)
 
         if _request_is_approved_request_override(attendance, AttendancePunchDirection.OUT):
             final_out_dt = _session_dt_from_attendance(attendance, AttendancePunchDirection.OUT)
@@ -734,9 +775,15 @@ def recompute_attendance(employee, attendance_date: date) -> ReconciliationResul
             note = NOTE_APPROVED_ATTENDANCE_REQUEST
             request_override_out_mode = _session_mode_from_attendance(attendance, AttendancePunchDirection.OUT)
             final_out_request = None
-        elif raw.get("final_out") is not None:
-            final_out_punch = raw.get("final_out")
-            final_out_dt = _localize(final_out_punch.punch_timestamp)
+        else:
+            selected_out_punch = _select_raw_truth_punch(
+                raw,
+                AttendancePunchDirection.OUT,
+                preserve_raw_truth=preserve_on_duty_out_raw_truth,
+            )
+            if selected_out_punch is not None:
+                final_out_punch = selected_out_punch
+                final_out_dt = _localize(final_out_punch.punch_timestamp)
 
         final_in_mode = _resolve_final_work_mode(
             employee,
