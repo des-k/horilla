@@ -1016,11 +1016,48 @@ def recompute_attendance(employee, attendance_date: date) -> ReconciliationResul
 
 
 @transaction.atomic
+def _enforce_canonical_punch_truth_for_attendance(attendance: Attendance):
+    if not attendance or not getattr(attendance, 'pk', None):
+        return
+    source = getattr(attendance, 'reconciliation_source', SOURCE_NORMAL)
+    canonical_pairs = []
+    in_id = getattr(attendance, 'attendance_clock_in_punch_id', None)
+    out_id = getattr(attendance, 'attendance_clock_out_punch_id', None)
+    if in_id:
+        canonical_pairs.append((in_id, NOTE_FINAL_IN))
+    if out_id:
+        canonical_pairs.append((out_id, NOTE_FINAL_OUT))
+    for punch_id, reason in canonical_pairs:
+        update_kwargs = {
+            'attendance_id': attendance,
+            'attendance_date': attendance.attendance_date,
+            'accepted_to_attendance': True,
+            'reason': (reason or '-')[:255],
+            'decision_status': 'accepted',
+            'decision_source': source,
+        }
+        AttendancePunchingHistory._base_manager.filter(id=punch_id).update(**update_kwargs)
+
+
+@transaction.atomic
 def recompute_attendance_range(employee, start_date: date, end_date: date, *, expand_for_overnight: bool = True):
     if not employee or not start_date or not end_date:
         return
-    current = start_date - timedelta(days=1) if expand_for_overnight else start_date
-    final_date = end_date + timedelta(days=1) if expand_for_overnight else end_date
-    while current <= final_date:
+    processed_start = start_date - timedelta(days=1) if expand_for_overnight else start_date
+    processed_end = end_date + timedelta(days=1) if expand_for_overnight else end_date
+    current = processed_start
+    while current <= processed_end:
         recompute_attendance(employee, current)
         current = current + timedelta(days=1)
+
+    # Second-pass canonical sync: after the full range recompute finishes, re-read
+    # persisted Attendance rows and force final raw punch flags to match the
+    # canonical attendance truth. This protects multi-step lifecycle flows
+    # (reject/reopen/verify/revoke) from leaving the final OUT/IN punch flagged
+    # as not accepted even though Attendance already points to it.
+    for attendance in Attendance.objects.filter(
+        employee_id=employee,
+        attendance_date__gte=processed_start,
+        attendance_date__lte=processed_end,
+    ):
+        _enforce_canonical_punch_truth_for_attendance(attendance)
