@@ -191,6 +191,78 @@ class CanonicalRecomputeDecisionFlowTests(SimpleTestCase):
         self.assertEqual(logs[1].reason, reconciliation.NOTE_DUPLICATE_CHECKIN)
         self.assertEqual(logs[2].reason, reconciliation.NOTE_SUPERSEDED_CHECKOUT)
 
+
+    def test_latest_out_wins_even_when_request_generated_out_exists_earlier(self):
+        attendance_date = date(2026, 3, 14)
+        logs = [
+            FakePunchLog(11, AttendancePunchDirection.IN, timezone.make_aware(datetime(2026, 3, 14, 8, 1)), source="biometric"),
+            FakePunchLog(12, AttendancePunchDirection.OUT, timezone.make_aware(datetime(2026, 3, 14, 16, 20)), source="approved_request"),
+            FakePunchLog(13, AttendancePunchDirection.OUT, timezone.make_aware(datetime(2026, 3, 14, 16, 55)), source="mobile"),
+        ]
+        work_request = SimpleNamespace(mode=AttendanceWorkMode.WFA, status=WorkModeRequestStatus.APPROVED)
+
+        attendance, _activity, sync_calls = self._run_recompute_with_logs(attendance_date, logs, work_request=work_request)
+
+        self.assertEqual(sync_calls[0]["final_in_dt"], timezone.make_aware(datetime(2026, 3, 14, 8, 1)))
+        self.assertEqual(sync_calls[0]["final_out_dt"], timezone.make_aware(datetime(2026, 3, 14, 16, 55)))
+        self.assertEqual(sync_calls[0]["source"], reconciliation.SOURCE_WFA)
+        self.assertTrue(logs[0].accepted_to_attendance)
+        self.assertFalse(logs[1].accepted_to_attendance)
+        self.assertTrue(logs[2].accepted_to_attendance)
+        self.assertEqual(logs[1].reason, reconciliation.NOTE_SUPERSEDED_CHECKOUT)
+        self.assertEqual(logs[2].reason, reconciliation.NOTE_FINAL_OUT)
+        self.assertEqual(logs[1].attendance_id, attendance)
+        self.assertEqual(logs[2].attendance_id, attendance)
+
+    def test_earliest_in_wins_even_when_mobile_or_request_generated_in_exists_later(self):
+        attendance_date = date(2026, 3, 14)
+        logs = [
+            FakePunchLog(21, AttendancePunchDirection.IN, timezone.make_aware(datetime(2026, 3, 14, 8, 0)), source="biometric"),
+            FakePunchLog(22, AttendancePunchDirection.IN, timezone.make_aware(datetime(2026, 3, 14, 8, 4)), source="mobile"),
+            FakePunchLog(23, AttendancePunchDirection.IN, timezone.make_aware(datetime(2026, 3, 14, 8, 6)), source="approved_request"),
+            FakePunchLog(24, AttendancePunchDirection.OUT, timezone.make_aware(datetime(2026, 3, 14, 17, 2)), source="mobile"),
+        ]
+        work_request = SimpleNamespace(mode=AttendanceWorkMode.WFA, status=WorkModeRequestStatus.APPROVED)
+
+        attendance, _activity, sync_calls = self._run_recompute_with_logs(attendance_date, logs, work_request=work_request)
+
+        self.assertEqual(sync_calls[0]["final_in_dt"], timezone.make_aware(datetime(2026, 3, 14, 8, 0)))
+        self.assertEqual(sync_calls[0]["final_out_dt"], timezone.make_aware(datetime(2026, 3, 14, 17, 2)))
+        self.assertTrue(logs[0].accepted_to_attendance)
+        self.assertFalse(logs[1].accepted_to_attendance)
+        self.assertFalse(logs[2].accepted_to_attendance)
+        self.assertTrue(logs[3].accepted_to_attendance)
+        self.assertEqual(logs[1].reason, reconciliation.NOTE_DUPLICATE_CHECKIN)
+        self.assertEqual(logs[2].reason, reconciliation.NOTE_DUPLICATE_CHECKIN)
+        self.assertEqual(logs[0].attendance_id, attendance)
+        self.assertEqual(logs[3].attendance_id, attendance)
+
+    def test_canonical_selection_remains_single_under_dense_same_day_punch_sequences(self):
+        attendance_date = date(2026, 3, 14)
+        logs = [
+            FakePunchLog(31, AttendancePunchDirection.IN, timezone.make_aware(datetime(2026, 3, 14, 8, 0)), source="biometric"),
+            FakePunchLog(32, AttendancePunchDirection.IN, timezone.make_aware(datetime(2026, 3, 14, 8, 1)), source="mobile"),
+            FakePunchLog(33, AttendancePunchDirection.OUT, timezone.make_aware(datetime(2026, 3, 14, 10, 0)), source="mobile"),
+            FakePunchLog(34, AttendancePunchDirection.IN, timezone.make_aware(datetime(2026, 3, 14, 10, 5)), source="approved_request"),
+            FakePunchLog(35, AttendancePunchDirection.OUT, timezone.make_aware(datetime(2026, 3, 14, 16, 30)), source="approved_request"),
+            FakePunchLog(36, AttendancePunchDirection.OUT, timezone.make_aware(datetime(2026, 3, 14, 17, 10)), source="biometric"),
+        ]
+        work_request = SimpleNamespace(mode=AttendanceWorkMode.WFA, status=WorkModeRequestStatus.APPROVED)
+
+        attendance, _activity, sync_calls = self._run_recompute_with_logs(attendance_date, logs, work_request=work_request)
+
+        self.assertEqual(sync_calls[0]["final_in_dt"], timezone.make_aware(datetime(2026, 3, 14, 8, 0)))
+        self.assertEqual(sync_calls[0]["final_out_dt"], timezone.make_aware(datetime(2026, 3, 14, 17, 10)))
+        self.assertEqual([log.id for log in logs if log.accepted_to_attendance and log.punch_direction == AttendancePunchDirection.IN], [31])
+        self.assertEqual([log.id for log in logs if log.accepted_to_attendance and log.punch_direction == AttendancePunchDirection.OUT], [36])
+        for log in logs:
+            self.assertEqual(log.attendance_id, attendance)
+            self.assertEqual(log.attendance_date, attendance_date)
+        self.assertEqual(logs[32 - 31].reason, reconciliation.NOTE_DUPLICATE_CHECKIN)
+        self.assertEqual(logs[33 - 31].reason, reconciliation.NOTE_SUPERSEDED_CHECKOUT)
+        self.assertEqual(logs[34 - 31].reason, reconciliation.NOTE_DUPLICATE_CHECKIN)
+        self.assertEqual(logs[35 - 31].reason, reconciliation.NOTE_SUPERSEDED_CHECKOUT)
+
     def test_full_day_leave_after_existing_raw_punches_keeps_logs_but_ignores_them(self):
         attendance_date = date(2026, 3, 14)
         attendance = SimpleNamespace(attendance_date=attendance_date, save=lambda *args, **kwargs: None)
