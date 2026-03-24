@@ -2,6 +2,7 @@ from datetime import date, time
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from django.core.exceptions import ValidationError
 from django.test import SimpleTestCase, TestCase
 
 from attendance.models import (
@@ -192,6 +193,61 @@ class CrossModuleAuditViewsConsistencyDbIntegrationTests(AttendanceApiIntegratio
 
     def _activity(self):
         return activity_sync.AttendanceActivity.objects.get(employee_id=self.employee, attendance_date=self.target_date)
+
+    def _layer_snapshot(self):
+        attendance = self._attendance()
+        activity = self._activity()
+        return {
+            'attendance': (
+                attendance.request_type,
+                attendance.attendance_clock_in,
+                attendance.attendance_clock_out,
+                attendance.attendance_clock_in_channel,
+                attendance.attendance_clock_out_channel,
+                attendance.attendance_clock_in_punch_id,
+                attendance.attendance_clock_out_punch_id,
+                attendance.attendance_clock_in_mode,
+                attendance.attendance_clock_out_mode,
+                attendance.late_minutes,
+                attendance.early_out_minutes,
+                attendance.reconciliation_source,
+                attendance.reconciliation_note,
+            ),
+            'activity': (
+                activity.clock_in,
+                activity.clock_out,
+                activity.clock_in_channel,
+                activity.clock_out_channel,
+                activity.clock_in_mode,
+                activity.clock_out_mode,
+                activity.late_minutes,
+                activity.early_out_minutes,
+                activity.work_mode_request_id_id,
+            ),
+            'counts': (
+                Attendance.objects.filter(employee_id=self.employee, attendance_date=self.target_date).count(),
+                activity_sync.AttendanceActivity.objects.filter(employee_id=self.employee, attendance_date=self.target_date).count(),
+                AttendancePunchingHistory.objects.filter(employee_id=self.employee, attendance_date=self.target_date).count(),
+            ),
+        }
+
+    @staticmethod
+    def _punch_snapshot(*punches):
+        snapshot = []
+        for punch in punches:
+            punch.refresh_from_db()
+            snapshot.append(
+                (
+                    punch.id,
+                    punch.accepted_to_attendance,
+                    punch.reason,
+                    punch.decision_status,
+                    punch.decision_source,
+                    punch.attendance_id_id,
+                    punch.related_work_mode_request_id,
+                )
+            )
+        return tuple(snapshot)
 
     def _assert_layers(self, *, in_time_value, out_time_value, in_channel, out_channel, in_punch_id, out_punch_id, late_minutes=None, early_minutes=None, in_mode=None, out_mode=None):
         attendance = self._attendance()
@@ -665,6 +721,90 @@ class CrossModuleAuditViewsConsistencyDbIntegrationTests(AttendanceApiIntegratio
         out_punch.refresh_from_db()
         self.assertTrue(in_punch.accepted_to_attendance)
         self.assertTrue(out_punch.accepted_to_attendance)
+
+
+    def test_repeated_revoke_does_not_duplicate_activity_or_punch_decisions(self):
+        in_punch, out_punch = self._create_raw_punches(in_time_value=time(8, 20), out_time_value=time(16, 40), work_mode=AttendanceWorkMode.WFO)
+        request = WorkModeRequest.objects.create(
+            employee_id=self.employee,
+            mode=AttendanceWorkMode.ON_DUTY,
+            scope=WorkModeRequestScope.FULL,
+            start_date=self.target_date,
+            end_date=self.target_date,
+            status=WorkModeRequestStatus.APPROVED,
+            reason='Client visit',
+            document_status=WorkModeRequestDocumentStatus.VERIFIED,
+        )
+        version = WorkModeRequestDocumentVersion.objects.create(
+            work_mode_request=request,
+            version_number=1,
+            is_current=True,
+            status=WorkModeRequestDocumentStatus.VERIFIED,
+            submitted_by=self.employee,
+            reviewed_by=self.employee,
+            review_remark='Verified',
+        )
+        request.current_document_version = version
+        request.save(update_fields=['current_document_version'])
+
+        with self._shift_rule_context():
+            recompute_attendance(self.employee, self.target_date)
+
+        WorkModeRequestActions.revoke_request(request, actor=self.employee, remark='Trip ended')
+        request.refresh_from_db()
+        self.assertEqual(request.status, WorkModeRequestStatus.REVOKED)
+        baseline_snapshot = self._layer_snapshot()
+        baseline_punch_snapshot = self._punch_snapshot(in_punch, out_punch)
+
+        with self.assertRaises(ValidationError):
+            WorkModeRequestActions.revoke_request(request, actor=self.employee, remark='Trip ended twice')
+
+        request.refresh_from_db()
+        self.assertEqual(request.status, WorkModeRequestStatus.REVOKED)
+        self.assertEqual(self._layer_snapshot(), baseline_snapshot)
+        self.assertEqual(self._punch_snapshot(in_punch, out_punch), baseline_punch_snapshot)
+
+    def test_invalid_work_mode_transition_keeps_attendance_activity_and_history_unchanged(self):
+        in_punch, out_punch = self._create_raw_punches(in_time_value=time(8, 20), out_time_value=time(16, 40), work_mode=AttendanceWorkMode.WFO)
+        admin_user, admin_employee = self.create_employee('AuditApprover', is_superuser=True)
+        request_ctx = SimpleNamespace(user=admin_user)
+        request = WorkModeRequest.objects.create(
+            employee_id=self.employee,
+            mode=AttendanceWorkMode.ON_DUTY,
+            scope=WorkModeRequestScope.FULL,
+            start_date=self.target_date,
+            end_date=self.target_date,
+            status=WorkModeRequestStatus.APPROVED,
+            reason='Client visit',
+            document_status=WorkModeRequestDocumentStatus.PENDING_VERIFICATION,
+        )
+        version = WorkModeRequestDocumentVersion.objects.create(
+            work_mode_request=request,
+            version_number=1,
+            is_current=True,
+            status=WorkModeRequestDocumentStatus.PENDING_VERIFICATION,
+            submitted_by=self.employee,
+        )
+        request.current_document_version = version
+        request.save(update_fields=['current_document_version'])
+
+        with self._shift_rule_context():
+            recompute_attendance(self.employee, self.target_date)
+
+        WorkModeRequestActions.verify_document(request, actor=admin_employee, request=request_ctx, remark='Verified once')
+        WorkModeRequestActions.revoke_request(request, actor=admin_employee, request=request_ctx, remark='Trip ended')
+        request.refresh_from_db()
+        self.assertEqual(request.status, WorkModeRequestStatus.REVOKED)
+        baseline_snapshot = self._layer_snapshot()
+        baseline_punch_snapshot = self._punch_snapshot(in_punch, out_punch)
+
+        with self.assertRaises(ValidationError):
+            WorkModeRequestActions.verify_document(request, actor=admin_employee, request=request_ctx, remark='Should not verify revoked request')
+
+        request.refresh_from_db()
+        self.assertEqual(request.status, WorkModeRequestStatus.REVOKED)
+        self.assertEqual(self._layer_snapshot(), baseline_snapshot)
+        self.assertEqual(self._punch_snapshot(in_punch, out_punch), baseline_punch_snapshot)
 
     def test_on_duty_pending_verification_uses_raw_truth_but_keeps_normal_rules(self):
         in_punch, out_punch = self._create_raw_punches(in_time_value=time(8, 20), out_time_value=time(16, 40), work_mode=AttendanceWorkMode.WFO)
