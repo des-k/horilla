@@ -21,9 +21,11 @@ from attendance.services import activity_sync
 from attendance.services.activity_sync import mark_approved_request_channels, sync_single_session_activity
 from attendance.services.punching_history import capture_request_restore_snapshot, clear_raw_links_for_request_override, restore_raw_state_after_request
 from attendance.services.reconciliation import (
+    NOTE_ON_DUTY_FINAL,
     NOTE_ON_DUTY_NOT_GRANTED,
     NOTE_ON_DUTY_PROVISIONAL,
     SOURCE_NORMAL,
+    SOURCE_ON_DUTY,
     SOURCE_PROVISIONAL_ON_DUTY,
     recompute_attendance,
 )
@@ -587,6 +589,9 @@ class CrossModuleAuditViewsConsistencyDbIntegrationTests(AttendanceApiIntegratio
             in_mode=AttendanceWorkMode.ON_DUTY,
             out_mode=AttendanceWorkMode.ON_DUTY,
         )
+        attendance = self._attendance()
+        self.assertEqual(attendance.reconciliation_source, SOURCE_ON_DUTY)
+        self.assertEqual(attendance.reconciliation_note, NOTE_ON_DUTY_FINAL)
 
         WorkModeRequestActions.reject_document(request, actor=self.employee, remark='Need clearer proof')
         attendance = self._attendance()
@@ -594,11 +599,15 @@ class CrossModuleAuditViewsConsistencyDbIntegrationTests(AttendanceApiIntegratio
         self.assertEqual(Attendance.objects.filter(employee_id=self.employee, attendance_date=self.target_date).count(), 1)
         self.assertEqual(activity_sync.AttendanceActivity.objects.filter(employee_id=self.employee, attendance_date=self.target_date).count(), 1)
         self.assertEqual(attendance.attendance_clock_in, time(8, 20))
+        self.assertEqual(attendance.attendance_clock_out, time(16, 40))
         self.assertEqual(activity.clock_in, time(8, 20))
+        self.assertEqual(activity.clock_out, time(16, 40))
         self.assertEqual(attendance.attendance_clock_in_mode, AttendanceWorkMode.ON_DUTY)
         self.assertEqual(activity.clock_in_mode, AttendanceWorkMode.ON_DUTY)
+        self.assertEqual(attendance.late_minutes, 20)
+        self.assertEqual(attendance.early_out_minutes, 20)
         self.assertEqual(attendance.reconciliation_source, SOURCE_NORMAL)
-        self.assertIn(attendance.reconciliation_note, {NOTE_ON_DUTY_NOT_GRANTED, "Missing Check-Out"})
+        self.assertEqual(attendance.reconciliation_note, NOTE_ON_DUTY_NOT_GRANTED)
         self.assertEqual(AttendancePunchingHistory.objects.filter(employee_id=self.employee, id__in=[in_punch.id, out_punch.id]).count(), 2)
         request.refresh_from_db()
         self.assertEqual(request.document_status, WorkModeRequestDocumentStatus.REJECTED)
@@ -609,9 +618,13 @@ class CrossModuleAuditViewsConsistencyDbIntegrationTests(AttendanceApiIntegratio
         self.assertEqual(Attendance.objects.filter(employee_id=self.employee, attendance_date=self.target_date).count(), 1)
         self.assertEqual(activity_sync.AttendanceActivity.objects.filter(employee_id=self.employee, attendance_date=self.target_date).count(), 1)
         self.assertEqual(attendance.attendance_clock_in, time(8, 20))
+        self.assertEqual(attendance.attendance_clock_out, time(16, 40))
         self.assertEqual(activity.clock_in, time(8, 20))
+        self.assertEqual(activity.clock_out, time(16, 40))
         self.assertEqual(attendance.attendance_clock_in_mode, AttendanceWorkMode.ON_DUTY)
         self.assertEqual(activity.clock_in_mode, AttendanceWorkMode.ON_DUTY)
+        self.assertEqual(attendance.late_minutes, 20)
+        self.assertEqual(attendance.early_out_minutes, 20)
         self.assertEqual(attendance.reconciliation_note, NOTE_ON_DUTY_PROVISIONAL)
         self.assertEqual(attendance.reconciliation_source, SOURCE_PROVISIONAL_ON_DUTY)
         self.assertEqual(AttendancePunchingHistory.objects.filter(employee_id=self.employee, id__in=[in_punch.id, out_punch.id]).count(), 2)
@@ -631,6 +644,9 @@ class CrossModuleAuditViewsConsistencyDbIntegrationTests(AttendanceApiIntegratio
             in_mode=AttendanceWorkMode.ON_DUTY,
             out_mode=AttendanceWorkMode.ON_DUTY,
         )
+        attendance = self._attendance()
+        self.assertEqual(attendance.reconciliation_source, SOURCE_ON_DUTY)
+        self.assertEqual(attendance.reconciliation_note, NOTE_ON_DUTY_FINAL)
 
         WorkModeRequestActions.revoke_request(request, actor=self.employee, remark='Trip ended')
         self._assert_layers(
@@ -649,3 +665,96 @@ class CrossModuleAuditViewsConsistencyDbIntegrationTests(AttendanceApiIntegratio
         out_punch.refresh_from_db()
         self.assertTrue(in_punch.accepted_to_attendance)
         self.assertTrue(out_punch.accepted_to_attendance)
+
+    def test_on_duty_pending_verification_uses_raw_truth_but_keeps_normal_rules(self):
+        in_punch, out_punch = self._create_raw_punches(in_time_value=time(8, 20), out_time_value=time(16, 40), work_mode=AttendanceWorkMode.WFO)
+        request = WorkModeRequest.objects.create(
+            employee_id=self.employee,
+            mode=AttendanceWorkMode.ON_DUTY,
+            scope=WorkModeRequestScope.FULL,
+            start_date=self.target_date,
+            end_date=self.target_date,
+            status=WorkModeRequestStatus.APPROVED,
+            reason='Client visit',
+            document_status=WorkModeRequestDocumentStatus.PENDING_VERIFICATION,
+        )
+        version = WorkModeRequestDocumentVersion.objects.create(
+            work_mode_request=request,
+            version_number=1,
+            is_current=True,
+            status=WorkModeRequestDocumentStatus.PENDING_VERIFICATION,
+            submitted_by=self.employee,
+        )
+        request.current_document_version = version
+        request.save(update_fields=['current_document_version'])
+
+        with self._shift_rule_context():
+            recompute_attendance(self.employee, self.target_date)
+
+        self._assert_layers(
+            in_time_value=time(8, 20),
+            out_time_value=time(16, 40),
+            in_channel=AttendanceChannel.BIOMETRIC,
+            out_channel=AttendanceChannel.BIOMETRIC,
+            in_punch_id=in_punch.id,
+            out_punch_id=out_punch.id,
+            late_minutes=20,
+            early_minutes=20,
+            in_mode=AttendanceWorkMode.ON_DUTY,
+            out_mode=AttendanceWorkMode.ON_DUTY,
+        )
+        attendance = self._attendance()
+        self.assertEqual(attendance.reconciliation_source, SOURCE_PROVISIONAL_ON_DUTY)
+        self.assertEqual(attendance.reconciliation_note, NOTE_ON_DUTY_PROVISIONAL)
+        in_punch.refresh_from_db()
+        out_punch.refresh_from_db()
+        self.assertTrue(in_punch.accepted_to_attendance)
+        self.assertTrue(out_punch.accepted_to_attendance)
+
+    def test_on_duty_rejected_uses_raw_truth_but_keeps_normal_rules(self):
+        in_punch, out_punch = self._create_raw_punches(in_time_value=time(8, 20), out_time_value=time(16, 40), work_mode=AttendanceWorkMode.WFO)
+        request = WorkModeRequest.objects.create(
+            employee_id=self.employee,
+            mode=AttendanceWorkMode.ON_DUTY,
+            scope=WorkModeRequestScope.FULL,
+            start_date=self.target_date,
+            end_date=self.target_date,
+            status=WorkModeRequestStatus.APPROVED,
+            reason='Client visit',
+            document_status=WorkModeRequestDocumentStatus.REJECTED,
+        )
+        version = WorkModeRequestDocumentVersion.objects.create(
+            work_mode_request=request,
+            version_number=1,
+            is_current=True,
+            status=WorkModeRequestDocumentStatus.REJECTED,
+            submitted_by=self.employee,
+            reviewed_by=self.employee,
+            review_remark='Rejected proof',
+        )
+        request.current_document_version = version
+        request.save(update_fields=['current_document_version'])
+
+        with self._shift_rule_context():
+            recompute_attendance(self.employee, self.target_date)
+
+        self._assert_layers(
+            in_time_value=time(8, 20),
+            out_time_value=time(16, 40),
+            in_channel=AttendanceChannel.BIOMETRIC,
+            out_channel=AttendanceChannel.BIOMETRIC,
+            in_punch_id=in_punch.id,
+            out_punch_id=out_punch.id,
+            late_minutes=20,
+            early_minutes=20,
+            in_mode=AttendanceWorkMode.ON_DUTY,
+            out_mode=AttendanceWorkMode.ON_DUTY,
+        )
+        attendance = self._attendance()
+        self.assertEqual(attendance.reconciliation_source, SOURCE_NORMAL)
+        self.assertEqual(attendance.reconciliation_note, NOTE_ON_DUTY_NOT_GRANTED)
+        in_punch.refresh_from_db()
+        out_punch.refresh_from_db()
+        self.assertTrue(in_punch.accepted_to_attendance)
+        self.assertTrue(out_punch.accepted_to_attendance)
+
