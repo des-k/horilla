@@ -480,6 +480,51 @@ def _apply_punch_decisions(attendance: Attendance, logs: list[AttendancePunching
         ])
 
 
+def _synchronize_canonical_punch_truth(attendance: Attendance, decisions: dict[int, tuple[bool, str]], source: str):
+    # Refresh canonical final truth from DB first so later updates do not rely on
+    # stale in-memory FK ids after multi-step recompute/request lifecycles.
+    attendance.refresh_from_db(fields=[
+        "attendance_date",
+        "attendance_clock_in_punch",
+        "attendance_clock_out_punch",
+    ])
+
+    canonical_pairs = []
+    if getattr(attendance, "attendance_clock_in_punch_id", None):
+        canonical_pairs.append((attendance.attendance_clock_in_punch_id, NOTE_FINAL_IN))
+    if getattr(attendance, "attendance_clock_out_punch_id", None):
+        canonical_pairs.append((attendance.attendance_clock_out_punch_id, NOTE_FINAL_OUT))
+    if not canonical_pairs:
+        return
+
+    canonical_map = {punch_id: reason for punch_id, reason in canonical_pairs}
+
+    # Keep decision map aligned with canonical Attendance truth.
+    for punch_id, reason in canonical_pairs:
+        decisions[punch_id] = (True, reason)
+
+    # Re-query directly from the base manager so this sync is immune to request /
+    # company-scoped queryset filtering and stale log objects from earlier in the recompute.
+    canonical_logs = AttendancePunchingHistory._base_manager.filter(id__in=list(canonical_map.keys()))
+    for log in canonical_logs:
+        final_reason = canonical_map.get(log.id, NOTE_FINAL_IN)
+        log.attendance_id = attendance
+        log.attendance_date = attendance.attendance_date
+        log.accepted_to_attendance = True
+        log.reason = (final_reason or "-")[:255]
+        if hasattr(log, "decision_status"):
+            log.decision_status = "accepted"
+        if hasattr(log, "decision_source"):
+            log.decision_source = source
+        log.save(update_fields=[
+            "attendance_id",
+            "attendance_date",
+            "accepted_to_attendance",
+            "reason",
+            *( ["decision_status"] if hasattr(log, "decision_status") else []),
+            *( ["decision_source"] if hasattr(log, "decision_source") else []),
+        ])
+
 def _set_late_early_rows(attendance: Attendance, late_minutes: int, early_minutes: int):
     attendance.late_come_early_out.filter(type="late_come").delete()
     attendance.late_come_early_out.filter(type="early_out").delete()
@@ -930,51 +975,7 @@ def recompute_attendance(employee, attendance_date: date) -> ReconciliationResul
         decisions[log.id] = (False, "Ignored: not used in final attendance")
 
     _apply_punch_decisions(attendance, logs, decisions, source)
-
-    # Final safety net: the Attendance row is the canonical final truth.
-    # Re-apply the final accepted state directly on in-memory log objects first,
-    # then use the model base manager as a DB-level fallback. This avoids stale
-    # accepted flags when request/company-scoped managers or multi-step recompute
-    # flows diverge from the persisted Attendance punch ids.
-    canonical_punch_updates = []
-    if getattr(attendance, "attendance_clock_in_punch_id", None):
-        canonical_punch_updates.append((attendance.attendance_clock_in_punch_id, NOTE_FINAL_IN))
-    if getattr(attendance, "attendance_clock_out_punch_id", None):
-        canonical_punch_updates.append((attendance.attendance_clock_out_punch_id, NOTE_FINAL_OUT))
-
-    canonical_map = {punch_id: reason for punch_id, reason in canonical_punch_updates}
-    for log in logs:
-        if log.id not in canonical_map:
-            continue
-        final_reason = canonical_map[log.id]
-        log.attendance_id = attendance
-        log.attendance_date = attendance.attendance_date
-        log.accepted_to_attendance = True
-        log.reason = (final_reason or '-')[:255]
-        if hasattr(log, 'decision_status'):
-            log.decision_status = 'accepted'
-        if hasattr(log, 'decision_source'):
-            log.decision_source = source
-        log.save(update_fields=[
-            'attendance_id',
-            'attendance_date',
-            'accepted_to_attendance',
-            'reason',
-            *( ['decision_status'] if hasattr(log, 'decision_status') else []),
-            *( ['decision_source'] if hasattr(log, 'decision_source') else []),
-        ])
-
-    for punch_id, final_reason in canonical_punch_updates:
-        AttendancePunchingHistory._base_manager.filter(id=punch_id).update(
-            attendance_id=attendance,
-            attendance_date=attendance.attendance_date,
-            accepted_to_attendance=True,
-            reason=(final_reason or '-')[:255],
-            **({
-                'decision_status': 'accepted',
-                'decision_source': source,
-            } if hasattr(AttendancePunchingHistory, 'decision_status') else {}),
-        )
+    _synchronize_canonical_punch_truth(attendance, decisions, source)
 
     return ReconciliationResult(attendance=attendance, activity=activity)
 
