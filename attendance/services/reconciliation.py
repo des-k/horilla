@@ -921,6 +921,28 @@ def recompute_attendance(employee, attendance_date: date) -> ReconciliationResul
         decisions[log.id] = (False, "Ignored: not used in final attendance")
 
     _apply_punch_decisions(attendance, logs, decisions, source)
+
+    # Final safety net: the Attendance row is the canonical final truth.
+    # If a final punch id is persisted there, the matching raw punch must also
+    # be marked as accepted even when intermediate in-memory selection diverges
+    # during multi-step recompute/revoke/reopen flows.
+    canonical_punch_updates = []
+    if getattr(attendance, "attendance_clock_in_punch_id", None):
+        canonical_punch_updates.append((attendance.attendance_clock_in_punch_id, NOTE_FINAL_IN))
+    if getattr(attendance, "attendance_clock_out_punch_id", None):
+        canonical_punch_updates.append((attendance.attendance_clock_out_punch_id, NOTE_FINAL_OUT))
+    for punch_id, final_reason in canonical_punch_updates:
+        AttendancePunchingHistory.objects.filter(id=punch_id).update(
+            attendance_id=attendance,
+            attendance_date=attendance.attendance_date,
+            accepted_to_attendance=True,
+            reason=(final_reason or '-')[:255],
+            **({
+                'decision_status': 'accepted',
+                'decision_source': source,
+            } if hasattr(AttendancePunchingHistory, 'decision_status') else {}),
+        )
+
     return ReconciliationResult(attendance=attendance, activity=activity)
 
 
