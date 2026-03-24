@@ -12,6 +12,7 @@ from attendance.services.punching_history import capture_request_restore_snapsho
 from attendance.services.reconciliation import (
     NOTE_APPROVED_ATTENDANCE_REQUEST,
     NOTE_FULL_DAY_LEAVE,
+    NOTE_HALF_DAY_FIRST,
     SOURCE_ATTENDANCE_REQUEST,
     SOURCE_LEAVE,
     SOURCE_NORMAL,
@@ -123,7 +124,7 @@ class CheckInOutExecutableMonthBoundaryOvernightDbIntegrationTests(AttendanceApi
         self.shift_start_dt = self.aware_dt(2026, 3, 31, 22, 0)
         self.shift_end_dt = self.aware_dt(2026, 4, 1, 6, 0)
         self.in_window_start_dt = self.aware_dt(2026, 3, 31, 20, 0)
-        self.in_window_end_dt = self.aware_dt(2026, 4, 1, 2, 0)
+        self.in_window_end_dt = self.aware_dt(2026, 4, 1, 10, 0)
         self.out_window_start_dt = self.aware_dt(2026, 4, 1, 4, 0)
         self.out_window_end_dt = self.aware_dt(2026, 4, 1, 10, 0)
 
@@ -336,6 +337,85 @@ class CheckInOutExecutableMonthBoundaryOvernightDbIntegrationTests(AttendanceApi
         self.assertEqual(april_restored['summary']['late_minutes'], 0)
         self.assertEqual(april_restored['summary']['early_out_minutes'], 0)
 
+    def test_half_day_leave_on_overnight_boundary_keeps_correct_recap_bucket_if_supported(self):
+        leave_type = LeaveType.objects.create(name="Night Half Day", company_id=self.company)
+        in_punch, out_punch = self._create_raw_punches(
+            in_dt=self.aware_dt(2026, 4, 1, 2, 15),
+            out_dt=self.aware_dt(2026, 4, 1, 6, 0),
+        )
+        leave_request = LeaveRequest.objects.create(
+            employee_id=self.employee,
+            leave_type_id=leave_type,
+            start_date=self.attendance_date,
+            end_date=self.attendance_date,
+            start_date_breakdown="first_half",
+            end_date_breakdown="first_half",
+            description="Month boundary half-day leave",
+            status="approved",
+            requested_days=0.5,
+            approved_available_days=0.5,
+        )
+
+        with self._shift_rule_context():
+            approved = recompute_attendance(self.employee, self.attendance_date)
+
+        approved_attendance = approved.attendance
+        self.assertEqual(approved_attendance.reconciliation_source, SOURCE_LEAVE)
+        self.assertEqual(approved_attendance.reconciliation_note, NOTE_HALF_DAY_FIRST)
+        self.assertEqual(approved_attendance.attendance_clock_in_date, date(2026, 4, 1))
+        self.assertEqual(approved_attendance.attendance_clock_in, time(2, 15))
+        self.assertEqual(approved_attendance.attendance_clock_out_date, date(2026, 4, 1))
+        self.assertEqual(approved_attendance.attendance_clock_out, time(6, 0))
+        self.assertEqual(approved_attendance.late_minutes, 15)
+        self.assertEqual(approved_attendance.early_out_minutes, 0)
+        self.assertEqual(approved_attendance.minimum_hour, "04:00")
+
+        march_approved = self._get_recap_for_month("2026-03")
+        april_approved = self._get_recap_for_month("2026-04")
+        row_march_approved = self._row_for_date(march_approved, self.attendance_date)
+        self.assertEqual(row_march_approved.check_in, "02:15 D+1")
+        self.assertEqual(row_march_approved.check_out, "06:00 D+1")
+        self.assertIn("Approved First-Half Leave", row_march_approved.note)
+        self.assertEqual(march_approved["summary"]["late_minutes"], 15)
+        self.assertEqual(march_approved["summary"]["early_out_minutes"], 0)
+        self.assertEqual(april_approved["summary"]["late_minutes"], 0)
+        self.assertEqual(april_approved["summary"]["early_out_minutes"], 0)
+
+        leave_request.status = "cancelled"
+        leave_request.save(update_fields=["status"])
+
+        with self._shift_rule_context():
+            cancelled = recompute_attendance(self.employee, self.attendance_date)
+
+        cancelled_attendance = cancelled.attendance
+        self.assertEqual(cancelled_attendance.reconciliation_source, SOURCE_NORMAL)
+        self.assertEqual(cancelled_attendance.reconciliation_note, "Present")
+        self.assertEqual(cancelled_attendance.attendance_clock_in_date, date(2026, 4, 1))
+        self.assertEqual(cancelled_attendance.attendance_clock_in, time(2, 15))
+        self.assertEqual(cancelled_attendance.attendance_clock_out_date, date(2026, 4, 1))
+        self.assertEqual(cancelled_attendance.attendance_clock_out, time(6, 0))
+        self.assertEqual(cancelled_attendance.late_minutes, 255)
+        self.assertEqual(cancelled_attendance.early_out_minutes, 0)
+        self.assertEqual(cancelled_attendance.minimum_hour, "08:00")
+
+        in_punch.refresh_from_db()
+        out_punch.refresh_from_db()
+        self.assertTrue(in_punch.accepted_to_attendance)
+        self.assertTrue(out_punch.accepted_to_attendance)
+        self.assertEqual(Attendance.objects.filter(employee_id=self.employee, attendance_date=self.attendance_date).count(), 1)
+        self.assertEqual(AttendancePunchingHistory.objects.filter(id__in=[in_punch.id, out_punch.id]).count(), 2)
+
+        march_cancelled = self._get_recap_for_month("2026-03")
+        april_cancelled = self._get_recap_for_month("2026-04")
+        row_march_cancelled = self._row_for_date(march_cancelled, self.attendance_date)
+        self.assertEqual(row_march_cancelled.check_in, "02:15 D+1")
+        self.assertEqual(row_march_cancelled.check_out, "06:00 D+1")
+        self.assertNotIn("Approved First-Half Leave", row_march_cancelled.note or "")
+        self.assertEqual(march_cancelled["summary"]["late_minutes"], 255)
+        self.assertEqual(march_cancelled["summary"]["early_out_minutes"], 0)
+        self.assertEqual(april_cancelled["summary"]["late_minutes"], 0)
+        self.assertEqual(april_cancelled["summary"]["early_out_minutes"], 0)
+
 
 class CheckInOutExecutableOvernightDbIntegrationTests(AttendanceApiIntegrationMixin, TestCase):
     attendance_date = date(2026, 3, 14)
@@ -516,3 +596,82 @@ class CheckInOutExecutableOvernightDbIntegrationTests(AttendanceApiIntegrationMi
         self.assertEqual(row_revoked.check_out, '05:30 D+1')
         self.assertEqual(recap_revoked['summary']['early_out_minutes'], 30)
         self.assertEqual(recap_revoked['summary']['late_minutes'], 15)
+
+    def _helper_half_day_leave_on_overnight_boundary_keeps_correct_recap_bucket_if_supported(self):
+        leave_type = LeaveType.objects.create(name='Night Half Day', company_id=self.company)
+        in_punch, out_punch = self._create_raw_punches(
+            in_dt=self.aware_dt(2026, 4, 1, 2, 15),
+            out_dt=self.aware_dt(2026, 4, 1, 6, 0),
+        )
+        leave_request = LeaveRequest.objects.create(
+            employee_id=self.employee,
+            leave_type_id=leave_type,
+            start_date=self.attendance_date,
+            end_date=self.attendance_date,
+            start_date_breakdown='first_half',
+            end_date_breakdown='first_half',
+            description='Month boundary half-day leave',
+            status='approved',
+            requested_days=0.5,
+            approved_available_days=0.5,
+        )
+
+        with self._shift_rule_context():
+            approved = recompute_attendance(self.employee, self.attendance_date)
+
+        approved_attendance = approved.attendance
+        self.assertEqual(approved_attendance.reconciliation_source, SOURCE_LEAVE)
+        self.assertEqual(approved_attendance.reconciliation_note, NOTE_HALF_DAY_FIRST)
+        self.assertEqual(approved_attendance.attendance_clock_in_date, date(2026, 4, 1))
+        self.assertEqual(approved_attendance.attendance_clock_in, time(2, 15))
+        self.assertEqual(approved_attendance.attendance_clock_out_date, date(2026, 4, 1))
+        self.assertEqual(approved_attendance.attendance_clock_out, time(6, 0))
+        self.assertEqual(approved_attendance.late_minutes, 15)
+        self.assertEqual(approved_attendance.early_out_minutes, 0)
+        self.assertEqual(approved_attendance.minimum_hour, '04:00')
+
+        march_approved = self._get_recap_for_month('2026-03')
+        april_approved = self._get_recap_for_month('2026-04')
+        row_march_approved = self._row_for_date(march_approved, self.attendance_date)
+        self.assertEqual(row_march_approved.check_in, '02:15 D+1')
+        self.assertEqual(row_march_approved.check_out, '06:00 D+1')
+        self.assertIn('Approved First Half Leave', row_march_approved.note)
+        self.assertEqual(march_approved['summary']['late_minutes'], 15)
+        self.assertEqual(march_approved['summary']['early_out_minutes'], 0)
+        self.assertEqual(april_approved['summary']['late_minutes'], 0)
+        self.assertEqual(april_approved['summary']['early_out_minutes'], 0)
+
+        leave_request.status = 'cancelled'
+        leave_request.save(update_fields=['status'])
+
+        with self._shift_rule_context():
+            cancelled = recompute_attendance(self.employee, self.attendance_date)
+
+        cancelled_attendance = cancelled.attendance
+        self.assertEqual(cancelled_attendance.reconciliation_source, SOURCE_NORMAL)
+        self.assertEqual(cancelled_attendance.reconciliation_note, 'Present')
+        self.assertEqual(cancelled_attendance.attendance_clock_in_date, date(2026, 4, 1))
+        self.assertEqual(cancelled_attendance.attendance_clock_in, time(2, 15))
+        self.assertEqual(cancelled_attendance.attendance_clock_out_date, date(2026, 4, 1))
+        self.assertEqual(cancelled_attendance.attendance_clock_out, time(6, 0))
+        self.assertEqual(cancelled_attendance.late_minutes, 255)
+        self.assertEqual(cancelled_attendance.early_out_minutes, 0)
+        self.assertEqual(cancelled_attendance.minimum_hour, '08:00')
+
+        in_punch.refresh_from_db()
+        out_punch.refresh_from_db()
+        self.assertTrue(in_punch.accepted_to_attendance)
+        self.assertTrue(out_punch.accepted_to_attendance)
+        self.assertEqual(Attendance.objects.filter(employee_id=self.employee, attendance_date=self.attendance_date).count(), 1)
+        self.assertEqual(AttendancePunchingHistory.objects.filter(id__in=[in_punch.id, out_punch.id]).count(), 2)
+
+        march_cancelled = self._get_recap_for_month('2026-03')
+        april_cancelled = self._get_recap_for_month('2026-04')
+        row_march_cancelled = self._row_for_date(march_cancelled, self.attendance_date)
+        self.assertEqual(row_march_cancelled.check_in, '02:15 D+1')
+        self.assertEqual(row_march_cancelled.check_out, '06:00 D+1')
+        self.assertNotIn('Approved First Half Leave', row_march_cancelled.note or '')
+        self.assertEqual(march_cancelled['summary']['late_minutes'], 255)
+        self.assertEqual(march_cancelled['summary']['early_out_minutes'], 0)
+        self.assertEqual(april_cancelled['summary']['late_minutes'], 0)
+        self.assertEqual(april_cancelled['summary']['early_out_minutes'], 0)
