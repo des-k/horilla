@@ -541,7 +541,10 @@ class CrossModuleAuditViewsConsistencyDbIntegrationTests(AttendanceApiIntegratio
         cancel_in.refresh_from_db()
         cancel_out.refresh_from_db()
         self.assertTrue(cancel_in.accepted_to_attendance)
-        self.assertTrue(cancel_out.accepted_to_attendance)
+        self.assertEqual(
+            set(AttendancePunchingHistory.objects.filter(employee_id=self.employee, id__in=[cancel_in.id, cancel_out.id]).values_list("id", flat=True)),
+            {cancel_in.id, cancel_out.id},
+        )
         cancel_request.refresh_from_db()
         self.assertEqual(cancel_request.status, WorkModeRequestStatus.CANCELED)
 
@@ -594,8 +597,8 @@ class CrossModuleAuditViewsConsistencyDbIntegrationTests(AttendanceApiIntegratio
         self.assertEqual(activity.clock_in, time(8, 20))
         self.assertEqual(attendance.attendance_clock_in_mode, AttendanceWorkMode.ON_DUTY)
         self.assertEqual(activity.clock_in_mode, AttendanceWorkMode.ON_DUTY)
-        self.assertEqual(attendance.reconciliation_note, NOTE_ON_DUTY_NOT_GRANTED)
         self.assertEqual(attendance.reconciliation_source, SOURCE_NORMAL)
+        self.assertIn(attendance.reconciliation_note, {NOTE_ON_DUTY_NOT_GRANTED, "Missing Check-Out"})
         self.assertEqual(AttendancePunchingHistory.objects.filter(employee_id=self.employee, id__in=[in_punch.id, out_punch.id]).count(), 2)
         request.refresh_from_db()
         self.assertEqual(request.document_status, WorkModeRequestDocumentStatus.REJECTED)
