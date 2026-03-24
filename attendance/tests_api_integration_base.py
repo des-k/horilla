@@ -4,7 +4,7 @@ from datetime import datetime, time
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from django.contrib.auth.models import Permission, User
+from django.contrib.auth.models import AnonymousUser, Permission, User
 from django.utils import timezone
 from rest_framework.test import APIClient, APIRequestFactory
 
@@ -15,9 +15,17 @@ from horilla.horilla_middlewares import _thread_locals
 
 class AttendanceApiIntegrationMixin:
     @staticmethod
-    def _clear_request_context():
-        if hasattr(_thread_locals, 'request'):
-            delattr(_thread_locals, 'request')
+    def _neutral_request_context():
+        return SimpleNamespace(
+            user=AnonymousUser(),
+            session={'selected_company': 'all'},
+            is_filtering=False,
+            POST={},
+        )
+
+    @classmethod
+    def _clear_request_context(cls):
+        _thread_locals.request = cls._neutral_request_context()
 
     @classmethod
     def setUpTestData(cls):
