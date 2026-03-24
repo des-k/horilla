@@ -7,6 +7,7 @@ from typing import Iterable, Optional
 from django.apps import apps
 from django.conf import settings
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from attendance.models import (
@@ -389,6 +390,27 @@ def _session_mode_from_attendance(attendance: Attendance, direction: str) -> Opt
 
 
 def _candidate_logs(employee, attendance_date: date, ctx: ShiftContext) -> Iterable[AttendancePunchingHistory]:
+    has_shift_windows = any(
+        [
+            ctx.check_in_window_start_dt,
+            ctx.check_out_window_end_dt,
+            ctx.shift_start_dt,
+            ctx.shift_end_dt,
+        ]
+    )
+    if not has_shift_windows:
+        return (
+            AttendancePunchingHistory.objects.filter(employee_id=employee)
+            .filter(
+                Q(attendance_date=attendance_date)
+                | Q(
+                    punch_timestamp__gte=_localize(datetime.combine(attendance_date, time.min)),
+                    punch_timestamp__lte=_localize(datetime.combine(attendance_date, time.max)),
+                )
+            )
+            .order_by("punch_timestamp", "id")
+        )
+
     start_dt = ctx.check_in_window_start_dt or ctx.shift_start_dt or _localize(datetime.combine(attendance_date, time.min))
     end_dt = ctx.check_out_window_end_dt or ctx.shift_end_dt or (_localize(datetime.combine(attendance_date, time.max)) + timedelta(days=1))
     start_dt = start_dt - timedelta(hours=6)
@@ -502,8 +524,12 @@ def _synchronize_canonical_punch_truth(
         ])
 
     canonical_pairs = []
-    final_in_punch_id = getattr(attendance, "attendance_clock_in_punch_id", None) or getattr(final_in_punch, "id", None)
-    final_out_punch_id = getattr(attendance, "attendance_clock_out_punch_id", None) or getattr(final_out_punch, "id", None)
+    if getattr(attendance, "pk", None):
+        final_in_punch_id = getattr(attendance, "attendance_clock_in_punch_id", None)
+        final_out_punch_id = getattr(attendance, "attendance_clock_out_punch_id", None)
+    else:
+        final_in_punch_id = getattr(attendance, "attendance_clock_in_punch_id", None) or getattr(final_in_punch, "id", None)
+        final_out_punch_id = getattr(attendance, "attendance_clock_out_punch_id", None) or getattr(final_out_punch, "id", None)
     if final_in_punch_id:
         canonical_pairs.append((final_in_punch_id, NOTE_FINAL_IN))
     if final_out_punch_id:
@@ -969,8 +995,12 @@ def recompute_attendance(employee, attendance_date: date) -> ReconciliationResul
     _set_late_early_rows(attendance, late_minutes, early_minutes)
 
     decisions: dict[int, tuple[bool, str]] = {}
-    final_in_punch_id = getattr(attendance, "attendance_clock_in_punch_id", None) or getattr(final_in_punch, "id", None)
-    final_out_punch_id = getattr(attendance, "attendance_clock_out_punch_id", None) or getattr(final_out_punch, "id", None)
+    if getattr(attendance, "pk", None):
+        final_in_punch_id = getattr(attendance, "attendance_clock_in_punch_id", None)
+        final_out_punch_id = getattr(attendance, "attendance_clock_out_punch_id", None)
+    else:
+        final_in_punch_id = getattr(attendance, "attendance_clock_in_punch_id", None) or getattr(final_in_punch, "id", None)
+        final_out_punch_id = getattr(attendance, "attendance_clock_out_punch_id", None) or getattr(final_out_punch, "id", None)
 
     # The Attendance row is the canonical final truth. When a final punch id is
     # persisted there, force the in-memory decision map to accept that punch as
@@ -1011,6 +1041,25 @@ def recompute_attendance(employee, attendance_date: date) -> ReconciliationResul
 
     _apply_punch_decisions(attendance, logs, decisions, source)
     _synchronize_canonical_punch_truth(attendance, decisions, source, logs=logs, final_in_punch=final_in_punch, final_out_punch=final_out_punch)
+
+    if leave_ctx.is_full_day and logs:
+        for log in logs:
+            log.attendance_id = attendance
+            log.attendance_date = attendance.attendance_date
+            log.accepted_to_attendance = False
+            log.reason = NOTE_IGNORED_FULL_DAY_LEAVE
+            if hasattr(log, "decision_status"):
+                log.decision_status = _decision_status(log, accepted=False, reason=NOTE_IGNORED_FULL_DAY_LEAVE)
+            if hasattr(log, "decision_source"):
+                log.decision_source = source
+            log.save(update_fields=[
+                "attendance_id",
+                "attendance_date",
+                "accepted_to_attendance",
+                "reason",
+                *( ["decision_status"] if hasattr(log, "decision_status") else []),
+                *( ["decision_source"] if hasattr(log, "decision_source") else []),
+            ])
 
     return ReconciliationResult(attendance=attendance, activity=activity)
 
