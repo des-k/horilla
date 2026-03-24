@@ -1,5 +1,6 @@
 import calendar
 import datetime as dt
+import os
 import sys
 from datetime import datetime, timedelta
 
@@ -46,7 +47,7 @@ def leave_reset():
             leave_type.save()
 
 
-if not any(
+if os.environ.get("HORILLA_DISABLE_SCHEDULERS") != "1" and not any(
     cmd in sys.argv
     for cmd in ["makemigrations", "migrate", "compilemessages", "flush", "shell"]
 ):
