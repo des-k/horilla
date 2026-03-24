@@ -324,6 +324,71 @@ class ReconciliationCanonicalTests(SimpleTestCase):
         self.assertEqual(logs[1].reason, reconciliation.NOTE_DUPLICATE_CHECKIN)
         self.assertEqual(logs[2].reason, reconciliation.NOTE_SUPERSEDED_CHECKOUT)
 
+
+    def test_first_in_and_last_out_win_with_mixed_sources_in_same_day(self):
+        ctx = self._default_ctx()
+        attendance = SimpleNamespace(attendance_date=ctx.attendance_date)
+        logs = [
+            FakePunchLog(11, AttendancePunchDirection.IN, timezone.make_aware(datetime(2026, 3, 14, 7, 59)), source="biometric"),
+            FakePunchLog(12, AttendancePunchDirection.IN, timezone.make_aware(datetime(2026, 3, 14, 8, 3)), source="mobile"),
+            FakePunchLog(13, AttendancePunchDirection.OUT, timezone.make_aware(datetime(2026, 3, 14, 16, 18)), source="approved_request"),
+            FakePunchLog(14, AttendancePunchDirection.OUT, timezone.make_aware(datetime(2026, 3, 14, 16, 55)), source="mobile"),
+        ]
+
+        raw = reconciliation._pick_raw_sessions(logs, ctx)
+        self._apply_decisions_from_raw(attendance, logs, raw)
+
+        self.assertEqual(raw["final_in"].id, 11)
+        self.assertEqual(raw["final_out"].id, 14)
+        self.assertTrue(logs[0].accepted_to_attendance)
+        self.assertFalse(logs[1].accepted_to_attendance)
+        self.assertFalse(logs[2].accepted_to_attendance)
+        self.assertTrue(logs[3].accepted_to_attendance)
+        self.assertEqual(logs[1].reason, reconciliation.NOTE_DUPLICATE_CHECKIN)
+        self.assertEqual(logs[2].reason, reconciliation.NOTE_SUPERSEDED_CHECKOUT)
+
+    def test_tightly_clustered_in_punches_keep_earliest_as_final_in_and_single_acceptance(self):
+        ctx = self._default_ctx()
+        attendance = SimpleNamespace(attendance_date=ctx.attendance_date)
+        logs = [
+            FakePunchLog(21, AttendancePunchDirection.IN, timezone.make_aware(datetime(2026, 3, 14, 8, 0)), source="mobile"),
+            FakePunchLog(22, AttendancePunchDirection.IN, timezone.make_aware(datetime(2026, 3, 14, 8, 1)), source="approved_request"),
+            FakePunchLog(23, AttendancePunchDirection.IN, timezone.make_aware(datetime(2026, 3, 14, 8, 1)), source="biometric"),
+            FakePunchLog(24, AttendancePunchDirection.OUT, timezone.make_aware(datetime(2026, 3, 14, 17, 0)), source="mobile"),
+        ]
+
+        raw = reconciliation._pick_raw_sessions(logs, ctx)
+        self._apply_decisions_from_raw(attendance, logs, raw)
+
+        accepted_ins = [log.id for log in logs if log.punch_direction == AttendancePunchDirection.IN and log.accepted_to_attendance]
+        self.assertEqual(raw["final_in"].id, 21)
+        self.assertEqual(accepted_ins, [21])
+        self.assertEqual([log.id for log in raw["extra_in"]], [22, 23])
+        self.assertEqual(logs[1].reason, reconciliation.NOTE_DUPLICATE_CHECKIN)
+        self.assertEqual(logs[2].reason, reconciliation.NOTE_DUPLICATE_CHECKIN)
+
+    def test_interleaved_in_and_out_sequence_keeps_only_first_in_and_last_out_as_final_truth(self):
+        ctx = self._default_ctx()
+        attendance = SimpleNamespace(attendance_date=ctx.attendance_date)
+        logs = [
+            FakePunchLog(31, AttendancePunchDirection.IN, timezone.make_aware(datetime(2026, 3, 14, 8, 0)), source="biometric"),
+            FakePunchLog(32, AttendancePunchDirection.OUT, timezone.make_aware(datetime(2026, 3, 14, 10, 0)), source="mobile"),
+            FakePunchLog(33, AttendancePunchDirection.IN, timezone.make_aware(datetime(2026, 3, 14, 10, 5)), source="approved_request"),
+            FakePunchLog(34, AttendancePunchDirection.OUT, timezone.make_aware(datetime(2026, 3, 14, 17, 0)), source="biometric"),
+        ]
+
+        raw = reconciliation._pick_raw_sessions(logs, ctx)
+        self._apply_decisions_from_raw(attendance, logs, raw)
+
+        self.assertEqual(raw["final_in"].id, 31)
+        self.assertEqual(raw["final_out"].id, 34)
+        self.assertTrue(logs[0].accepted_to_attendance)
+        self.assertFalse(logs[1].accepted_to_attendance)
+        self.assertFalse(logs[2].accepted_to_attendance)
+        self.assertTrue(logs[3].accepted_to_attendance)
+        self.assertEqual(logs[1].reason, reconciliation.NOTE_SUPERSEDED_CHECKOUT)
+        self.assertEqual(logs[2].reason, reconciliation.NOTE_DUPLICATE_CHECKIN)
+
     def test_apply_punch_decisions_marks_duplicate_checkin_as_not_accepted(self):
         attendance = SimpleNamespace(attendance_date=date(2026, 3, 14))
         duplicate = FakePunchLog(2, AttendancePunchDirection.IN, timezone.make_aware(datetime(2026, 3, 14, 8, 5)))
