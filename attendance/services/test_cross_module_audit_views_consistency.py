@@ -25,6 +25,7 @@ from attendance.services.reconciliation import (
     NOTE_ON_DUTY_FINAL,
     NOTE_ON_DUTY_NOT_GRANTED,
     NOTE_ON_DUTY_PROVISIONAL,
+    NOTE_SUPERSEDED_CHECKOUT,
     SOURCE_NORMAL,
     SOURCE_ON_DUTY,
     SOURCE_PROVISIONAL_ON_DUTY,
@@ -165,12 +166,20 @@ class CrossModuleAuditViewsConsistencyDbIntegrationTests(AttendanceApiIntegratio
             minimum_hour='08:00',
         )
 
-    def _create_raw_punches(self, *, in_time_value=time(8, 0), out_time_value=time(17, 0), work_mode=None):
+    def _create_raw_punches(
+        self,
+        *,
+        in_time_value=time(8, 0),
+        out_time_value=time(17, 0),
+        in_source=AttendancePunchSource.BIOMETRIC,
+        out_source=AttendancePunchSource.BIOMETRIC,
+        work_mode=None,
+    ):
         in_punch = AttendancePunchingHistory.objects.create(
             employee_id=self.employee,
             attendance_date=self.target_date,
             punch_timestamp=self.aware_dt(2026, 3, 17, in_time_value.hour, in_time_value.minute),
-            source=AttendancePunchSource.BIOMETRIC,
+            source=in_source,
             punch_direction=AttendancePunchDirection.IN,
             raw_employee_identifier='AUD-1',
             device_info='Main Gate',
@@ -180,7 +189,7 @@ class CrossModuleAuditViewsConsistencyDbIntegrationTests(AttendanceApiIntegratio
             employee_id=self.employee,
             attendance_date=self.target_date,
             punch_timestamp=self.aware_dt(2026, 3, 17, out_time_value.hour, out_time_value.minute),
-            source=AttendancePunchSource.BIOMETRIC,
+            source=out_source,
             punch_direction=AttendancePunchDirection.OUT,
             raw_employee_identifier='AUD-1',
             device_info='Main Gate',
@@ -491,6 +500,209 @@ class CrossModuleAuditViewsConsistencyDbIntegrationTests(AttendanceApiIntegratio
         self.assertTrue(out_punch.accepted_to_attendance)
         self.assertEqual(AttendancePunchingHistory.objects.filter(employee_id=self.employee).count(), 2)
 
+
+
+    def test_biometric_in_mobile_out_then_leave_cancel_keeps_activity_and_raw_history_consistent(self):
+        in_punch, out_punch = self._create_raw_punches(
+            in_source=AttendancePunchSource.BIOMETRIC,
+            out_source=AttendancePunchSource.MOBILE,
+            out_time_value=time(17, 10),
+        )
+        leave_type = LeaveType.objects.create(name='Mixed Source Leave', company_id=self.company)
+        leave_request = LeaveRequest.objects.create(
+            employee_id=self.employee,
+            leave_type_id=leave_type,
+            start_date=self.target_date,
+            end_date=self.target_date,
+            start_date_breakdown='full_day',
+            end_date_breakdown='full_day',
+            description='Approved mixed-source leave',
+            status='approved',
+        )
+
+        with self._shift_rule_context():
+            recompute_attendance(self.employee, self.target_date)
+
+        attendance = self._attendance()
+        activity = self._activity()
+        self.assertIsNone(attendance.attendance_clock_in)
+        self.assertIsNone(attendance.attendance_clock_out)
+        self.assertIsNone(activity.clock_in)
+        self.assertIsNone(activity.clock_out)
+        in_punch.refresh_from_db()
+        out_punch.refresh_from_db()
+        self.assertFalse(in_punch.accepted_to_attendance)
+        self.assertFalse(out_punch.accepted_to_attendance)
+        self.assertEqual(AttendancePunchingHistory.objects.filter(employee_id=self.employee, attendance_date=self.target_date).count(), 2)
+
+        leave_request.status = 'cancelled'
+        leave_request.save(update_fields=['status'])
+        with self._shift_rule_context():
+            recompute_attendance(self.employee, self.target_date)
+
+        attendance, activity = self._assert_layers(
+            in_time_value=time(8, 0),
+            out_time_value=time(17, 10),
+            in_channel=AttendanceChannel.BIOMETRIC,
+            out_channel=AttendanceChannel.MOBILE,
+            in_punch_id=in_punch.id,
+            out_punch_id=out_punch.id,
+        )
+        self.assertEqual(attendance.reconciliation_source, SOURCE_NORMAL)
+        self.assertNotEqual(attendance.reconciliation_note, 'Approved Full-Day Leave')
+        in_punch.refresh_from_db()
+        out_punch.refresh_from_db()
+        self.assertTrue(in_punch.accepted_to_attendance)
+        self.assertTrue(out_punch.accepted_to_attendance)
+        self.assertEqual(in_punch.attendance_id_id, attendance.id)
+        self.assertEqual(out_punch.attendance_id_id, attendance.id)
+
+    def test_biometric_in_generated_out_then_revoke_restores_machine_truth_without_hiding_raw_rows(self):
+        in_punch, early_out_punch = self._create_raw_punches(
+            in_source=AttendancePunchSource.BIOMETRIC,
+            out_source=AttendancePunchSource.BIOMETRIC,
+            out_time_value=time(16, 50),
+        )
+        latest_out_punch = AttendancePunchingHistory.objects.create(
+            employee_id=self.employee,
+            attendance_date=self.target_date,
+            punch_timestamp=self.aware_dt(2026, 3, 17, 17, 20),
+            source=AttendancePunchSource.MOBILE,
+            punch_direction=AttendancePunchDirection.OUT,
+            raw_employee_identifier='AUD-1',
+            device_info='Mobile App',
+            work_mode=AttendanceWorkMode.WFO,
+        )
+
+        with self._shift_rule_context():
+            recompute_attendance(self.employee, self.target_date)
+
+        baseline_attendance = self._attendance()
+        self.assertEqual(baseline_attendance.attendance_clock_in, time(8, 0))
+        self.assertEqual(baseline_attendance.attendance_clock_out, time(17, 20))
+        self.assertEqual(baseline_attendance.attendance_clock_out_channel, AttendanceChannel.MOBILE)
+
+        capture_request_restore_snapshot(baseline_attendance, include_out=True)
+        baseline_attendance.request_type = 'update_request'
+        baseline_attendance.is_validate_request = True
+        baseline_attendance.is_validate_request_approved = True
+        baseline_attendance.requested_data = {
+            'attendance_clock_out': '17:45:00',
+            '__meta': {'approved_scopes': ['OUT'], 'current_scope': 'OUT'},
+        }
+        baseline_attendance.attendance_clock_out = time(17, 45)
+        baseline_attendance.attendance_clock_out_channel = AttendanceChannel.CORRECTION_REQUEST
+        clear_raw_links_for_request_override(baseline_attendance, include_out=True)
+        baseline_attendance.save()
+
+        with self._shift_rule_context():
+            recompute_attendance(self.employee, self.target_date)
+
+        overridden = self._attendance()
+        self.assertEqual(overridden.attendance_clock_out, time(17, 45))
+        self.assertEqual(overridden.attendance_clock_out_channel, AttendanceChannel.CORRECTION_REQUEST)
+        self.assertIsNone(overridden.attendance_clock_out_punch_id)
+        early_out_punch.refresh_from_db()
+        latest_out_punch.refresh_from_db()
+        self.assertFalse(early_out_punch.accepted_to_attendance)
+        self.assertFalse(latest_out_punch.accepted_to_attendance)
+
+        restore_raw_state_after_request(overridden, include_out=True)
+        overridden.request_type = 'revoke_request'
+        overridden.is_validate_request = False
+        overridden.is_validate_request_approved = False
+        overridden.save(update_fields=['request_type', 'is_validate_request', 'is_validate_request_approved'])
+
+        with self._shift_rule_context():
+            recompute_attendance(self.employee, self.target_date)
+
+        attendance, activity = self._assert_layers(
+            in_time_value=time(8, 0),
+            out_time_value=time(17, 20),
+            in_channel=AttendanceChannel.BIOMETRIC,
+            out_channel=AttendanceChannel.MOBILE,
+            in_punch_id=in_punch.id,
+            out_punch_id=latest_out_punch.id,
+        )
+        self.assertEqual(attendance.reconciliation_source, SOURCE_NORMAL)
+        self.assertEqual(AttendancePunchingHistory.objects.filter(employee_id=self.employee, attendance_date=self.target_date).count(), 3)
+        in_punch.refresh_from_db()
+        early_out_punch.refresh_from_db()
+        latest_out_punch.refresh_from_db()
+        self.assertTrue(in_punch.accepted_to_attendance)
+        self.assertFalse(early_out_punch.accepted_to_attendance)
+        self.assertEqual(early_out_punch.reason, NOTE_SUPERSEDED_CHECKOUT)
+        self.assertTrue(latest_out_punch.accepted_to_attendance)
+        self.assertEqual(latest_out_punch.attendance_id_id, attendance.id)
+        self.assertEqual(activity.clock_out_channel, AttendanceChannel.MOBILE)
+
+    def test_mixed_out_candidates_after_reversal_keep_only_one_final_accepted_out(self):
+        in_punch, first_out_punch = self._create_raw_punches(
+            in_source=AttendancePunchSource.BIOMETRIC,
+            out_source=AttendancePunchSource.BIOMETRIC,
+            out_time_value=time(16, 35),
+        )
+        middle_out_punch = AttendancePunchingHistory.objects.create(
+            employee_id=self.employee,
+            attendance_date=self.target_date,
+            punch_timestamp=self.aware_dt(2026, 3, 17, 17, 5),
+            source=AttendancePunchSource.MOBILE,
+            punch_direction=AttendancePunchDirection.OUT,
+            raw_employee_identifier='AUD-1',
+            device_info='Mobile App',
+            work_mode=AttendanceWorkMode.WFO,
+        )
+        final_out_punch = AttendancePunchingHistory.objects.create(
+            employee_id=self.employee,
+            attendance_date=self.target_date,
+            punch_timestamp=self.aware_dt(2026, 3, 17, 17, 25),
+            source=AttendancePunchSource.API,
+            punch_direction=AttendancePunchDirection.OUT,
+            raw_employee_identifier='AUD-1',
+            device_info='API Import',
+            work_mode=AttendanceWorkMode.WFO,
+        )
+        leave_type = LeaveType.objects.create(name='Mixed Reverse Leave', company_id=self.company)
+        leave_request = LeaveRequest.objects.create(
+            employee_id=self.employee,
+            leave_type_id=leave_type,
+            start_date=self.target_date,
+            end_date=self.target_date,
+            start_date_breakdown='full_day',
+            end_date_breakdown='full_day',
+            description='Temporary full day leave',
+            status='approved',
+        )
+
+        with self._shift_rule_context():
+            recompute_attendance(self.employee, self.target_date)
+
+        leave_request.status = 'cancelled'
+        leave_request.save(update_fields=['status'])
+        with self._shift_rule_context():
+            recompute_attendance(self.employee, self.target_date)
+
+        attendance, activity = self._assert_layers(
+            in_time_value=time(8, 0),
+            out_time_value=time(17, 25),
+            in_channel=AttendanceChannel.BIOMETRIC,
+            out_channel=AttendanceChannel.API,
+            in_punch_id=in_punch.id,
+            out_punch_id=final_out_punch.id,
+        )
+        first_out_punch.refresh_from_db()
+        middle_out_punch.refresh_from_db()
+        final_out_punch.refresh_from_db()
+        self.assertFalse(first_out_punch.accepted_to_attendance)
+        self.assertFalse(middle_out_punch.accepted_to_attendance)
+        self.assertTrue(final_out_punch.accepted_to_attendance)
+        self.assertEqual(first_out_punch.reason, NOTE_SUPERSEDED_CHECKOUT)
+        self.assertEqual(middle_out_punch.reason, NOTE_SUPERSEDED_CHECKOUT)
+        self.assertEqual(final_out_punch.attendance_id_id, attendance.id)
+        self.assertEqual(activity.clock_out_channel, AttendanceChannel.API)
+        self.assertEqual(Attendance.objects.filter(employee_id=self.employee, attendance_date=self.target_date).count(), 1)
+        self.assertEqual(activity_sync.AttendanceActivity.objects.filter(employee_id=self.employee, attendance_date=self.target_date).count(), 1)
+        self.assertEqual(AttendancePunchingHistory.objects.filter(employee_id=self.employee, attendance_date=self.target_date).count(), 4)
 
     def test_work_mode_reject_and_cancel_keep_raw_truth_consistent_for_waiting_requests(self):
         # Waiting requests do not become active truth, so reject/cancel must leave
