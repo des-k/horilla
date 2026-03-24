@@ -1,0 +1,211 @@
+from datetime import date, time
+
+from django.test import override_settings
+from rest_framework.test import APITestCase
+
+from attendance.models import (
+    Attendance,
+    AttendanceActivity,
+    AttendanceChannel,
+    AttendancePunchDirection,
+    AttendancePunchSource,
+    AttendancePunchingHistory,
+    AttendanceWorkMode,
+    WorkModeRequest,
+    WorkModeRequestScope,
+    WorkModeRequestStatus,
+)
+from attendance.services.reconciliation import recompute_attendance
+from attendance.tests_api_integration_base import AttendanceApiIntegrationMixin
+
+
+@override_settings(ALLOWED_HOSTS=['testserver', 'localhost', '127.0.0.1'])
+class RequestLifecycleFullChainEndpointTests(AttendanceApiIntegrationMixin, APITestCase):
+    target_date = date(2026, 3, 21)
+
+    def setUp(self):
+        super().setUp()
+        self.owner_user, self.employee = self.create_employee('LifecycleOwner')
+        self.admin_user, self.admin_employee = self.create_employee('LifecycleAdmin', is_superuser=True)
+        self.auth_request(self.owner_user)
+        weekday_key = self.target_date.strftime('%A').lower()
+        self.shift, self.day_obj, self.schedule = self.create_shift_with_schedule(
+            employee=self.employee,
+            day_key=weekday_key,
+            start_time=time(8, 0),
+            end_time=time(17, 0),
+            minimum_working_hour='08:00',
+            is_night_shift=False,
+        )
+        self.shift_ctx = self.patch_reconciliation_shift_rules(
+            target_date=self.target_date,
+            schedule=self.schedule,
+            shift_start_dt=self.aware_dt(2026, 3, 21, 8, 0),
+            shift_end_dt=self.aware_dt(2026, 3, 21, 17, 0),
+            check_in_window_start_dt=self.aware_dt(2026, 3, 21, 6, 0),
+            check_in_window_end_dt=self.aware_dt(2026, 3, 21, 12, 0),
+            check_out_window_start_dt=self.aware_dt(2026, 3, 21, 12, 0),
+            check_out_window_end_dt=self.aware_dt(2026, 3, 21, 23, 0),
+            minimum_hour='08:00',
+        )
+
+    def tearDown(self):
+        self._clear_request_context()
+        super().tearDown()
+
+    def _create_raw_punches(self, *, work_mode=AttendanceWorkMode.WFO, in_time_value=time(8, 0), out_time_value=time(17, 0)):
+        in_punch = AttendancePunchingHistory.objects.create(
+            employee_id=self.employee,
+            attendance_date=self.target_date,
+            punch_timestamp=self.aware_dt(2026, 3, 21, in_time_value.hour, in_time_value.minute),
+            source=AttendancePunchSource.BIOMETRIC,
+            punch_direction=AttendancePunchDirection.IN,
+            raw_employee_identifier='ENDPT-1',
+            device_info='Gate A',
+            work_mode=work_mode,
+        )
+        out_punch = AttendancePunchingHistory.objects.create(
+            employee_id=self.employee,
+            attendance_date=self.target_date,
+            punch_timestamp=self.aware_dt(2026, 3, 21, out_time_value.hour, out_time_value.minute),
+            source=AttendancePunchSource.BIOMETRIC,
+            punch_direction=AttendancePunchDirection.OUT,
+            raw_employee_identifier='ENDPT-1',
+            device_info='Gate A',
+            work_mode=work_mode,
+        )
+        return in_punch, out_punch
+
+    def _attendance(self):
+        return Attendance.objects.get(employee_id=self.employee, attendance_date=self.target_date)
+
+    def _activity(self):
+        return AttendanceActivity.objects.get(employee_id=self.employee, attendance_date=self.target_date)
+
+    def test_attendance_correction_approve_and_revoke_endpoints_update_final_truth_and_keep_raw_trail(self):
+        in_punch, out_punch = self._create_raw_punches()
+        with self.shift_ctx:
+            recompute_attendance(self.employee, self.target_date)
+
+        attendance = self._attendance()
+        self.assertEqual(attendance.attendance_clock_in, time(8, 0))
+        self.assertEqual(attendance.attendance_clock_out, time(17, 0))
+        attendance.request_type = 'update_request'
+        attendance.is_validate_request = True
+        attendance.is_validate_request_approved = False
+        attendance.requested_data = {
+            'attendance_clock_in': '08:30:00',
+            'attendance_clock_out': '17:30:00',
+            '__meta': {'current_scope': 'FULL'},
+        }
+        attendance.save(update_fields=['request_type', 'is_validate_request', 'is_validate_request_approved', 'requested_data'])
+
+        with self.shift_ctx:
+            response = self.auth_client(self.admin_user).put(
+                f'/api/attendance/attendance-request-approve/{attendance.id}',
+                {},
+                format='json',
+            )
+        self.assertEqual(response.status_code, 200)
+
+        attendance = self._attendance()
+        activity = self._activity()
+        self.assertEqual(attendance.attendance_clock_in, time(8, 30))
+        self.assertEqual(attendance.attendance_clock_out, time(17, 30))
+        self.assertEqual(attendance.attendance_clock_in_channel, AttendanceChannel.CORRECTION_REQUEST)
+        self.assertEqual(attendance.attendance_clock_out_channel, AttendanceChannel.CORRECTION_REQUEST)
+        self.assertIsNone(attendance.attendance_clock_in_punch_id)
+        self.assertIsNone(attendance.attendance_clock_out_punch_id)
+        self.assertEqual(activity.clock_in, time(8, 30))
+        self.assertEqual(activity.clock_out, time(17, 30))
+        self.assertEqual(Attendance.objects.filter(employee_id=self.employee, attendance_date=self.target_date).count(), 1)
+        self.assertEqual(AttendanceActivity.objects.filter(employee_id=self.employee, attendance_date=self.target_date).count(), 1)
+        in_punch.refresh_from_db()
+        out_punch.refresh_from_db()
+        self.assertFalse(in_punch.accepted_to_attendance)
+        self.assertFalse(out_punch.accepted_to_attendance)
+        self.assertEqual(AttendancePunchingHistory.objects.filter(employee_id=self.employee).count(), 2)
+
+        with self.shift_ctx:
+            revoke = self.auth_client(self.admin_user).put(
+                f'/api/attendance/attendance-request-revoke/{attendance.id}',
+                {},
+                format='json',
+            )
+        self.assertEqual(revoke.status_code, 200)
+        attendance = self._attendance()
+        activity = self._activity()
+        self.assertEqual(attendance.attendance_clock_in, time(8, 0))
+        self.assertEqual(attendance.attendance_clock_out, time(17, 0))
+        self.assertEqual(attendance.attendance_clock_in_channel, AttendanceChannel.BIOMETRIC)
+        self.assertEqual(attendance.attendance_clock_out_channel, AttendanceChannel.BIOMETRIC)
+        self.assertEqual(attendance.attendance_clock_in_punch_id, in_punch.id)
+        self.assertEqual(attendance.attendance_clock_out_punch_id, out_punch.id)
+        self.assertEqual(activity.clock_in, time(8, 0))
+        self.assertEqual(activity.clock_out, time(17, 0))
+        in_punch.refresh_from_db()
+        out_punch.refresh_from_db()
+        self.assertTrue(in_punch.accepted_to_attendance)
+        self.assertTrue(out_punch.accepted_to_attendance)
+        self.assertEqual(AttendancePunchingHistory.objects.filter(employee_id=self.employee).count(), 2)
+
+    def test_work_mode_approve_and_revoke_endpoints_update_modes_without_orphaning_raw_trail(self):
+        in_punch, out_punch = self._create_raw_punches(work_mode=AttendanceWorkMode.WFO, in_time_value=time(8, 20), out_time_value=time(16, 40))
+        with self.shift_ctx:
+            recompute_attendance(self.employee, self.target_date)
+
+        request = WorkModeRequest.objects.create(
+            employee_id=self.employee,
+            mode=AttendanceWorkMode.WFA,
+            scope=WorkModeRequestScope.FULL,
+            start_date=self.target_date,
+            end_date=self.target_date,
+            status=WorkModeRequestStatus.WAITING_FOR_APPROVAL,
+            reason='Remote work approved by manager',
+        )
+
+        with self.shift_ctx:
+            approve = self.auth_client(self.admin_user).put(
+                f'/api/attendance/work-mode-request-approve/{request.id}',
+                {},
+                format='json',
+            )
+        self.assertEqual(approve.status_code, 200)
+        attendance = self._attendance()
+        activity = self._activity()
+        self.assertEqual(attendance.attendance_clock_in_mode, AttendanceWorkMode.WFA)
+        self.assertEqual(attendance.attendance_clock_out_mode, AttendanceWorkMode.WFA)
+        self.assertEqual(activity.clock_in_mode, AttendanceWorkMode.WFA)
+        self.assertEqual(activity.clock_out_mode, AttendanceWorkMode.WFA)
+        self.assertEqual(attendance.attendance_clock_in_punch_id, in_punch.id)
+        self.assertEqual(attendance.attendance_clock_out_punch_id, out_punch.id)
+        self.assertEqual(Attendance.objects.filter(employee_id=self.employee, attendance_date=self.target_date).count(), 1)
+        in_punch.refresh_from_db()
+        out_punch.refresh_from_db()
+        self.assertTrue(in_punch.accepted_to_attendance)
+        self.assertTrue(out_punch.accepted_to_attendance)
+        self.assertEqual(AttendancePunchingHistory.objects.filter(employee_id=self.employee).count(), 2)
+
+        with self.shift_ctx:
+            revoke = self.auth_client(self.admin_user).put(
+                f'/api/attendance/work-mode-request-revoke/{request.id}',
+                {'remark': 'Remote day revoked'},
+                format='json',
+            )
+        self.assertEqual(revoke.status_code, 200)
+        attendance = self._attendance()
+        activity = self._activity()
+        request.refresh_from_db()
+        self.assertEqual(request.status, WorkModeRequestStatus.REVOKED)
+        self.assertEqual(attendance.attendance_clock_in_mode, AttendanceWorkMode.WFO)
+        self.assertEqual(attendance.attendance_clock_out_mode, AttendanceWorkMode.WFO)
+        self.assertEqual(activity.clock_in_mode, AttendanceWorkMode.WFO)
+        self.assertEqual(activity.clock_out_mode, AttendanceWorkMode.WFO)
+        self.assertEqual(attendance.attendance_clock_in_punch_id, in_punch.id)
+        self.assertEqual(attendance.attendance_clock_out_punch_id, out_punch.id)
+        self.assertEqual(Attendance.objects.filter(employee_id=self.employee, attendance_date=self.target_date).count(), 1)
+        in_punch.refresh_from_db()
+        out_punch.refresh_from_db()
+        self.assertTrue(in_punch.accepted_to_attendance)
+        self.assertTrue(out_punch.accepted_to_attendance)
+        self.assertEqual(AttendancePunchingHistory.objects.filter(employee_id=self.employee).count(), 2)
