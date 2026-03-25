@@ -108,6 +108,7 @@ from attendance.models import (
 from attendance.views.handle_attendance_errors import handle_attendance_errors
 from attendance.views.process_attendance_data import process_attendance_data
 from attendance.services.punching_history import reconcile_attendance_punches
+from attendance.services.attendance_access import can_access_attendance_scope_views, get_attendance_subject_employees
 from base.forms import AttendanceAllowedIPForm
 from base.methods import (
     choosesubordinates,
@@ -179,7 +180,6 @@ def attendance_validate(attendance):
 
 
 @login_required
-@manager_can_enter("attendance.view_attendance")
 def attendance_employee_month_view(request):
     """Attendance → Attendances: Monthly recap per employee.
 
@@ -188,10 +188,13 @@ def attendance_employee_month_view(request):
       - month in YYYY-MM
     """
 
-    # Allowed employees list
-    employees_qs = Employee.objects.filter(is_active=True).select_related("employee_work_info")
-    employees_qs = filtersubordinatesemployeemodel(
-        request, employees_qs, perm="attendance.view_attendance"
+    if not can_access_attendance_scope_views(user=request.user):
+        return _punching_history_forbidden_response(request)
+
+    employees_qs, _, _, default_employee_id = get_attendance_subject_employees(
+        request,
+        perm_codename="attendance.view_attendance",
+        base_queryset=Employee.objects.filter(is_active=True).select_related("employee_work_info"),
     )
 
     # Resolve month
@@ -212,13 +215,8 @@ def attendance_employee_month_view(request):
             selected_employee = None
 
     if selected_employee is None:
-        # default to self if possible
-        try:
-            me = request.user.employee_get
-            selected_employee = (
-                employees_qs.filter(id=me.id).first() if me else None
-            ) or employees_qs.first()
-        except Exception:
+        selected_employee = employees_qs.filter(id=default_employee_id).first() if default_employee_id else None
+        if selected_employee is None:
             selected_employee = employees_qs.first()
 
     rows = []
@@ -248,7 +246,6 @@ def attendance_employee_month_view(request):
 
 
 @login_required
-@manager_can_enter("attendance.view_attendance")
 def attendance_employee_month_export_pdf(request):
     """Export Attendance → Attendances (Monthly recap) as PDF.
 
@@ -258,10 +255,13 @@ def attendance_employee_month_export_pdf(request):
       - lang (optional: en|id, default: en)
     """
 
-    # Allowed employees list (same access control as the UI)
-    employees_qs = Employee.objects.filter(is_active=True).select_related("employee_work_info")
-    employees_qs = filtersubordinatesemployeemodel(
-        request, employees_qs, perm="attendance.view_attendance"
+    if not can_access_attendance_scope_views(user=request.user):
+        return _punching_history_forbidden_response(request)
+
+    employees_qs, _, _, _ = get_attendance_subject_employees(
+        request,
+        perm_codename="attendance.view_attendance",
+        base_queryset=Employee.objects.filter(is_active=True).select_related("employee_work_info"),
     )
 
     emp_id = request.GET.get("employee_id")
@@ -976,7 +976,6 @@ def attendance_account_bulk_delete(request):
 
 
 @login_required
-@permission_required("attendance.view_attendanceactivity")
 def attendance_activity_view(request):
     """
     This method will render a template to view all attendance activities
@@ -984,7 +983,7 @@ def attendance_activity_view(request):
     if not _can_access_attendance_activity(request):
         return _attendance_activity_forbidden_response(request)
 
-    employee_options, show_employee_filter, _ = _get_attendance_activity_employee_scope(
+    employee_options, show_employee_filter, _, _ = _get_attendance_activity_employee_scope(
         request
     )
     filter_data = _build_attendance_activity_filter_data(request)
@@ -1049,13 +1048,11 @@ def _safe_request_instance_ids(request):
 
 def _scoped_attendance_activity_queryset(request):
     queryset = AttendanceActivity.objects.all()
-    self_qs = queryset.filter(employee_id__employee_user_id=request.user)
-    scoped_qs = filtersubordinates(
-        request,
-        queryset,
-        "attendance.view_attendanceactivity",
-    )
-    return (scoped_qs | self_qs).distinct()
+    employee_options, _, _, _ = _get_attendance_activity_employee_scope(request)
+    employee_ids = list(employee_options.values_list("id", flat=True))
+    if not employee_ids:
+        return queryset.none()
+    return queryset.filter(employee_id_id__in=employee_ids).distinct()
 
 
 def _normalized_activity_language() -> str:
@@ -1258,11 +1255,7 @@ def _decorate_attendance_activity_payload(data, *, language=None):
 
 
 def _can_access_attendance_activity(request) -> bool:
-    if getattr(request.user, "is_superuser", False):
-        return True
-    if request.user.has_perm("attendance.view_attendanceactivity"):
-        return True
-    return bool(getattr(request.user, "employee_get", None))
+    return can_access_attendance_scope_views(user=request.user)
 
 
 def _attendance_activity_forbidden_response(request):
@@ -1277,49 +1270,13 @@ def _get_attendance_activity_employee_scope(request):
     - employee_options: queryset employee yang boleh muncul di filter
     - show_employee_filter: apakah dropdown employee ditampilkan
     - can_view_all: apakah user punya akses global semua employee
+    - default_employee_id: employee default yang dipilih untuk user ini
     """
-    base_qs = Employee.objects.all()
-    employee = getattr(request.user, "employee_get", None)
-
-    can_view_all = request.user.is_superuser or request.user.has_perm(
-        "attendance.view_attendanceactivity"
+    return get_attendance_subject_employees(
+        request,
+        perm_codename="attendance.view_attendanceactivity",
+        base_queryset=Employee.objects.all(),
     )
-
-    if can_view_all:
-        return (
-            base_qs.order_by("employee_first_name", "employee_last_name"),
-            True,
-            True,
-        )
-
-    if not employee:
-        return Employee.objects.none(), False, False
-
-    subordinate_ids = list(
-        filtersubordinatesemployeemodel(
-            request,
-            Employee.objects.all(),
-            "attendance.view_attendanceactivity",
-        ).values_list("id", flat=True)
-    )
-
-    subordinate_ids = [emp_id for emp_id in subordinate_ids if emp_id != employee.id]
-    scoped_ids = [employee.id] + subordinate_ids
-
-    employee_options = (
-        Employee.objects.filter(id__in=scoped_ids)
-        .annotate(
-            _self_first=Case(
-                When(id=employee.id, then=Value(0)),
-                default=Value(1),
-                output_field=IntegerField(),
-            )
-        )
-        .order_by("_self_first", "employee_first_name", "employee_last_name")
-    )
-
-    show_employee_filter = len(subordinate_ids) > 0
-    return employee_options, show_employee_filter, False
 
 
 def _build_attendance_activity_filter_data(request):
@@ -1333,24 +1290,15 @@ def _build_attendance_activity_filter_data(request):
         if not filter_data.get("attendance_date_till"):
             filter_data["attendance_date_till"] = today
 
-    employee = getattr(request.user, "employee_get", None)
-    _, show_employee_filter, can_view_all = _get_attendance_activity_employee_scope(
-        request
-    )
+    _, _, _, default_employee_id = _get_attendance_activity_employee_scope(request)
 
-    if (
-        employee
-        and not can_view_all
-        and not show_employee_filter
-        and not filter_data.get("employee_id")
-    ):
-        filter_data["employee_id"] = str(employee.id)
+    if default_employee_id is not None and not filter_data.get("employee_id"):
+        filter_data["employee_id"] = str(default_employee_id)
 
     return filter_data
 
 
 @login_required
-@permission_required("attendance.view_attendanceactivity")
 def activity_single_view(request, obj_id):
     request_copy = request.GET.copy()
     request_copy.pop("instances_ids", None)
@@ -1474,11 +1422,7 @@ def attendance_activity_bulk_delete(request):
 
 
 def _can_access_punching_history(request) -> bool:
-    if getattr(request.user, "is_superuser", False):
-        return True
-    if request.user.has_perm("attendance.view_attendancepunchinghistory"):
-        return True
-    return bool(getattr(request.user, "employee_get", None))
+    return can_access_attendance_scope_views(user=request.user)
 
 
 def _punching_history_forbidden_response(request):
@@ -1489,9 +1433,11 @@ def _punching_history_forbidden_response(request):
 
 def _scoped_punching_history_queryset(request):
     queryset = AttendancePunchingHistory.objects.select_related("employee_id", "attendance_id").all()
-    self_qs = queryset.filter(employee_id__employee_user_id=request.user)
-    scoped_qs = filtersubordinates(request, queryset, "attendance.view_attendancepunchinghistory")
-    return (scoped_qs | self_qs).distinct()
+    employee_options, _, _, _ = _get_punching_history_employee_scope(request)
+    employee_ids = list(employee_options.values_list("id", flat=True))
+    if not employee_ids:
+        return queryset.none()
+    return queryset.filter(employee_id_id__in=employee_ids).distinct()
 
 def _get_punching_history_employee_scope(request):
     """
@@ -1499,49 +1445,13 @@ def _get_punching_history_employee_scope(request):
     - employee_options: queryset employee yang boleh muncul di filter
     - show_employee_filter: apakah dropdown employee ditampilkan
     - can_view_all: apakah user punya akses global semua employee
+    - default_employee_id: employee default yang dipilih untuk user ini
     """
-    base_qs = Employee.objects.all()
-    employee = getattr(request.user, "employee_get", None)
-
-    can_view_all = request.user.is_superuser or request.user.has_perm(
-        "attendance.view_attendancepunchinghistory"
+    return get_attendance_subject_employees(
+        request,
+        perm_codename="attendance.view_attendancepunchinghistory",
+        base_queryset=Employee.objects.all(),
     )
-
-    if can_view_all:
-        return (
-            base_qs.order_by("employee_first_name", "employee_last_name"),
-            True,
-            True,
-        )
-
-    if not employee:
-        return Employee.objects.none(), False, False
-
-    subordinate_ids = list(
-        filtersubordinatesemployeemodel(
-            request,
-            Employee.objects.all(),
-            "attendance.view_attendancepunchinghistory",
-        ).values_list("id", flat=True)
-    )
-
-    subordinate_ids = [emp_id for emp_id in subordinate_ids if emp_id != employee.id]
-    scoped_ids = [employee.id] + subordinate_ids
-
-    employee_options = (
-        Employee.objects.filter(id__in=scoped_ids)
-        .annotate(
-            _self_first=Case(
-                When(id=employee.id, then=Value(0)),
-                default=Value(1),
-                output_field=IntegerField(),
-            )
-        )
-        .order_by("_self_first", "employee_first_name", "employee_last_name")
-    )
-
-    show_employee_filter = len(subordinate_ids) > 0
-    return employee_options, show_employee_filter, False
         
 def _build_punching_history_filter_data(request):
     filter_data = request.GET.copy()
@@ -1552,18 +1462,10 @@ def _build_punching_history_filter_data(request):
     if not filter_data.get("punch_date_till"):
         filter_data["punch_date_till"] = today
 
-    employee = getattr(request.user, "employee_get", None)
-    employee_options, show_employee_filter, can_view_all = _get_punching_history_employee_scope(
-        request
-    )
+    _, _, _, default_employee_id = _get_punching_history_employee_scope(request)
 
-    if (
-        employee
-        and not can_view_all
-        and not show_employee_filter
-        and not filter_data.get("employee_id")
-    ):
-        filter_data["employee_id"] = str(employee.id)
+    if default_employee_id is not None and not filter_data.get("employee_id"):
+        filter_data["employee_id"] = str(default_employee_id)
 
     return filter_data
 
@@ -1572,7 +1474,7 @@ def attendance_punching_history_view(request):
     if not _can_access_punching_history(request):
         return _punching_history_forbidden_response(request)
 
-    employee_options, show_employee_filter, _ = _get_punching_history_employee_scope(request)
+    employee_options, show_employee_filter, _, _ = _get_punching_history_employee_scope(request)
 
     filter_data = _build_punching_history_filter_data(request)
     request_copy = filter_data.copy()
