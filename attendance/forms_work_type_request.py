@@ -90,16 +90,11 @@ class WorkTypeRequestCreateForm(forms.ModelForm):
         widget=forms.TextInput(attrs={"class": "oh-input w-100"}),
     )
 
-    duty_destination_detail = forms.CharField(
-        label="Duty Destination Detail",
-        required=False,
-        widget=forms.Textarea(attrs={"class": "oh-input w-100", "rows": 2}),
-    )
 
     files = MultipleFileField(
         label="Supporting Documents",
         required=False,
-        help_text="WFA attachments are optional supporting history only. ON DUTY attachments create document versions and use review workflow after approval.",
+        help_text="WFA attachments are optional supporting history only. ON DUTY attachments are required at create and enter document review workflow after approval.",
         widget=MultipleClearableFileInput(attrs={"multiple": True, "class": "oh-input w-100"}),
     )
 
@@ -126,7 +121,6 @@ class WorkTypeRequestCreateForm(forms.ModelForm):
             "end_date",
             "reason",
             "duty_destination_location",
-            "duty_destination_detail",
         ]
 
     def clean(self):
@@ -147,12 +141,14 @@ class WorkTypeRequestCreateForm(forms.ModelForm):
         cleaned["reason"] = reason
 
         duty_destination_location = (cleaned.get("duty_destination_location") or "").strip()
-        duty_destination_detail = (cleaned.get("duty_destination_detail") or "").strip()
         cleaned["duty_destination_location"] = duty_destination_location
-        cleaned["duty_destination_detail"] = duty_destination_detail
 
         if mode == AttendanceWorkMode.ON_DUTY and not duty_destination_location:
             raise ValidationError({"duty_destination_location": "Duty destination location is required for On Duty."})
+
+        uploaded_files = self.files.getlist("files") if hasattr(self.files, "getlist") else []
+        if mode == AttendanceWorkMode.ON_DUTY and not uploaded_files:
+            raise ValidationError({"files": "At least one file is required for On Duty."})
 
         if not start_date:
             return cleaned
@@ -192,11 +188,6 @@ class WorkTypeRequestUpdateForm(forms.Form):
         widget=forms.TextInput(attrs={"class": "oh-input w-100"}),
     )
 
-    duty_destination_detail = forms.CharField(
-        label="Duty Destination Detail",
-        required=False,
-        widget=forms.Textarea(attrs={"class": "oh-input w-100", "rows": 2}),
-    )
 
     files = MultipleFileField(
         label="Documents",
@@ -223,7 +214,6 @@ class WorkTypeRequestUpdateForm(forms.Form):
         cleaned = super().clean()
         cleaned["reason"] = (cleaned.get("reason") or "").strip()
         cleaned["duty_destination_location"] = (cleaned.get("duty_destination_location") or "").strip()
-        cleaned["duty_destination_detail"] = (cleaned.get("duty_destination_detail") or "").strip()
 
         req = self._request_obj
         if req and req.mode == AttendanceWorkMode.ON_DUTY:
