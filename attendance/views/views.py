@@ -1021,6 +1021,9 @@ def attendance_activity_view(request):
             "show_employee_filter": show_employee_filter,
             "activity_filter_data": filter_data,
             "self_employee": getattr(request.user, "employee_get", None),
+            "selected_scope_employee": _resolve_selected_scope_employee(
+                employee_options, filter_data.get("employee_id")
+            ),
             "employee_options": employee_options,
             "group_field": filter_data.get("field", ""),
         },
@@ -1279,6 +1282,17 @@ def _get_attendance_activity_employee_scope(request):
     )
 
 
+def _resolve_selected_scope_employee(employee_options, selected_employee_id):
+    if selected_employee_id not in (None, "", "all"):
+        try:
+            employee = employee_options.filter(id=selected_employee_id).first()
+        except (TypeError, ValueError):
+            employee = None
+        if employee is not None:
+            return employee
+    return employee_options.first()
+
+
 def _build_attendance_activity_filter_data(request):
     filter_data = request.GET.copy()
     today = django_timezone.localdate().isoformat()
@@ -1500,6 +1514,9 @@ def attendance_punching_history_view(request):
             "show_employee_filter": show_employee_filter,
             "punch_filter_data": filter_data,
             "self_employee": getattr(request.user, "employee_get", None),
+            "selected_scope_employee": _resolve_selected_scope_employee(
+                employee_options, filter_data.get("employee_id")
+            ),
             "employee_options": employee_options,
         },
     )
