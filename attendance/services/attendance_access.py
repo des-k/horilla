@@ -9,6 +9,7 @@ from employee.models import Employee, EmployeeWorkInformation
 
 
 ADMIN_ATTENDANCE_PERMISSION_CODES: tuple[str, ...] = (
+    "attendance.view_attendance",
     "attendance.change_attendance",
     "attendance.add_attendance",
 )
