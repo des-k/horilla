@@ -40,7 +40,6 @@ from horilla.decorators import (
     hx_request_required,
     login_required,
     manager_can_enter,
-    permission_required,
 )
 from horilla.group_by import group_by_queryset
 
@@ -223,7 +222,6 @@ def attendance_overtime_search(request):
 
 
 @login_required
-@permission_required("attendance.view_attendanceactivity")
 @hx_request_required
 def attendance_activity_search(request):
     """
