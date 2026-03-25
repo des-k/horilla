@@ -11,8 +11,7 @@ This module enforces the FINAL spec:
 - Scopes: IN / OUT (single day), FULL (range).
 - Overlap rules: FULL blocks any other request on covered days; otherwise max 1 IN and max 1 OUT per date.
 - Status flow:
-  - ON_DUTY can be created without attachment => PENDING (not in approvals).
-  - ON_DUTY becomes WAITING_FOR_APPROVAL after attachments completed.
+  - ON_DUTY requires attachment at create and goes to WAITING_FOR_APPROVAL once submitted.
   - WFA goes directly to WAITING_FOR_APPROVAL.
 - Punch permission:
   - Schedule WFA/ON_DUTY => mobile punch allowed without request.
@@ -49,9 +48,11 @@ from attendance.models import (
     WorkModeRequestRejectReasonCode,
     WorkModeRequestScope,
     WorkModeRequestStatus,
+    EmployeeShiftDay,
 )
 
 from attendance.services.reconciliation import recompute_attendance_range
+from attendance.methods.utils import shift_schedule_today
 
 
 # -----------------------------------------------------------------------------
@@ -106,6 +107,85 @@ def scheduled_attendance_mode(employee, target_date: date) -> str:
     """Resolve scheduled attendance mode with legacy WFO fallback."""
 
     return _scheduled_attendance_mode_or_none(employee, target_date) or AttendanceWorkMode.WFO
+
+
+def _resolve_shift_rules_for_employee_date(employee, target_date: date) -> tuple[Optional[dict], Optional[datetime], Optional[datetime], Optional[datetime], Optional[datetime]]:
+    """Return shift rules + key window datetimes for *target_date*.
+
+    Validation is intentionally best-effort. If shift metadata cannot be resolved,
+    callers should fall back to allowing the request and let other validations run.
+    """
+
+    shift = getattr(getattr(employee, "employee_work_info", None), "shift_id", None)
+    if not shift:
+        return None, None, None, None, None
+
+    day = EmployeeShiftDay.objects.filter(day=target_date.strftime("%A").lower()).first()
+    if not day:
+        return None, None, None, None, None
+
+    try:
+        _min_hour, start_sec, end_sec = shift_schedule_today(day=day, shift=shift)
+    except Exception:
+        start_sec, end_sec = 0, 0
+
+    try:
+        from attendance.views.clock_in_out import get_shift_rules
+
+        rules = get_shift_rules(target_date, shift, day, start_time_sec=start_sec, end_time_sec=end_sec)
+    except Exception:
+        return None, None, None, None, None
+
+    now_dt = timezone.localtime(timezone.now())
+
+    def _coerce(dt):
+        if dt is None:
+            return None
+        try:
+            return timezone.localtime(dt) if timezone.is_aware(dt) else timezone.make_aware(dt, timezone.get_current_timezone())
+        except Exception:
+            return dt
+
+    check_in_end_dt = _coerce(rules.get("check_in_window_end_dt") or rules.get("cutoff_in_dt"))
+    check_out_start_dt = _coerce(rules.get("check_out_window_start_dt"))
+    check_out_end_dt = _coerce(rules.get("check_out_window_end_dt") or rules.get("cutoff_out_dt"))
+    return rules, now_dt, check_in_end_dt, check_out_start_dt, check_out_end_dt
+
+
+def _validate_current_day_scope_window(*, employee, scope: str, start_date: date, end_date: date, instance_id: Optional[int]) -> None:
+    """Enforce live create-time scope rules against today's attendance windows.
+
+    Only applies during create and only when today's date is covered by the request.
+    Future-only ranges remain allowed.
+    """
+
+    if instance_id is not None:
+        return
+
+    today = timezone.localdate()
+    if not (start_date <= today <= end_date):
+        return
+
+    _rules, now_dt, check_in_end_dt, check_out_start_dt, check_out_end_dt = _resolve_shift_rules_for_employee_date(employee, today)
+    if now_dt is None:
+        return
+
+    check_in_passed = bool(check_in_end_dt and now_dt > check_in_end_dt)
+    check_out_open = bool(check_out_start_dt and check_out_end_dt and check_out_start_dt <= now_dt <= check_out_end_dt)
+    check_out_passed = bool(check_out_end_dt and now_dt > check_out_end_dt)
+
+    if check_out_passed:
+        raise ValidationError("Check-out window has ended. Work Type Request can no longer be created for today.")
+
+    if scope == WorkModeRequestScope.OUT:
+        if check_out_start_dt and now_dt < check_out_start_dt:
+            raise ValidationError("OUT scope can only be requested during the check-out window.")
+        return
+
+    if check_in_passed:
+        if check_out_open:
+            raise ValidationError("Check-in window has passed. Only OUT scope may be requested while the check-out window remains open.")
+        raise ValidationError("Check-in window has passed. IN and FULL scopes are no longer allowed for today.")
 
 
 # -----------------------------------------------------------------------------
@@ -329,6 +409,14 @@ def validate_work_type_request(
         # sched WFO: WFA/ON_DUTY allowed
         # sched WFA: ON_DUTY allowed for any scope (IN/OUT/FULL)
         d += timedelta(days=1)
+
+    _validate_current_day_scope_window(
+        employee=employee,
+        scope=scope,
+        start_date=start_date,
+        end_date=end_date,
+        instance_id=instance_id,
+    )
 
     # Overlap rules
     qs = WorkModeRequest.objects.filter(employee_id=employee).filter(_active_status_q())
