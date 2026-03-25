@@ -204,6 +204,7 @@ def get_attendance_subject_employees(request, *, perm_codename: str, base_querys
     can_view_all = bool(
         getattr(user, "is_superuser", False)
         or (user and perm_codename and user.has_perm(perm_codename))
+        or is_admin_employee(employee=employee, user=user)
     )
 
     if can_view_all:
