@@ -1367,20 +1367,26 @@ class AttendanceRequestView(APIView):
         approvals_qs = approvals_qs.exclude(employee_id__employee_user_id=request.user)
 
         # 2) My requests: history (pending/approved/rejected/canceled) but not all attendance rows
-        my_qs = Attendance.objects.filter(employee_id__employee_user_id=request.user).filter(
+        request_history_filter = (
             Q(is_validate_request=True)
             | Q(is_validate_request_approved=True)
+            | Q(action_type__in=[
+                AttendanceRequestActionType.APPROVED,
+                AttendanceRequestActionType.REJECTED,
+                AttendanceRequestActionType.CANCELED,
+                AttendanceRequestActionType.REVOKED,
+            ])
             | Q(request_type__in=[
                 "create_request",
-                "update_request",
-                "revalidate_request",
                 "cancel_request",
                 "reject_request",
                 "revoke_request",
             ])
-            | Q(request_description__isnull=False)
-            | Q(requested_data__isnull=False)
         )
+
+        my_qs = Attendance.objects.filter(employee_id__employee_user_id=request.user).filter(
+            request_history_filter
+        ).distinct()
 
         requests = (approvals_qs | my_qs).distinct()
 
