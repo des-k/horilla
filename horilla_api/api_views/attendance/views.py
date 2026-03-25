@@ -103,6 +103,7 @@ except Exception:
     leave_breakdown_for_attendance_date = None  # type: ignore
 from attendance.services.request_override_recompute import clear_request_override_and_recompute
 from attendance.services.month_params import normalize_month_yyyy_mm, require_month_yyyy_mm
+from attendance.services.attendance_access import get_attendance_subject_employees
 
 from attendance.views.dashboard import (
     find_expected_attendances,
@@ -2441,14 +2442,15 @@ class AttendanceActivityView(APIView):
 
     def get_queryset(self, request):
         queryset = AttendanceActivity.objects.select_related("employee_id").all()
-        perm = "attendance.view_attendanceactivity"
-        try:
-            return permission_based_queryset(request.user, perm, queryset, user_obj=True)
-        except Exception:
-            employee = getattr(request.user, "employee_get", None)
-            if not employee:
-                return AttendanceActivity.objects.none()
-            return queryset.filter(employee_id=employee)
+        employee_options, _, _, _ = get_attendance_subject_employees(
+            request,
+            perm_codename="attendance.view_attendanceactivity",
+            base_queryset=Employee.objects.all(),
+        )
+        employee_ids = list(employee_options.values_list("id", flat=True))
+        if not employee_ids:
+            return queryset.none()
+        return queryset.filter(employee_id_id__in=employee_ids)
 
     def get(self, request, pk=None):
         queryset = self.get_queryset(request)
@@ -3575,42 +3577,26 @@ class AttendancePunchingHistoryAPIView(APIView):
         return name or f"Employee #{employee.id}"
 
     def _employee_scope(self, request):
-        employee = getattr(request.user, "employee_get", None)
-        base_qs = Employee.objects.all().order_by("employee_first_name", "employee_last_name", "id")
-        can_view_all = bool(getattr(request.user, "is_superuser", False) or request.user.has_perm("attendance.view_attendancepunchinghistory"))
-
-        if can_view_all:
-            employees = list(base_qs)
-        elif employee:
-            subordinate_ids = list(
-                filtersubordinatesemployeemodel(
-                    request,
-                    Employee.objects.all(),
-                    "attendance.view_attendancepunchinghistory",
-                ).values_list("id", flat=True)
-            )
-            subordinate_ids = [emp_id for emp_id in subordinate_ids if emp_id != employee.id]
-            scoped_ids = [employee.id] + subordinate_ids
-            employees = list(Employee.objects.filter(id__in=scoped_ids))
-            employees.sort(
-                key=lambda emp: (
-                    0 if employee and emp.id == employee.id else 1,
-                    (emp.employee_first_name or "").lower(),
-                    (emp.employee_last_name or "").lower(),
-                    emp.id,
-                )
-            )
-        else:
-            employees = []
-
+        employee_qs, show_filter, can_view_all, default_employee_id = get_attendance_subject_employees(
+            request,
+            perm_codename="attendance.view_attendancepunchinghistory",
+            base_queryset=Employee.objects.all().order_by("employee_first_name", "employee_last_name", "id"),
+        )
+        employees = list(employee_qs)
         options = [{"id": emp.id, "name": self._employee_name(emp)} for emp in employees]
-        default_employee_id = employee.id if employee else (employees[0].id if len(employees) == 1 else None)
-        show_filter = len(options) > 1
-        return options, show_filter, default_employee_id
+        return options, show_filter, can_view_all, default_employee_id
 
     def get_queryset(self, request):
         queryset = AttendancePunchingHistory.objects.select_related("employee_id", "attendance_id").all()
-        return filtersubordinates(request, queryset, "attendance.view_attendancepunchinghistory")
+        employee_qs, _, _, _ = get_attendance_subject_employees(
+            request,
+            perm_codename="attendance.view_attendancepunchinghistory",
+            base_queryset=Employee.objects.all(),
+        )
+        employee_ids = list(employee_qs.values_list("id", flat=True))
+        if not employee_ids:
+            return queryset.none()
+        return queryset.filter(employee_id_id__in=employee_ids)
 
     def get(self, request):
         today = dj_timezone.localdate()
@@ -3619,8 +3605,8 @@ class AttendancePunchingHistoryAPIView(APIView):
         if start_date > end_date:
             start_date, end_date = end_date, start_date
 
-        employee_options, show_employee_filter, default_employee_id = self._employee_scope(request)
-        allow_all_employees = show_employee_filter
+        employee_options, show_employee_filter, can_view_all, default_employee_id = self._employee_scope(request)
+        allow_all_employees = bool(can_view_all and show_employee_filter)
         if allow_all_employees:
             employee_options = [{"id": "all", "name": "All Employee"}] + employee_options
 
@@ -3631,14 +3617,14 @@ class AttendancePunchingHistoryAPIView(APIView):
             selected_employee_id = default_employee_id if default_employee_id is not None else None
         else:
             raw_selected_employee_id = str(raw_selected_employee_id).strip().lower()
-            if raw_selected_employee_id in {"all", "0"} and allow_all_employees:
-                selected_employee_id = "all"
+            if raw_selected_employee_id in {"all", "0"}:
+                selected_employee_id = "all" if allow_all_employees else default_employee_id
             else:
                 try:
                     candidate_employee_id = int(raw_selected_employee_id)
                 except Exception:
                     candidate_employee_id = None
-                selected_employee_id = candidate_employee_id if candidate_employee_id is not None else None
+                selected_employee_id = candidate_employee_id if candidate_employee_id is not None else default_employee_id
 
         if selected_employee_id is not None and str(selected_employee_id) not in allowed_employee_ids:
             selected_employee_id = default_employee_id if default_employee_id is not None else None
@@ -3770,32 +3756,11 @@ class AttendanceMonthlyRecapAPIView(APIView):
         )
 
     def _allowed_employees_qs(self, request):
-        """Employees accessible to the requester.
-
-        Mirrors the logic of horilla_api.api_methods.base.methods.permission_based_queryset
-        but for Employee queryset.
-        """
-
-        from employee.models import Employee
-
-        user = request.user
-        employee = getattr(user, "employee_get", None)
-        qs = Employee.objects.filter(is_active=True).select_related("employee_work_info")
-
-        # HR/Admin: full access
-        if user.has_perm("attendance.view_attendance"):
-            return qs
-
-        if not employee:
-            return qs.none()
-
-        # Manager: self + subordinates
-        is_manager = EmployeeWorkInformation.objects.filter(reporting_manager_id=employee).exists()
-        if is_manager:
-            return qs.filter(Q(id=employee.id) | Q(employee_work_info__reporting_manager_id=employee))
-
-        # Regular user: self only
-        return qs.filter(id=employee.id)
+        return get_attendance_subject_employees(
+            request,
+            perm_codename="attendance.view_attendance",
+            base_queryset=Employee.objects.filter(is_active=True).select_related("employee_work_info"),
+        )
 
     def get(self, request):
         from attendance.services.monthly_recap import get_monthly_attendance_recap
@@ -3803,7 +3768,7 @@ class AttendanceMonthlyRecapAPIView(APIView):
         month = self._resolve_month(request)
         lang = self._resolve_language(request)
 
-        employees_qs = self._allowed_employees_qs(request)
+        employees_qs, show_employee_filter, can_view_all, default_employee_id = self._allowed_employees_qs(request)
 
         # Resolve employee
         emp_id_raw = request.GET.get("employee_id")
@@ -3817,12 +3782,7 @@ class AttendanceMonthlyRecapAPIView(APIView):
             if selected_employee is None:
                 return Response({"error": "Invalid employee_id"}, status=status.HTTP_400_BAD_REQUEST)
         else:
-            # Default: self (if accessible), else first accessible employee
-            try:
-                me = request.user.employee_get
-                selected_employee = employees_qs.filter(id=me.id).first() if me else None
-            except Exception:
-                selected_employee = None
+            selected_employee = employees_qs.filter(id=default_employee_id).first() if default_employee_id else None
             if selected_employee is None:
                 selected_employee = employees_qs.first()
 
@@ -3830,8 +3790,15 @@ class AttendanceMonthlyRecapAPIView(APIView):
             return Response(
                 {
                     "employee_id": None,
+                    "selected_employee_id": None,
                     "month": month,
                     "lang": lang,
+                    "show_employee_filter": show_employee_filter,
+                    "allow_all_employees": bool(can_view_all and show_employee_filter),
+                    "employee_options": [
+                        {"id": emp.id, "name": f"{(emp.employee_first_name or '').strip()} {(emp.employee_last_name or '').strip()}".strip() or f"Employee #{emp.id}"}
+                        for emp in employees_qs
+                    ],
                     "summary": {
                         "late_minutes": 0,
                         "early_out_minutes": 0,
@@ -3862,8 +3829,15 @@ class AttendanceMonthlyRecapAPIView(APIView):
         return Response(
             {
                 "employee_id": selected_employee.id,
+                "selected_employee_id": selected_employee.id,
                 "month": month,
                 "lang": lang,
+                "show_employee_filter": show_employee_filter,
+                "allow_all_employees": bool(can_view_all and show_employee_filter),
+                "employee_options": [
+                    {"id": emp.id, "name": f"{(emp.employee_first_name or '').strip()} {(emp.employee_last_name or '').strip()}".strip() or f"Employee #{emp.id}"}
+                    for emp in employees_qs
+                ],
                 "summary": recap["summary"],
                 "rows": payload_rows,
             },
@@ -3883,7 +3857,7 @@ class AttendanceMonthlyRecapExportPDFAPIView(AttendanceMonthlyRecapAPIView):
         except ValueError:
             return Response({"error": "Invalid month format. Expected YYYY-MM"}, status=status.HTTP_400_BAD_REQUEST)
         lang = self._resolve_language(request)
-        employees_qs = self._allowed_employees_qs(request)
+        employees_qs, show_employee_filter, can_view_all, default_employee_id = self._allowed_employees_qs(request)
 
         emp_id_raw = request.GET.get("employee_id")
         if not emp_id_raw:
