@@ -625,7 +625,6 @@ class WorkTypeDocumentVersionLifecycleTests(SimpleTestCase):
             status=status,
             reason='site visit',
             duty_destination_location='Client Site',
-            duty_destination_detail='Building A',
             employee_id='EMP-1',
             start_date=date(2026, 3, 14),
             end_date=date(2026, 3, 15),
@@ -948,7 +947,6 @@ class WorkModePayloadParityTests(SimpleTestCase):
             end_date=date(2026, 3, 14),
             reason_code=None,
             duty_destination_location="Site A",
-            duty_destination_detail="HQ",
         )
 
         data = WorkModeRequestSerializer(instance).data
