@@ -325,12 +325,10 @@ class WorkModeRequestActions:
         end_date,
         reason: str,
         duty_destination_location: Optional[str] = None,
-        duty_destination_detail: Optional[str] = None,
         uploaded_files: Optional[Iterable] = None,
     ) -> WorkModeRequest:
         reason = (reason or "").strip()
         destination = (duty_destination_location or "").strip() or None
-        detail = (duty_destination_detail or "").strip() or None
         validate_work_type_request(
             employee=actor,
             mode=mode,
@@ -341,6 +339,8 @@ class WorkModeRequestActions:
         )
         if mode == AttendanceWorkMode.ON_DUTY and not destination:
             raise WorkModeRequestActionError("Destination location is required for ON DUTY requests.")
+        if mode == AttendanceWorkMode.ON_DUTY and not uploaded_files:
+            raise WorkModeRequestActionError("At least one file is required for ON DUTY requests.")
 
         req = WorkModeRequest.objects.create(
             employee_id=actor,
@@ -350,7 +350,6 @@ class WorkModeRequestActions:
             end_date=end_date,
             reason=reason,
             duty_destination_location=destination,
-            duty_destination_detail=detail,
             status=WorkModeRequestStatus.PENDING,
             action_type=WorkModeRequestActionType.CREATED,
         )
@@ -393,7 +392,6 @@ class WorkModeRequestActions:
         actor,
         reason: Optional[str] = None,
         duty_destination_location: Optional[str] = None,
-        duty_destination_detail: Optional[str] = None,
         uploaded_files: Optional[Iterable] = None,
         remark: Optional[str] = None,
         request=None,
@@ -401,7 +399,7 @@ class WorkModeRequestActions:
         uploaded_files = list(uploaded_files or [])
         has_non_file_changes = any(
             value is not None
-            for value in (reason, duty_destination_location, duty_destination_detail)
+            for value in (reason, duty_destination_location)
         )
         if request is not None and has_non_file_changes and not can_update_request(request, req):
             raise WorkModeRequestActionError("This request can no longer be updated.")
@@ -417,8 +415,6 @@ class WorkModeRequestActions:
         if req.mode == AttendanceWorkMode.ON_DUTY:
             if duty_destination_location is not None:
                 req.duty_destination_location = str(duty_destination_location).strip()
-            if duty_destination_detail is not None:
-                req.duty_destination_detail = str(duty_destination_detail).strip()
             if not str(req.duty_destination_location or "").strip():
                 raise WorkModeRequestActionError("Destination location is required for ON DUTY requests.")
 
