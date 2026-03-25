@@ -505,7 +505,6 @@ class WorkModeRequest(HorillaModel):
         verbose_name=_("Current Document Version"),
     )
     duty_destination_location = models.CharField(max_length=255, null=True, blank=True, verbose_name=_("Duty Destination Location"))
-    duty_destination_detail = models.TextField(null=True, blank=True, verbose_name=_("Duty Destination Detail"))
 
     objects = HorillaCompanyManager(
         related_company_field="employee_id__employee_work_info__company_id"
