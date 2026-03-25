@@ -15,6 +15,7 @@ from django.http import Http404
 from django.test import RequestFactory, SimpleTestCase, TestCase, override_settings
 from django.urls import reverse
 from rest_framework.test import APIRequestFactory, force_authenticate
+from rest_framework.response import Response
 
 from django.contrib.auth.models import User
 from employee.models import Employee
@@ -682,6 +683,54 @@ class AttendanceRequestDirectAttachmentApiViewTests(SimpleTestCase):
         self.assertEqual(response.status_code, 200)
         create_file.assert_called_once()
         attendance.request_attachments.add.assert_called_once_with(arf)
+
+
+
+class AttendanceRequestListApiRegressionTests(SimpleTestCase):
+    databases = {"default"}
+
+    def setUp(self):
+        self.factory = APIRequestFactory()
+        self.view = AttendanceRequestView.as_view()
+        self.user = SimpleNamespace(
+            is_authenticated=True,
+            employee_get=SimpleNamespace(id=10),
+            has_perm=lambda perm: False,
+        )
+
+    def test_my_requests_queryset_matches_web_history_rule(self):
+        approvals_qs = MagicMock(name="approvals_qs")
+        owner_base_qs = MagicMock(name="owner_base_qs")
+        owner_filtered_qs = MagicMock(name="owner_filtered_qs")
+        combined_qs = MagicMock(name="combined_qs")
+        distinct_qs = MagicMock(name="distinct_qs")
+
+        approvals_qs.exclude.return_value = approvals_qs
+        approvals_qs.__or__.return_value = combined_qs
+        combined_qs.distinct.return_value = distinct_qs
+        owner_base_qs.filter.return_value = owner_filtered_qs
+        owner_filtered_qs.distinct.return_value = owner_filtered_qs
+
+        paginator = MagicMock()
+        paginator.paginate_queryset.return_value = []
+        paginator.get_paginated_response.return_value = Response([])
+
+        request = self.factory.get('/api/attendance/attendance-request/')
+        force_authenticate(request, user=self.user)
+
+        with patch('horilla_api.api_views.attendance.views.Attendance.objects.filter', side_effect=[approvals_qs, owner_base_qs]), \
+             patch('horilla_api.api_views.attendance.views.filtersubordinates', return_value=approvals_qs), \
+             patch('horilla_api.api_views.attendance.views.AttendanceFilters', return_value=SimpleNamespace(qs=distinct_qs)), \
+             patch('horilla_api.api_views.attendance.views.PageNumberPagination', return_value=paginator), \
+             patch.object(AttendanceRequestView, 'serializer_class', return_value=SimpleNamespace(data=[])):
+            response = self.view(request)
+
+        self.assertEqual(response.status_code, 200)
+        q_filter = owner_base_qs.filter.call_args.args[0]
+        flattened = repr(q_filter)
+        self.assertIn('action_type', flattened)
+        self.assertNotIn('request_description', flattened)
+        self.assertNotIn('requested_data', flattened)
 
 
 
