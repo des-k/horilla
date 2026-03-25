@@ -23,7 +23,6 @@ CHECKED_IN = "CHECKED_IN"
 MISSING_CHECK_IN = "MISSING_CHECK_IN"
 CHECK_OUT_REQUEST_REQUIRED = "CHECK_OUT_REQUEST_REQUIRED"
 CHECKED_OUT_EARLY = "CHECKED_OUT_EARLY"
-BELOW_MINIMUM_HOURS = "BELOW_MINIMUM_HOURS"
 ATTENDANCE_RECORDED = "ATTENDANCE_RECORDED"
 ATTENDANCE_UNAVAILABLE = "ATTENDANCE_UNAVAILABLE"
 
@@ -51,12 +50,17 @@ def _late_detail_text(late_by: str | None) -> str | None:
     return f"Late by {late_by}" if late_by else None
 
 
-def _early_detail_text(checked_out_early: bool, checked_out_early_by: str | None) -> str | None:
+def _short_by_text(checked_out_early: bool, checked_out_early_by: str | None) -> str | None:
     if checked_out_early_by:
-        return f"Checked out early by {checked_out_early_by}"
+        return f"Short by {checked_out_early_by}"
     if checked_out_early:
-        return "Checked out early"
+        return "Short by 00:00"
     return None
+
+
+def _join_details(*parts: str | None) -> str | None:
+    cleaned = [part for part in parts if part]
+    return " - ".join(cleaned) if cleaned else None
 
 
 def build_mobile_header_state(payload: Mapping[str, Any]) -> dict[str, str | None]:
@@ -77,8 +81,6 @@ def build_mobile_header_state(payload: Mapping[str, Any]) -> dict[str, str | Non
         or payload.get("clock_out")
         or payload.get("clock_out_time")
     )
-    shortfall = _clean_text(payload.get("header_note_work_hours_shortfall")) or _clean_text(payload.get("work_hours_shortfall"))
-    minimum_hour = _clean_text(payload.get("header_note_effective_minimum_hour")) or _clean_text(payload.get("minimum_working_hour"))
     unavailable_detail = _clean_text(payload.get("attendance_disabled_message"))
     late_by = _clean_text(payload.get("late_by"))
     checked_out_early_by = _clean_text(payload.get("checked_out_early_by"))
@@ -91,11 +93,9 @@ def build_mobile_header_state(payload: Mapping[str, Any]) -> dict[str, str | Non
     can_clock_out = _as_bool(payload.get("can_clock_out") or payload.get("can_check_out"))
     attendance_enabled = _as_bool(payload.get("attendance_enabled", True))
     check_in_cutoff_passed = _as_bool(payload.get("check_in_cutoff_has_passed"))
-    if "header_note_work_hours_below_minimum" in payload:
-        work_hours_below_minimum = _as_bool(payload.get("header_note_work_hours_below_minimum"))
-    else:
-        work_hours_below_minimum = _as_bool(payload.get("work_hours_below_minimum"))
     checked_out_early = _as_bool(payload.get("checked_out_early"))
+    invalid_check_in = _as_bool(payload.get("invalid_check_in"))
+    earliest_check_out = _clean_text(payload.get("earliest_check_out")) or _clean_text(payload.get("check_out_window_start"))
 
     check_in_block_reason = (_clean_text(payload.get("check_in_block_reason")) or "").upper()
     check_out_block_reason = (_clean_text(payload.get("check_out_block_reason")) or "").upper()
@@ -123,13 +123,12 @@ def build_mobile_header_state(payload: Mapping[str, Any]) -> dict[str, str | Non
             detail_message=unavailable_detail,
         ).as_payload()
 
-    if missing_check_in:
+    if missing_check_in or invalid_check_in:
         return MobileAttendanceHeaderState(
             code=MISSING_CHECK_IN,
-            message=(
-                "Missing Check In • Check Out saved"
-                if has_check_out
-                else "Missing Check In • Check Out available"
+            message="Missing Check In",
+            detail_message=(
+                "Check Out saved" if has_check_out else ("Check Out available" if can_clock_out else None)
             ),
         ).as_payload()
 
@@ -137,82 +136,59 @@ def build_mobile_header_state(payload: Mapping[str, Any]) -> dict[str, str | Non
         if check_out_block_reason == "AFTER_WINDOW_END" and not can_clock_out:
             return MobileAttendanceHeaderState(
                 code=CHECK_OUT_REQUEST_REQUIRED,
-                message="Check Out cutoff passed • Please submit an attendance request",
+                message="Check Out cutoff passed",
+                detail_message="Please submit an attendance request",
             ).as_payload()
 
-        detail_parts: list[str] = []
-        late_detail = _late_detail_text(late_by)
-        if late_detail:
-            detail_parts.append(late_detail)
         return MobileAttendanceHeaderState(
             code=CHECKED_IN,
-            message="Checked In • Don’t forget to Check Out",
-            detail_message=" • ".join(detail_parts) if detail_parts else None,
+            message="Checked In",
+            detail_message=_join_details(
+                _late_detail_text(late_by),
+                f"Earliest Check Out: {earliest_check_out}" if earliest_check_out else None,
+            ),
         ).as_payload()
 
     if has_check_in and has_check_out:
-        if work_hours_below_minimum:
-            detail_parts: list[str] = []
-            late_detail = _late_detail_text(late_by)
-            if late_detail:
-                detail_parts.append(late_detail)
-            if shortfall:
-                detail_parts.append(f"Short by {shortfall}")
-            elif minimum_hour:
-                detail_parts.append(f"Expected work session {minimum_hour}")
-            early_detail = _early_detail_text(checked_out_early, checked_out_early_by)
-            if early_detail:
-                detail_parts.append(early_detail)
-            detail_message = " • ".join(detail_parts) if detail_parts else None
-            return MobileAttendanceHeaderState(
-                code=BELOW_MINIMUM_HOURS,
-                message="Below minimum hours",
-                detail_message=detail_message,
-            ).as_payload()
-
         if checked_out_early:
-            detail_parts: list[str] = []
-            early_detail = _early_detail_text(checked_out_early, checked_out_early_by)
-            if early_detail:
-                detail_parts.append(early_detail)
-            late_detail = _late_detail_text(late_by)
-            if late_detail:
-                detail_parts.append(late_detail)
             return MobileAttendanceHeaderState(
                 code=CHECKED_OUT_EARLY,
                 message="Checked Out early",
-                detail_message=" • ".join(detail_parts) if detail_parts else None,
+                detail_message=_join_details(
+                    _short_by_text(checked_out_early, checked_out_early_by),
+                    _late_detail_text(late_by),
+                ),
             ).as_payload()
 
-        detail_parts: list[str] = []
-        late_detail = _late_detail_text(late_by)
-        if late_detail:
-            detail_parts.append(late_detail)
         return MobileAttendanceHeaderState(
             code=ATTENDANCE_RECORDED,
             message="Attendance recorded",
-            detail_message=" • ".join(detail_parts) if detail_parts else None,
+            detail_message=_late_detail_text(late_by),
         ).as_payload()
 
     if has_check_out and not has_check_in:
         return MobileAttendanceHeaderState(
             code=MISSING_CHECK_IN,
-            message="Missing Check In • Check Out saved",
+            message="Missing Check In",
+            detail_message="Check Out saved",
         ).as_payload()
 
     if not has_attendance and check_in_cutoff_passed and can_clock_out:
         return MobileAttendanceHeaderState(
             code=MISSING_CHECK_IN,
-            message="Missing Check In • Check Out available",
+            message="Missing Check In",
+            detail_message="Check Out available",
         ).as_payload()
 
     if not has_attendance and check_out_block_reason == "AFTER_WINDOW_END" and not can_clock_out:
         return MobileAttendanceHeaderState(
             code=CHECK_OUT_REQUEST_REQUIRED,
-            message="Check Out cutoff passed • Please submit an attendance request",
+            message="Check Out cutoff passed",
+            detail_message="Please submit an attendance request",
         ).as_payload()
 
     return MobileAttendanceHeaderState(
         code=READY_TO_CHECK_IN,
-        message="No record yet • Please Check In",
+        message="No record yet",
+        detail_message="Please Check In",
     ).as_payload()
