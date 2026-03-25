@@ -90,7 +90,7 @@ class AttendanceScopeAlignmentTests(AttendanceApiIntegrationMixin, TestCase):
     def test_month_view_admin_self_excluded_when_admin_attendance_disabled(self):
         self._set_settings(allow_admin_attendance=False)
         admin_user, admin = self.create_employee(
-            'Admin', permissions=['view_attendance', 'change_attendance']
+            'Admin', permissions=['view_attendance']
         )
         _, owner = self.create_employee('Owner')
 
@@ -104,7 +104,7 @@ class AttendanceScopeAlignmentTests(AttendanceApiIntegrationMixin, TestCase):
     def test_month_view_admin_self_included_when_admin_attendance_enabled(self):
         self._set_settings(allow_admin_attendance=True)
         admin_user, admin = self.create_employee(
-            'Admin', permissions=['view_attendance', 'change_attendance']
+            'Admin', permissions=['view_attendance']
         )
         _, owner = self.create_employee('Owner')
 
@@ -156,7 +156,7 @@ class AttendanceScopeAlignmentTests(AttendanceApiIntegrationMixin, TestCase):
 
     def test_attendance_activity_scope_admin_self_disabled_but_others_visible(self):
         self._set_settings(allow_admin_attendance=False)
-        admin_user, admin = self.create_employee('Admin', permissions=['change_attendance'])
+        admin_user, admin = self.create_employee('Admin', permissions=['view_attendance'])
         _, owner = self.create_employee('Owner')
         _, other = self.create_employee('Other')
         AttendanceActivity.objects.create(employee_id=admin, attendance_date=date(2026, 3, 22))
@@ -179,7 +179,7 @@ class AttendanceScopeAlignmentTests(AttendanceApiIntegrationMixin, TestCase):
 
     def test_punching_history_scope_admin_self_disabled_but_others_visible(self):
         self._set_settings(allow_admin_attendance=False)
-        admin_user, admin = self.create_employee('Admin', permissions=['view_attendancepunchinghistory', 'change_attendance'])
+        admin_user, admin = self.create_employee('Admin', permissions=['view_attendance', 'view_attendancepunchinghistory'])
         _, owner = self.create_employee('Owner')
         _, other = self.create_employee('Other')
         AttendancePunchingHistory.objects.create(
@@ -218,9 +218,72 @@ class AttendanceScopeAlignmentTests(AttendanceApiIntegrationMixin, TestCase):
         self.assertEqual(default_employee_id, self._get_ids(employee_options)[0])
         self.assertEqual(set(queryset.values_list('employee_id', flat=True).distinct()), {owner.id, other.id})
 
+    def test_attendance_activity_scope_admin_view_attendance_only_keeps_others_visible(self):
+        self._set_settings(allow_admin_attendance=False)
+        admin_user, admin = self.create_employee('Admin', permissions=['view_attendance'])
+        _, owner = self.create_employee('Owner')
+        _, other = self.create_employee('Other')
+        AttendanceActivity.objects.create(employee_id=admin, attendance_date=date(2026, 3, 23))
+        AttendanceActivity.objects.create(employee_id=owner, attendance_date=date(2026, 3, 23))
+        AttendanceActivity.objects.create(employee_id=other, attendance_date=date(2026, 3, 23))
+
+        request = self.factory.get(reverse('attendance-activity-view'))
+        request.user = admin_user
+
+        employee_options, show_filter, can_view_all, default_employee_id = attendance_views._get_attendance_activity_employee_scope(request)
+        option_ids = self._get_ids(employee_options)
+
+        self.assertNotIn(admin.id, option_ids)
+        self.assertIn(owner.id, option_ids)
+        self.assertIn(other.id, option_ids)
+        self.assertTrue(can_view_all)
+        self.assertTrue(show_filter)
+        self.assertIn(default_employee_id, option_ids)
+
+    def test_punching_history_scope_admin_view_attendance_only_keeps_others_visible(self):
+        self._set_settings(allow_admin_attendance=False)
+        admin_user, admin = self.create_employee('Admin', permissions=['view_attendance'])
+        _, owner = self.create_employee('Owner')
+        _, other = self.create_employee('Other')
+        AttendancePunchingHistory.objects.create(
+            employee_id=admin,
+            attendance_date=date(2026, 3, 24),
+            punch_timestamp=timezone.make_aware(datetime(2026, 3, 24, 8, 0)),
+            source=AttendancePunchSource.MOBILE,
+            punch_direction=AttendancePunchDirection.IN,
+        )
+        AttendancePunchingHistory.objects.create(
+            employee_id=owner,
+            attendance_date=date(2026, 3, 24),
+            punch_timestamp=timezone.make_aware(datetime(2026, 3, 24, 9, 0)),
+            source=AttendancePunchSource.MOBILE,
+            punch_direction=AttendancePunchDirection.IN,
+        )
+        AttendancePunchingHistory.objects.create(
+            employee_id=other,
+            attendance_date=date(2026, 3, 24),
+            punch_timestamp=timezone.make_aware(datetime(2026, 3, 24, 10, 0)),
+            source=AttendancePunchSource.MOBILE,
+            punch_direction=AttendancePunchDirection.OUT,
+        )
+
+        request = self.factory.get(reverse('attendance-punching-history-view'))
+        request.user = admin_user
+
+        employee_options, show_filter, can_view_all, default_employee_id = attendance_views._get_punching_history_employee_scope(request)
+        option_ids = self._get_ids(employee_options)
+
+        self.assertNotIn(admin.id, option_ids)
+        self.assertIn(owner.id, option_ids)
+        self.assertIn(other.id, option_ids)
+        self.assertTrue(can_view_all)
+        self.assertTrue(show_filter)
+        self.assertIn(default_employee_id, option_ids)
+
+
     def test_monthly_recap_api_returns_config_scoped_employee_options_for_mobile(self):
         self._set_settings(allow_admin_attendance=False)
-        admin_user, admin = self.create_employee('Admin', permissions=['view_attendance', 'change_attendance'])
+        admin_user, admin = self.create_employee('Admin', permissions=['view_attendance'])
         _, owner = self.create_employee('Owner')
 
         response = self.auth_client(admin_user).get('/api/attendance/attendances-recap/', {}, format='json')
