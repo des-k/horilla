@@ -887,7 +887,7 @@ class ApiMonthlyRecapParityTests(SimpleTestCase):
         force_authenticate(request, user=SimpleNamespace(is_authenticated=True))
 
         with patch.object(api_views.dj_timezone, "localdate", return_value=date(2026, 3, 14)), \
-             patch.object(api_views.AttendanceMonthlyRecapExportPDFAPIView, "_allowed_employees_qs", return_value=FakeEmployeesQS([employee])), \
+             patch.object(api_views.AttendanceMonthlyRecapExportPDFAPIView, "_allowed_employees_qs", return_value=(FakeEmployeesQS([employee]), False, False, employee.id)), \
              patch.object(api_views, "render_to_string", _render_to_string), \
              patch.object(api_views.pisa, "CreatePDF", _create_pdf), \
              patch("attendance.services.monthly_recap.get_monthly_attendance_recap", lambda emp, month, language=None: recap_calls.append((emp, month, language)) or recap):
