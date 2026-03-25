@@ -32,6 +32,10 @@ class _FakeActivityQuerySet(list):
         employee = kwargs.get("employee_id")
         if employee is not None:
             items = [item for item in items if getattr(item, "employee_id", None) == employee]
+        employee_ids = kwargs.get("employee_id_id__in")
+        if employee_ids is not None:
+            employee_ids = set(employee_ids)
+            items = [item for item in items if getattr(getattr(item, "employee_id", None), "id", None) in employee_ids]
         return _FakeActivityQuerySet(items)
 
     def order_by(self, *args, **kwargs):
@@ -67,8 +71,9 @@ class AttendanceActivityApiAndPermissionsTests(SimpleTestCase):
     def test_activity_list_blocks_cross_employee_access_for_regular_employee(self):
         request = self.factory.get("/api/attendance/attendance-activity/")
         force_authenticate(request, user=self.owner_user)
+        scoped_employees = SimpleNamespace(values_list=lambda *args, **kwargs: [self.owner.id])
         with patch.object(api_views.AttendanceActivity, "objects", self.activities), \
-             patch.object(api_views, "permission_based_queryset", side_effect=Exception("fallback")), \
+             patch.object(api_views, "get_attendance_subject_employees", return_value=(scoped_employees, False, False, self.owner.id)), \
              patch.object(api_views, "AttendanceActivitySerializer", side_effect=self._dummy_serializer), \
              patch.object(api_views, "AttendanceActivityFilter", side_effect=_identity_filter):
             response = api_views.AttendanceActivityView.as_view()(request)
@@ -78,9 +83,9 @@ class AttendanceActivityApiAndPermissionsTests(SimpleTestCase):
     def test_activity_list_allows_manager_only_for_subordinates(self):
         request = self.factory.get("/api/attendance/attendance-activity/")
         force_authenticate(request, user=self.manager_user)
-        scoped = _FakeActivityQuerySet([self.activities[1]])
+        scoped_employees = SimpleNamespace(values_list=lambda *args, **kwargs: [self.subordinate.id])
         with patch.object(api_views.AttendanceActivity, "objects", self.activities), \
-             patch.object(api_views, "permission_based_queryset", return_value=scoped), \
+             patch.object(api_views, "get_attendance_subject_employees", return_value=(scoped_employees, False, False, self.subordinate.id)), \
              patch.object(api_views, "AttendanceActivitySerializer", side_effect=self._dummy_serializer), \
              patch.object(api_views, "AttendanceActivityFilter", side_effect=_identity_filter):
             response = api_views.AttendanceActivityView.as_view()(request)
@@ -90,8 +95,9 @@ class AttendanceActivityApiAndPermissionsTests(SimpleTestCase):
     def test_activity_list_allows_superuser_to_view_all_records(self):
         request = self.factory.get("/api/attendance/attendance-activity/")
         force_authenticate(request, user=self.admin_user)
+        scoped_employees = SimpleNamespace(values_list=lambda *args, **kwargs: [self.owner.id, self.subordinate.id, self.outsider.id])
         with patch.object(api_views.AttendanceActivity, "objects", self.activities), \
-             patch.object(api_views, "permission_based_queryset", return_value=self.activities), \
+             patch.object(api_views, "get_attendance_subject_employees", return_value=(scoped_employees, True, True, self.owner.id)), \
              patch.object(api_views, "AttendanceActivitySerializer", side_effect=self._dummy_serializer), \
              patch.object(api_views, "AttendanceActivityFilter", side_effect=_identity_filter):
             response = api_views.AttendanceActivityView.as_view()(request)
