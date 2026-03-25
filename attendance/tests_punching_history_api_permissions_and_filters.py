@@ -191,10 +191,11 @@ class AttendancePunchingHistoryApiIntegrationTests(AttendanceApiIntegrationMixin
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual([item['id'] for item in data['results']], [subordinate_punch.id])
-        self.assertTrue(data['show_employee_filter'])
+        self.assertFalse(data['show_employee_filter'])
+        self.assertEqual(data['selected_employee_id'], subordinate.id)
         self.assertEqual(
             {str(item['id']) for item in data['employee_options']},
-            {'all', str(manager.id), str(subordinate.id)},
+            {str(subordinate.id)},
         )
 
     def test_punching_history_filters_by_source_and_date_range(self):
