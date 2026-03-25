@@ -153,10 +153,35 @@ class AttendanceScopeAlignmentTests(AttendanceApiIntegrationMixin, TestCase):
         self.assertEqual(default_employee_id, manager.id)
         self.assertEqual(set(queryset.values_list('employee_id', flat=True).distinct()), {manager.id, subordinate.id})
 
+
+    def test_attendance_activity_scope_admin_self_disabled_but_others_visible(self):
+        self._set_settings(allow_admin_attendance=False)
+        admin_user, admin = self.create_employee('Admin', permissions=['change_attendance'])
+        _, owner = self.create_employee('Owner')
+        _, other = self.create_employee('Other')
+        AttendanceActivity.objects.create(employee_id=admin, attendance_date=date(2026, 3, 22))
+        AttendanceActivity.objects.create(employee_id=owner, attendance_date=date(2026, 3, 22))
+        AttendanceActivity.objects.create(employee_id=other, attendance_date=date(2026, 3, 22))
+
+        request = self.factory.get(reverse('attendance-activity-view'))
+        request.user = admin_user
+
+        employee_options, show_filter, can_view_all, default_employee_id = attendance_views._get_attendance_activity_employee_scope(request)
+        queryset = attendance_views._scoped_attendance_activity_queryset(request)
+
+        self.assertNotIn(admin.id, self._get_ids(employee_options))
+        self.assertIn(owner.id, self._get_ids(employee_options))
+        self.assertIn(other.id, self._get_ids(employee_options))
+        self.assertTrue(show_filter)
+        self.assertTrue(can_view_all)
+        self.assertEqual(default_employee_id, self._get_ids(employee_options)[0])
+        self.assertEqual(set(queryset.values_list('employee_id', flat=True).distinct()), {owner.id, other.id})
+
     def test_punching_history_scope_admin_self_disabled_but_others_visible(self):
         self._set_settings(allow_admin_attendance=False)
         admin_user, admin = self.create_employee('Admin', permissions=['view_attendancepunchinghistory', 'change_attendance'])
         _, owner = self.create_employee('Owner')
+        _, other = self.create_employee('Other')
         AttendancePunchingHistory.objects.create(
             employee_id=admin,
             attendance_date=date(2026, 3, 21),
@@ -171,6 +196,13 @@ class AttendanceScopeAlignmentTests(AttendanceApiIntegrationMixin, TestCase):
             source=AttendancePunchSource.BIOMETRIC,
             punch_direction=AttendancePunchDirection.IN,
         )
+        AttendancePunchingHistory.objects.create(
+            employee_id=other,
+            attendance_date=date(2026, 3, 21),
+            punch_timestamp=timezone.make_aware(datetime(2026, 3, 21, 10, 0)),
+            source=AttendancePunchSource.MOBILE,
+            punch_direction=AttendancePunchDirection.OUT,
+        )
 
         request = self.factory.get(reverse('attendance-punching-history-view'))
         request.user = admin_user
@@ -180,10 +212,11 @@ class AttendanceScopeAlignmentTests(AttendanceApiIntegrationMixin, TestCase):
 
         self.assertNotIn(admin.id, self._get_ids(employee_options))
         self.assertIn(owner.id, self._get_ids(employee_options))
-        self.assertFalse(show_filter)
+        self.assertIn(other.id, self._get_ids(employee_options))
+        self.assertTrue(show_filter)
         self.assertTrue(can_view_all)
-        self.assertEqual(default_employee_id, owner.id)
-        self.assertEqual(set(queryset.values_list('employee_id', flat=True).distinct()), {owner.id})
+        self.assertEqual(default_employee_id, self._get_ids(employee_options)[0])
+        self.assertEqual(set(queryset.values_list('employee_id', flat=True).distinct()), {owner.id, other.id})
 
     def test_monthly_recap_api_returns_config_scoped_employee_options_for_mobile(self):
         self._set_settings(allow_admin_attendance=False)
