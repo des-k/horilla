@@ -477,6 +477,7 @@ class WorkModeRequestSerializer(serializers.ModelSerializer):
     def to_internal_value(self, data):
         try:
             raw = data.dict() if hasattr(data, "dict") else dict(data)
+            raw.pop("duty_destination_detail", None)
             _mode, new_data = coerce_work_type_payload(raw)
             data = new_data
         except Exception:
@@ -499,12 +500,13 @@ class WorkModeRequestSerializer(serializers.ModelSerializer):
             data["comment"] = data.get("action_reason") or data.get("document_remark") or ""
         if not (data.get("action_note") or "").strip():
             data["action_note"] = data.get("action_reason") or data.get("comment") or ""
+        data.pop("duty_destination_detail", None)
         return data
 
     def validate(self, attrs):
         attrs = super().validate(attrs)
 
-        for field in ("reason", "duty_destination_location", "duty_destination_detail"):
+        for field in ("reason", "duty_destination_location"):
             if field in attrs and attrs.get(field) is not None:
                 attrs[field] = str(attrs.get(field)).strip()
 
@@ -539,6 +541,14 @@ class WorkModeRequestSerializer(serializers.ModelSerializer):
         if mode == AttendanceWorkMode.ON_DUTY and not str(destination or "").strip():
             raise serializers.ValidationError({"duty_destination_location": "Destination location is required for ON DUTY requests."})
 
+        if self.instance is None and mode == AttendanceWorkMode.ON_DUTY:
+            request_files = getattr(request, "FILES", None) if request is not None else None
+            uploaded = []
+            if request_files is not None:
+                uploaded = request_files.getlist("files") or request_files.getlist("files[]") or []
+            if not uploaded:
+                raise serializers.ValidationError({"files": "At least one file is required for ON DUTY requests."})
+
         if employee and mode and scope and start_date and end_date:
             validate_work_type_request(
                 employee=employee,
@@ -554,7 +564,7 @@ class WorkModeRequestSerializer(serializers.ModelSerializer):
             resolver = getattr(self.instance, "effective_document_status", None)
             effective_doc_status = resolver() if callable(resolver) else None
         if mode == AttendanceWorkMode.ON_DUTY and effective_doc_status == WorkModeRequestDocumentStatus.VERIFIED:
-            immutable = {"reason", "start_date", "end_date", "scope", "mode", "duty_destination_location", "duty_destination_detail"}
+            immutable = {"reason", "start_date", "end_date", "scope", "mode", "duty_destination_location"}
             changed = [field for field in immutable if field in attrs]
             if changed:
                 raise serializers.ValidationError({"document_status": "Verified On Duty documents are locked. Reopen verification first."})
