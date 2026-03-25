@@ -12,7 +12,7 @@
 <div class="oh-modal__dialog-body">
   <div class="mb-2">
     <small class="text-muted">
-      {% trans "Allowed edit: update note, destination, detail, and upload a new document version while the request is still editable." %}
+      {% trans "Allowed edit: update note, destination, and upload a new document version while the request is still editable." %}
       <br />
       <strong>{% trans "Current status" %}:</strong> {{ req.status|upper }}<br/>
       {% if req.mode == 'wfa' %}
@@ -39,11 +39,6 @@
         {% if form.duty_destination_location.errors %}<small class="text-danger">{{ form.duty_destination_location.errors|join:", " }}</small>{% endif %}
       </div>
 
-      <div class="oh-input-group">
-        <label class="oh-label">{{ form.duty_destination_detail.label }}</label>
-        {{ form.duty_destination_detail }}
-        {% if form.duty_destination_detail.errors %}<small class="text-danger">{{ form.duty_destination_detail.errors|join:", " }}</small>{% endif %}
-      </div>
     {% endif %}
 
     <div class="oh-input-group">
