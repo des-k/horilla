@@ -8,10 +8,8 @@ Web UI (Django templates) for Attendance **Work Type Requests**.
 Spec:
 - Allowed request depends on schedule (employee.employee_work_info.work_type_id) for the attendance_date.
 - Scopes: IN/OUT single day, FULL date range.
-- ON_DUTY requires attachment but may be submitted PENDING and later updated with attachment.
-- Approvals list includes:
-  - WAITING_FOR_APPROVAL (approvable)
-  - ON_DUTY PENDING (not yet approvable; usually waiting for letter upload)
+- ON_DUTY requires destination + attachment at create.
+- Approvals list includes WAITING_FOR_APPROVAL items; ON DUTY moves there immediately after a valid create.
 """
 
 from __future__ import annotations
@@ -546,7 +544,6 @@ def work_type_request_create(request):
                 end_date=form.cleaned_data["end_date"],
                 reason=form.cleaned_data["reason"],
                 duty_destination_location=form.cleaned_data.get("duty_destination_location"),
-                duty_destination_detail=form.cleaned_data.get("duty_destination_detail"),
                 uploaded_files=uploaded,
             )
             messages.success(request, _(f"Work Type Request created ({_mode_label(instance.mode)})."))
@@ -576,7 +573,6 @@ def work_type_request_update(request, obj_id: int):
         initial={
             "reason": req.reason or "",
             "duty_destination_location": req.duty_destination_location or "",
-            "duty_destination_detail": req.duty_destination_detail or "",
         },
     )
 
@@ -590,7 +586,6 @@ def work_type_request_update(request, obj_id: int):
                     request=request,
                     reason=form.cleaned_data.get("reason"),
                     duty_destination_location=form.cleaned_data.get("duty_destination_location"),
-                    duty_destination_detail=form.cleaned_data.get("duty_destination_detail"),
                     uploaded_files=request.FILES.getlist("files"),
                     remark=_request_remark_value(request, "remark", "reason", "note"),
                 )
