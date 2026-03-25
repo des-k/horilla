@@ -51,13 +51,6 @@
         </div>
       </div>
 
-      <div class="col-md-6">
-        <div class="oh-input-group">
-          <label class="oh-label">{{ form.duty_destination_detail.label }}</label>
-          {{ form.duty_destination_detail }}
-          {% if form.duty_destination_detail.errors %}<small class="text-danger">{{ form.duty_destination_detail.errors|join:", " }}</small>{% endif %}
-        </div>
-      </div>
 
       <div class="col-md-12">
         <div class="oh-input-group">
@@ -76,7 +69,7 @@
             {% trans "WFA documents are optional supporting attachments only. You may submit WFA with or without files. Uploaded files are kept as version history and do not use verify/reject/reopen workflow." %}
           </small>
           <small class="text-muted" id="workTypeFileHelpOnDuty" style="display:none;">
-            {% trans "ON DUTY documents may be uploaded now or later. Each upload creates a new document version and preserves prior history. After approval, the current ON DUTY document version uses verify/reject/reopen review workflow." %}
+            {% trans "ON DUTY documents are required when creating the request. Each upload creates a new document version and preserves prior history. After approval, the current ON DUTY document version uses verify/reject/reopen review workflow." %}
           </small>
         </div>
       </div>
@@ -105,14 +98,12 @@
     const end = document.querySelector('#id_end_date');
     const endWrap = document.querySelector('#endDateWrap');
     const dutyLocationWrap = document.querySelector('#id_duty_destination_location')?.closest('.col-md-6');
-    const dutyDetailWrap = document.querySelector('#id_duty_destination_detail')?.closest('.col-md-6');
     const fileHelpWfa = document.querySelector('#workTypeFileHelpWfa');
     const fileHelpOnDuty = document.querySelector('#workTypeFileHelpOnDuty');
 
     function syncModeUi(){
       const isOnDuty = ((mode && mode.value) || '').toLowerCase() === 'on_duty';
       if (dutyLocationWrap) dutyLocationWrap.style.display = isOnDuty ? '' : 'none';
-      if (dutyDetailWrap) dutyDetailWrap.style.display = isOnDuty ? '' : 'none';
       if (fileHelpWfa) fileHelpWfa.style.display = isOnDuty ? 'none' : '';
       if (fileHelpOnDuty) fileHelpOnDuty.style.display = isOnDuty ? '' : 'none';
     }
