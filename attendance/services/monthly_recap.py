@@ -648,6 +648,82 @@ def _safe_non_negative_int(value) -> int:
         parsed = 0
     return parsed if parsed >= 0 else 0
 
+def _duration_seconds(value) -> int:
+    if value is None:
+        return 0
+    try:
+        if hasattr(value, "strftime"):
+            raw = value.strftime("%H:%M:%S")
+        else:
+            raw = str(value).strip()
+        if not raw or raw.lower() in {"none", "null"}:
+            return 0
+        parts = raw.split(":")
+        if len(parts) == 2:
+            hours, minutes = parts
+            seconds = 0
+        else:
+            hours, minutes, seconds = (parts + ["0", "0", "0"])[:3]
+        total = (int(hours) * 3600) + (int(minutes) * 60) + int(seconds)
+        return total if total >= 0 else 0
+    except Exception:
+        return 0
+
+
+def _resolve_minimum_work_seconds(schedule_obj, shift_start_dt: Optional[datetime], shift_end_dt: Optional[datetime]) -> int:
+    configured = _duration_seconds(getattr(schedule_obj, "minimum_working_hour", None) if schedule_obj else None)
+    if configured > 0:
+        return configured
+    if shift_start_dt and shift_end_dt:
+        try:
+            return max(0, int((shift_end_dt - shift_start_dt).total_seconds()))
+        except Exception:
+            return 0
+    return 0
+
+
+def _resolve_mobile_style_earliest_checkout_dt(
+    *,
+    shift_start_dt: Optional[datetime],
+    shift_end_dt: Optional[datetime],
+    actual_check_in_dt: Optional[datetime],
+    clock_in_type: str,
+    flex_seconds: int,
+) -> Optional[datetime]:
+    if not (shift_start_dt and shift_end_dt):
+        return None
+
+    shift_duration = shift_end_dt - shift_start_dt
+    flex_delta = timedelta(seconds=max(0, int(flex_seconds or 0)))
+    mode = str(clock_in_type or "after").strip().lower()
+    effective_start_dt = shift_start_dt
+
+    if actual_check_in_dt is None:
+        return shift_end_dt
+
+    if mode == "before_after":
+        window_start_dt = shift_start_dt - flex_delta
+        window_end_dt = shift_start_dt + flex_delta
+        if actual_check_in_dt < window_start_dt:
+            effective_start_dt = window_start_dt
+        elif actual_check_in_dt > window_end_dt:
+            effective_start_dt = window_end_dt
+        else:
+            effective_start_dt = actual_check_in_dt
+    elif mode == "after":
+        window_start_dt = shift_start_dt
+        window_end_dt = shift_start_dt + flex_delta
+        if actual_check_in_dt < window_start_dt:
+            effective_start_dt = window_start_dt
+        elif actual_check_in_dt > window_end_dt:
+            effective_start_dt = window_end_dt
+        else:
+            effective_start_dt = actual_check_in_dt
+    else:
+        effective_start_dt = shift_start_dt
+
+    return effective_start_dt + shift_duration
+
 
 def _parse_duration_to_minutes(value) -> int:
     """Safely coerce duration-like values into plain integer minutes.
@@ -1617,6 +1693,17 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
         if adjusted_early_reference_dt and credit_seconds > 0:
             adjusted_early_reference_dt = adjusted_early_reference_dt - timedelta(seconds=credit_seconds)
 
+        maximum_late_seconds = max(0, int((cutoff_in_dt - shift_start_dt).total_seconds())) if (shift_start_dt and cutoff_in_dt) else 0
+        minimum_work_seconds = _resolve_minimum_work_seconds(schedule_obj, shift_start_dt, shift_end_dt)
+        missing_out_early_seconds = max(0, minimum_work_seconds - maximum_late_seconds)
+        earliest_check_out_dt = _resolve_mobile_style_earliest_checkout_dt(
+            shift_start_dt=shift_start_dt,
+            shift_end_dt=shift_end_dt,
+            actual_check_in_dt=final_in_dt,
+            clock_in_type=grace_clock_in_type,
+            flex_seconds=grace_in_sec,
+        )
+
         if shift_start_dt and cutoff_in_dt:
             if half_day_kind == "first_half":
                 if final_in_dt:
@@ -1634,7 +1721,7 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
                     else:
                         late_sec = max(0.0, (final_in_dt - late_reference_dt).total_seconds() - late_grace_seconds)
                 else:
-                    late_sec = max(0.0, (cutoff_in_dt - shift_start_dt).total_seconds())
+                    late_sec = float(maximum_late_seconds)
 
         if shift_end_dt and cutoff_in_dt:
             if half_day_kind == "second_half":
@@ -1658,10 +1745,16 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
                 if final_out_dt:
                     if eff_out_mode == AttendanceWorkMode.ON_DUTY:
                         early_sec = 0.0
+                    elif not final_in_dt:
+                        if final_out_dt >= shift_end_dt:
+                            early_sec = 0.0
+                        else:
+                            early_sec = max(0.0, (shift_end_dt - final_out_dt).total_seconds())
                     else:
-                        early_sec = max(0.0, (adjusted_early_reference_dt - final_out_dt).total_seconds())
+                        reference_dt = earliest_check_out_dt or adjusted_early_reference_dt or shift_end_dt
+                        early_sec = max(0.0, (reference_dt - final_out_dt).total_seconds())
                 else:
-                    early_sec = max(0.0, (shift_end_dt - cutoff_in_dt).total_seconds())
+                    early_sec = float(missing_out_early_seconds)
 
         late_minutes = _seconds_to_minutes(late_sec)
         early_minutes = _seconds_to_minutes(early_sec)
