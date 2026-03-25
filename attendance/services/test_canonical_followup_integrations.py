@@ -809,14 +809,12 @@ class MonthlyPdfExportParityTests(SimpleTestCase):
         )
         request.session = {}
 
-        raw_export_view = views.attendance_employee_month_export_pdf.__closure__[0].cell_contents.__closure__[2].cell_contents
-
         with patch.object(views.Employee.objects, "filter", return_value=FakeEmployeesQS([employee])), \
-             patch.object(views, "filtersubordinatesemployeemodel", lambda request, qs, perm=None: qs), \
+             patch.object(views, "get_attendance_subject_employees", return_value=(FakeEmployeesQS([employee]), False, False, employee.id)), \
              patch.object(views, "get_monthly_attendance_recap", lambda emp, month, language=None: recap_calls.append((emp, month, language)) or recap), \
              patch.object(views, "render_to_string", _render_to_string), \
              patch.object(views.pisa, "CreatePDF", _create_pdf):
-            response = raw_export_view(request)
+            response = views.attendance_employee_month_export_pdf(request)
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response["Content-Type"], "application/pdf")
