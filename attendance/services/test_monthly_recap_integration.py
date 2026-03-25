@@ -108,7 +108,7 @@ class MonthlyRecapIntegrationTests(SimpleTestCase):
         if day != self.target_date:
             return {"schedule": None, "start_time": None, "end_time": None}
         return {
-            "schedule": SimpleNamespace(id=1),
+            "schedule": SimpleNamespace(id=1, minimum_working_hour="08:00"),
             "start_time": time(8, 0),
             "end_time": time(17, 0),
             "shift_start_dt": datetime(2026, 3, 3, 8, 0),
@@ -531,3 +531,72 @@ class MonthlyRecapIntegrationTests(SimpleTestCase):
         self.assertEqual(row_one.check_out, row_two.check_out)
         self.assertEqual(row_one.work_type, row_two.work_type)
         self.assertEqual(row_one.note, row_two.note)
+
+    def test_alpha_uses_minimum_working_hour_split_between_maximum_late_and_early_out(self):
+        recap, row = self._get_recap()
+
+        self.assertEqual(row.late, "04:00")
+        self.assertEqual(row.early_out, "04:00")
+        self.assertEqual(row.late_minutes, 240)
+        self.assertEqual(row.early_out_minutes, 240)
+
+    def test_missing_check_out_uses_minimum_working_hour_minus_maximum_late(self):
+        activity = self._raw_activity(id=41, in_time=time(8, 0))
+
+        recap, row = self._get_recap(activities=[activity])
+
+        self.assertEqual(row.late, "00:00")
+        self.assertEqual(row.early_out, "04:00")
+        self.assertEqual(row.early_out_minutes, 240)
+
+    def test_missing_check_in_with_checkout_at_shift_end_has_no_early_out(self):
+        activity = self._raw_activity(id=42, out_time=time(17, 0))
+
+        recap, row = self._get_recap(activities=[activity])
+
+        self.assertEqual(row.late, "04:00")
+        self.assertEqual(row.early_out, "00:00")
+
+    def test_missing_check_in_with_early_checkout_has_positive_early_out(self):
+        activity = self._raw_activity(id=43, out_time=time(15, 0))
+
+        recap, row = self._get_recap(activities=[activity])
+
+        self.assertEqual(row.late, "04:00")
+        self.assertEqual(row.early_out, "02:00")
+
+    def test_flexible_after_early_out_uses_dynamic_earliest_checkout_and_clamps_negative_values(self):
+        activity = self._raw_activity(id=44, in_time=time(9, 0), out_time=time(17, 0))
+
+        def flex_shift_rules(day, shift, day_obj, **kwargs):
+            if day != self.target_date:
+                return {"schedule": None, "start_time": None, "end_time": None}
+            return {
+                "schedule": SimpleNamespace(id=1, minimum_working_hour="08:00"),
+                "start_time": time(8, 0),
+                "end_time": time(17, 0),
+                "shift_start_dt": datetime(2026, 3, 3, 8, 0),
+                "shift_end_dt": datetime(2026, 3, 3, 17, 0),
+                "check_in_window_start_dt": datetime(2026, 3, 3, 8, 0),
+                "check_in_window_end_dt": datetime(2026, 3, 3, 12, 0),
+                "check_out_window_start_dt": datetime(2026, 3, 3, 12, 0),
+                "check_out_window_end_dt": datetime(2026, 3, 3, 23, 0),
+                "cutoff_in_dt": datetime(2026, 3, 3, 12, 0),
+                "grace_seconds": 3600,
+                "clock_in_type": "after",
+            }
+
+        with patch.object(monthly_recap.AttendanceActivity, "objects", FakeManager([activity])),              patch.object(monthly_recap.EmployeeShiftDay, "objects", FakeManager([SimpleNamespace(day=self.target_date.strftime("%A").lower())])),              patch("attendance.views.clock_in_out.get_shift_rules", flex_shift_rules),              patch("attendance.views.clock_in_out._resolve_grace_time", lambda schedule, shift: FakeGraceTime(False, 0)):
+            recap = monthly_recap.get_monthly_attendance_recap(self.employee, "2026-03")
+
+        row = self._find_row(recap["rows"], self.target_date)
+        self.assertEqual(row.early_out, "01:00")
+        self.assertEqual(row.early_out_minutes, 60)
+
+        activity2 = self._raw_activity(id=45, in_time=time(9, 0), out_time=time(18, 0))
+        with patch.object(monthly_recap.AttendanceActivity, "objects", FakeManager([activity2])),              patch.object(monthly_recap.EmployeeShiftDay, "objects", FakeManager([SimpleNamespace(day=self.target_date.strftime("%A").lower())])),              patch("attendance.views.clock_in_out.get_shift_rules", flex_shift_rules),              patch("attendance.views.clock_in_out._resolve_grace_time", lambda schedule, shift: FakeGraceTime(False, 0)):
+            recap2 = monthly_recap.get_monthly_attendance_recap(self.employee, "2026-03")
+
+        row2 = self._find_row(recap2["rows"], self.target_date)
+        self.assertEqual(row2.early_out, "00:00")
+        self.assertEqual(row2.early_out_minutes, 0)
