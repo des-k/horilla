@@ -294,3 +294,31 @@ class AttendanceScopeAlignmentTests(AttendanceApiIntegrationMixin, TestCase):
         self.assertNotIn(str(admin.id), {str(item['id']) for item in data['employee_options']})
         self.assertIn(str(owner.id), {str(item['id']) for item in data['employee_options']})
         self.assertEqual(data['selected_employee_id'], owner.id)
+
+    def test_activity_template_fallback_uses_selected_scope_employee_not_self(self):
+        self._set_settings(allow_admin_attendance=False)
+        admin_user, admin = self.create_employee('Admin', permissions=['view_attendance'])
+        _, owner = self.create_employee('Owner')
+
+        self.client.force_login(admin_user)
+        response = self.client.get(reverse('attendance-activity-view'))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context['selected_scope_employee'].id, owner.id)
+        self.assertContains(response, str(owner))
+        self.assertNotContains(response, f'value="{admin.id}"')
+        self.assertContains(response, f'value="{owner.id}"')
+
+    def test_punching_history_template_fallback_uses_selected_scope_employee_not_self(self):
+        self._set_settings(allow_admin_attendance=False)
+        admin_user, admin = self.create_employee('Admin', permissions=['view_attendance'])
+        _, owner = self.create_employee('Owner')
+
+        self.client.force_login(admin_user)
+        response = self.client.get(reverse('attendance-punching-history-view'))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context['selected_scope_employee'].id, owner.id)
+        self.assertContains(response, str(owner))
+        self.assertNotContains(response, f'value="{admin.id}"')
+        self.assertContains(response, f'value="{owner.id}"')
