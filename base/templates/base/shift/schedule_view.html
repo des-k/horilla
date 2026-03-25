@@ -158,6 +158,11 @@
                               </span>
 
                               <span>
+                                <b>{% trans "Minimum Working Hour" %}:</b>
+                                {{ schedule.minimum_working_hour|default_if_none:"-" }}
+                              </span>
+
+                              <span>
                                 <b>{% trans "1st Half Latest IN" %}:</b>
                                 {% if schedule.first_half_leave_latest_check_in_time %}{{ schedule.first_half_leave_latest_check_in_time|time:"H:i" }}{% else %}-{% endif %}
                               </span>
