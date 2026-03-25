@@ -562,6 +562,61 @@ def _seconds_to_hhmm(total_seconds: int | None) -> str | None:
     return f"{hours:02d}:{minutes:02d}"
 
 
+def _compute_mobile_effective_start_and_earliest_checkout(
+    *,
+    shift_start_dt: datetime | None,
+    shift_end_dt: datetime | None,
+    actual_check_in_dt: datetime | None,
+    clock_in_type: str | None,
+    flex_seconds: int | None,
+):
+    """Return (effective_start_dt, earliest_checkout_dt, valid_check_in).
+
+    This helper is for mobile note / early-checkout semantics only.
+    It intentionally uses full shift duration (shift_end - shift_start), not
+    minimum working hour.
+    """
+
+    if not (shift_start_dt and shift_end_dt):
+        return None, None, True
+
+    shift_duration = shift_end_dt - shift_start_dt
+    flex_delta = timedelta(seconds=max(0, int(flex_seconds or 0)))
+    mode = str(clock_in_type or "after").strip().lower()
+
+    effective_start_dt = shift_start_dt
+    valid_check_in = True
+
+    if actual_check_in_dt is None:
+        return effective_start_dt, effective_start_dt + shift_duration, True
+
+    if mode == "before_after":
+        window_start_dt = shift_start_dt - flex_delta
+        window_end_dt = shift_start_dt + flex_delta
+        valid_check_in = window_start_dt <= actual_check_in_dt <= window_end_dt
+        if actual_check_in_dt < window_start_dt:
+            effective_start_dt = window_start_dt
+        elif actual_check_in_dt > window_end_dt:
+            effective_start_dt = window_end_dt
+        else:
+            effective_start_dt = actual_check_in_dt
+    elif mode == "after":
+        window_start_dt = shift_start_dt
+        window_end_dt = shift_start_dt + flex_delta
+        valid_check_in = window_start_dt <= actual_check_in_dt <= window_end_dt
+        if actual_check_in_dt < window_start_dt:
+            effective_start_dt = window_start_dt
+        elif actual_check_in_dt > window_end_dt:
+            effective_start_dt = window_end_dt
+        else:
+            effective_start_dt = actual_check_in_dt
+    else:
+        effective_start_dt = shift_start_dt
+        valid_check_in = True
+
+    return effective_start_dt, effective_start_dt + shift_duration, valid_check_in
+
+
 def _shift_bounds_for_note_context(attendance_date: date, start_time_sec, end_time_sec):
     try:
         start_hhmm = _seconds_to_hhmm(int(start_time_sec))
@@ -774,6 +829,7 @@ class ClockInAPIView(APIView):
         except Exception:
             rules = {"cutoff_in_dt": None}
 
+        grace_seconds = int((rules or {}).get("grace_seconds") or 0)
         cutoff_in_dt = rules.get("cutoff_in_dt")
         cutoff_in_dt = _coerce_datetime_like(cutoff_in_dt, dt_now) if cutoff_in_dt else None
         check_in_window_start_dt = rules.get("check_in_window_start_dt")
@@ -826,14 +882,51 @@ class ClockInAPIView(APIView):
         update_punch_history(punch_log, attendance=attendance, attendance_date=attendance_date, work_mode=in_mode, related_work_mode_request=in_req, decision_source=getattr(attendance, "reconciliation_source", None) if attendance else None)
         reconcile_attendance_punches(employee=employee, attendance_date=attendance_date)
 
+        earliest_check_out_hhmm = None
+        invalid_check_in = False
+        late_by_hhmm = None
+        try:
+            if attendance and getattr(attendance, "attendance_clock_in", None) and start_time_sec is not None:
+                planned_in_hhmm = f"{(int(start_time_sec) // 3600) % 24:02d}:{(int(start_time_sec) % 3600) // 60:02d}"
+                planned_in_time = datetime.strptime(planned_in_hhmm, "%H:%M").time()
+                planned_in_dt = _coerce_datetime_like(datetime.combine(attendance_date, planned_in_time), dt_now)
+                actual_in_date = getattr(attendance, "attendance_clock_in_date", None) or attendance_date
+                actual_in_dt = _coerce_datetime_like(datetime.combine(actual_in_date, attendance.attendance_clock_in), dt_now)
+                grace_dt = planned_in_dt + timedelta(seconds=int(grace_seconds or 0)) if planned_in_dt else None
+                if actual_in_dt and grace_dt and actual_in_dt > grace_dt:
+                    late_s = int((actual_in_dt - grace_dt).total_seconds())
+                    if late_s > 0:
+                        late_by_hhmm = f"{late_s // 3600:02d}:{(late_s % 3600) // 60:02d}"
+        except Exception:
+            late_by_hhmm = None
+
+        try:
+            actual_in_date = getattr(attendance, "attendance_clock_in_date", None) or attendance_date
+            actual_in_dt = _coerce_datetime_like(datetime.combine(actual_in_date, attendance.attendance_clock_in), dt_now) if attendance and getattr(attendance, "attendance_clock_in", None) else None
+            shift_start_dt, shift_end_dt = _shift_bounds_for_note_context(attendance_date, start_time_sec, end_time_sec)
+            _, earliest_check_out_dt, valid_check_in_for_note = _compute_mobile_effective_start_and_earliest_checkout(
+                shift_start_dt=shift_start_dt,
+                shift_end_dt=shift_end_dt,
+                actual_check_in_dt=actual_in_dt,
+                clock_in_type=rules.get("clock_in_type") if isinstance(rules, dict) else None,
+                flex_seconds=grace_seconds,
+            )
+            invalid_check_in = bool(actual_in_dt and not valid_check_in_for_note)
+            if earliest_check_out_dt:
+                earliest_check_out_hhmm = earliest_check_out_dt.strftime("%H:%M")
+        except Exception:
+            earliest_check_out_hhmm = None
+            invalid_check_in = False
+
         response_payload = {
             "message": "Clocked-In",
             "attendance_date": str(attendance_date),
             "has_attendance": bool(attendance),
             "first_check_in": attendance.attendance_clock_in.strftime("%I:%M %p") if attendance and getattr(attendance, "attendance_clock_in", None) else None,
             "last_check_out": attendance.attendance_clock_out.strftime("%I:%M %p") if attendance and getattr(attendance, "attendance_clock_out", None) else None,
-            "missing_check_in": False,
-            "late_by": None,
+            "missing_check_in": bool(invalid_check_in),
+            "invalid_check_in": bool(invalid_check_in),
+            "late_by": late_by_hhmm,
             "work_hours_below_minimum": False,
             "checked_out_early": False,
             "checked_out_early_by": None,
@@ -855,6 +948,7 @@ class ClockInAPIView(APIView):
             "in_related_work_type_request_id": getattr(attendance, "in_related_work_type_request_id", None) if attendance else None,
             "out_related_work_type_request_id": getattr(attendance, "out_related_work_type_request_id", None) if attendance else None,
             "minimum_working_hour": _format_minimum_hour(minimum_hour),
+            "earliest_check_out": earliest_check_out_hhmm,
             "server_now": dt_now.isoformat(),
             "server_time": dt_now.strftime("%H:%M"),
         }
@@ -933,6 +1027,7 @@ class ClockOutAPIView(APIView):
         except Exception:
             rules = {"cutoff_in_dt": None, "cutoff_out_dt": None}
 
+        grace_seconds = int((rules or {}).get("grace_seconds") or 0)
         window_end_dt = rules.get("check_out_window_end_dt") or rules.get("cutoff_out_dt")
         window_end_dt = _coerce_datetime_like(window_end_dt, dt_now) if window_end_dt else None
 
@@ -988,6 +1083,8 @@ class ClockOutAPIView(APIView):
         worked_below_minimum = False
         checked_out_early = False
         checked_out_early_by = None
+        earliest_check_out_hhmm = None
+        invalid_check_in = False
         first_check_in = attendance.attendance_clock_in.strftime("%I:%M %p") if attendance and getattr(attendance, "attendance_clock_in", None) else None
         last_check_out = attendance.attendance_clock_out.strftime("%I:%M %p") if attendance and getattr(attendance, "attendance_clock_out", None) else None
         late_by_hhmm = None
@@ -1008,6 +1105,25 @@ class ClockOutAPIView(APIView):
             late_by_hhmm = None
 
         try:
+            actual_in_date = getattr(attendance, "attendance_clock_in_date", None) or attendance_date
+            actual_in_dt = _coerce_datetime_like(datetime.combine(actual_in_date, attendance.attendance_clock_in), dt_now) if attendance and getattr(attendance, "attendance_clock_in", None) else None
+            shift_start_dt, shift_end_dt = _shift_bounds_for_note_context(attendance_date, start_time_sec, end_time_sec)
+            _, earliest_check_out_dt, valid_check_in_for_note = _compute_mobile_effective_start_and_earliest_checkout(
+                shift_start_dt=shift_start_dt,
+                shift_end_dt=shift_end_dt,
+                actual_check_in_dt=actual_in_dt,
+                clock_in_type=rules.get("clock_in_type") if isinstance(rules, dict) else None,
+                flex_seconds=grace_seconds,
+            )
+            invalid_check_in = bool(actual_in_dt and not valid_check_in_for_note)
+            if earliest_check_out_dt:
+                earliest_check_out_hhmm = earliest_check_out_dt.strftime("%H:%M")
+        except Exception:
+            earliest_check_out_dt = None
+            invalid_check_in = False
+            earliest_check_out_hhmm = None
+
+        try:
             min_formatted = _format_minimum_hour(minimum_hour)
             worked_hour_value = getattr(attendance, "attendance_worked_hour", None) or "00:00"
             if attendance and getattr(attendance, "attendance_clock_in", None) and getattr(attendance, "attendance_clock_out", None) and min_formatted:
@@ -1016,17 +1132,12 @@ class ClockOutAPIView(APIView):
             worked_below_minimum = False
 
         try:
-            if attendance and getattr(attendance, "attendance_clock_out", None) and end_time_sec is not None:
-                is_night_shift = start_time_sec > end_time_sec and start_time_sec != end_time_sec
-                planned_out_hhmm = f"{(int(end_time_sec) // 3600) % 24:02d}:{(int(end_time_sec) % 3600) // 60:02d}"
-                planned_out_time = datetime.strptime(planned_out_hhmm, "%H:%M").time()
-                planned_out_date = attendance_date + timedelta(days=1) if is_night_shift else attendance_date
-                planned_out_dt = _coerce_datetime_like(datetime.combine(planned_out_date, planned_out_time), dt_now)
+            if attendance and getattr(attendance, "attendance_clock_out", None) and earliest_check_out_dt is not None:
                 actual_out_date = getattr(attendance, "attendance_clock_out_date", None) or attendance_date
                 actual_out_dt = _coerce_datetime_like(datetime.combine(actual_out_date, attendance.attendance_clock_out), dt_now)
-                checked_out_early = bool(actual_out_dt and planned_out_dt and actual_out_dt < planned_out_dt)
+                checked_out_early = bool(actual_out_dt and actual_out_dt < earliest_check_out_dt)
                 if checked_out_early:
-                    early_s = int((planned_out_dt - actual_out_dt).total_seconds())
+                    early_s = int((earliest_check_out_dt - actual_out_dt).total_seconds())
                     if early_s > 0:
                         checked_out_early_by = f"{early_s // 3600:02d}:{(early_s % 3600) // 60:02d}"
         except Exception:
@@ -1064,6 +1175,7 @@ class ClockOutAPIView(APIView):
             "first_check_in": first_check_in,
             "last_check_out": last_check_out,
             "missing_check_in": bool(missing_check_in),
+            "invalid_check_in": bool(invalid_check_in),
             "updated": bool(allow_update),
             "late_by": late_by_hhmm,
             "work_hours_below_minimum": bool(worked_below_minimum),
@@ -1088,6 +1200,7 @@ class ClockOutAPIView(APIView):
             "in_related_work_type_request_id": getattr(attendance, "in_related_work_type_request_id", None) if attendance else None,
             "out_related_work_type_request_id": getattr(attendance, "out_related_work_type_request_id", None) if attendance else None,
             "minimum_working_hour": _format_minimum_hour(minimum_hour),
+            "earliest_check_out": earliest_check_out_hhmm,
             "header_note_work_hours_below_minimum": bool(note_work_hours_below_minimum),
             "header_note_work_hours_shortfall": note_work_hours_shortfall,
             "server_now": dt_now.isoformat(),
@@ -3068,8 +3181,9 @@ class CheckingStatus(APIView):
         worked_hours = f"{worked_minutes//60:02d}:{worked_minutes%60:02d}"
 
         # Missing check-in flag (for UI messaging)
+        invalid_check_in = bool(clock_in_t and not valid_check_in_for_note)
         missing_check_in = (
-            (not clock_in_t)
+            ((not clock_in_t) or invalid_check_in)
             and (
                 bool(clock_out_t)
                 or (bool(check_in_cutoff_has_passed) and not bool(check_out_cutoff_has_passed))
@@ -3092,35 +3206,38 @@ class CheckingStatus(APIView):
         # Window end is fixed at cutoff_out when available (per spec); fallback to helper-computed end.
         out_window_end = cutoff_out_dt or check_out_window_end_dt
 
+        earliest_check_out_dt = None
+        effective_start_dt = None
+        valid_check_in_for_note = True
+
         if out_mode == AttendanceWorkMode.ON_DUTY:
             # ON_DUTY uses the same checkout window boundaries as normal attendance.
             out_window_start = check_out_window_start_dt
+            try:
+                effective_start_dt, earliest_check_out_dt, valid_check_in_for_note = _compute_mobile_effective_start_and_earliest_checkout(
+                    shift_start_dt=shift_start_dt,
+                    shift_end_dt=shift_end_dt,
+                    actual_check_in_dt=in_dt,
+                    clock_in_type=clock_in_type,
+                    flex_seconds=grace_seconds,
+                )
+            except Exception:
+                effective_start_dt, earliest_check_out_dt, valid_check_in_for_note = None, None, True
         else:
-            # WFO/WFA: dynamic checkout start follows actual check-in time, but clamped:
-            # - if checked-in earlier than shift start -> use shift start
-            # - if checked-in later than shift start + grace -> cap to shift start + grace
             out_window_start = check_out_window_start_dt
             try:
-                if in_dt and shift_start_dt and shift_end_dt:
-                    grace_sec = int(grace_seconds or 0)
-                    min_start = shift_start_dt
-                    max_start = shift_start_dt + timedelta(seconds=grace_sec)
-                    eff_in = in_dt
-                    if eff_in < min_start:
-                        eff_in = min_start
-                    # Cap check-in used for OUT-window math at shift_start + grace.
-                    # IMPORTANT: grace can be 0, in which case max_start == shift_start.
-                    # We still need to cap (otherwise checkout window would drift later).
-                    elif eff_in > max_start:
-                        eff_in = max_start
-
-                    shift_duration = shift_end_dt - shift_start_dt
-                    dyn_end = eff_in + shift_duration
-
-                    early_grace_min = int(((rules or {}).get("window_config") or {}).get("early_checkout_minutes") or 0)
-                    out_window_start = dyn_end - timedelta(minutes=early_grace_min)
+                effective_start_dt, earliest_check_out_dt, valid_check_in_for_note = _compute_mobile_effective_start_and_earliest_checkout(
+                    shift_start_dt=shift_start_dt,
+                    shift_end_dt=shift_end_dt,
+                    actual_check_in_dt=in_dt,
+                    clock_in_type=clock_in_type,
+                    flex_seconds=grace_seconds,
+                )
+                if earliest_check_out_dt:
+                    early_grace_min = int((((rules or {}).get("window_config") or {}).get("early_checkout_minutes") or 0))
+                    out_window_start = earliest_check_out_dt - timedelta(minutes=early_grace_min)
             except Exception:
-                pass
+                effective_start_dt, earliest_check_out_dt, valid_check_in_for_note = None, None, True
 
         def _in_window_ok(start_dt, end_dt) -> bool:
             if start_dt and dt_now < start_dt:
@@ -3199,7 +3316,14 @@ class CheckingStatus(APIView):
             return f"{h:02d}:{m:02d}"
 
         # Derived helpers for mobile UI (optional; safe defaults when absent)
-        planned_check_out_hhmm = _sec_to_hhmm(end_time_sec)
+        planned_check_out_hhmm = None
+        if earliest_check_out_dt:
+            try:
+                planned_check_out_hhmm = earliest_check_out_dt.strftime("%H:%M")
+            except Exception:
+                planned_check_out_hhmm = None
+        if planned_check_out_hhmm is None:
+            planned_check_out_hhmm = _sec_to_hhmm(end_time_sec)
         late_by_hhmm = None
         work_hours_below_minimum = False
         work_hours_shortfall_hhmm = None
@@ -3244,21 +3368,15 @@ class CheckingStatus(APIView):
                 except Exception:
                     pass
 
-            # Early check-out is based on scheduled end time
-            if clock_in_t and clock_out_t and planned_check_out_hhmm:
+            # Early check-out is based on the mobile earliest check-out truth.
+            if clock_in_t and clock_out_t and earliest_check_out_dt:
                 try:
                     out_date = getattr(attendance, "attendance_clock_out_date", None) or attendance_date
                     out_dt = _coerce_datetime_like(datetime.combine(out_date, clock_out_t), dt_now)
 
-                    planned_out_date = attendance_date + timedelta(days=1) if is_night_shift else attendance_date
-                    planned_out_time = datetime.strptime(planned_check_out_hhmm, "%H:%M").time()
-                    planned_out_dt = _coerce_datetime_like(
-                        datetime.combine(planned_out_date, planned_out_time), dt_now
-                    )
-
-                    if out_dt and planned_out_dt and out_dt < planned_out_dt:
+                    if out_dt and earliest_check_out_dt and out_dt < earliest_check_out_dt:
                         checked_out_early = True
-                        early_s = int((planned_out_dt - out_dt).total_seconds())
+                        early_s = int((earliest_check_out_dt - out_dt).total_seconds())
                         if early_s > 0:
                             checked_out_early_by_hhmm = f"{early_s // 3600:02d}:{(early_s % 3600) // 60:02d}"
                 except Exception:
@@ -3364,6 +3482,7 @@ class CheckingStatus(APIView):
             "check_in_window_start": in_window_start.strftime("%H:%M") if in_window_start else None,
             "check_in_window_end": in_window_end.strftime("%H:%M") if in_window_end else None,
             "check_out_window_start": out_window_start.strftime("%H:%M") if out_window_start else None,
+            "earliest_check_out": earliest_check_out_dt.strftime("%H:%M") if earliest_check_out_dt else None,
             "check_out_window_end": out_window_end.strftime("%H:%M") if out_window_end else None,
             "check_in_block_reason": check_in_block_reason,
             "check_out_block_reason": check_out_block_reason,
