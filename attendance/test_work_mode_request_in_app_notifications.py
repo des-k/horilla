@@ -125,14 +125,14 @@ class WorkModeInAppNotificationTests(AttendanceApiIntegrationMixin, TestCase):
         self.assertEqual(self._notifications_for(self.owner_user).count(), 2)
 
     def test_on_duty_document_upload_verify_and_reject_emit_expected_notifications(self):
-        req = self._create_on_duty(uploaded_files=[])
+        req = self._create_on_duty(uploaded_files=[self._pdf_file('initial.pdf')])
         Notification.objects.all().delete()
 
         with patch.object(WorkModeRequestActions, '_recompute', lambda req: None):
             WorkModeRequestActions.update_request(
                 req,
                 actor=self.owner,
-                uploaded_files=[self._pdf_file()],
+                uploaded_files=[self._pdf_file('updated.pdf')],
                 remark='Initial evidence',
             )
 
