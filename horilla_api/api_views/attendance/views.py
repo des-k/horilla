@@ -3586,6 +3586,16 @@ class AttendancePunchingHistoryAPIView(APIView):
         options = [{"id": emp.id, "name": self._employee_name(emp)} for emp in employees]
         return options, show_filter, can_view_all, default_employee_id
 
+    def _normalize_employee_scope(self, scope_result):
+        if len(scope_result) == 4:
+            return scope_result
+        if len(scope_result) == 3:
+            employee_options, show_employee_filter, default_employee_id = scope_result
+            has_all_option = any(str(item.get("id")) == "all" for item in employee_options if isinstance(item, dict))
+            can_view_all = bool(has_all_option or show_employee_filter)
+            return employee_options, show_employee_filter, can_view_all, default_employee_id
+        raise ValueError("Unexpected employee scope result shape")
+
     def get_queryset(self, request):
         queryset = AttendancePunchingHistory.objects.select_related("employee_id", "attendance_id").all()
         employee_qs, _, _, _ = get_attendance_subject_employees(
@@ -3605,7 +3615,7 @@ class AttendancePunchingHistoryAPIView(APIView):
         if start_date > end_date:
             start_date, end_date = end_date, start_date
 
-        employee_options, show_employee_filter, can_view_all, default_employee_id = self._employee_scope(request)
+        employee_options, show_employee_filter, can_view_all, default_employee_id = self._normalize_employee_scope(self._employee_scope(request))
         allow_all_employees = bool(can_view_all and show_employee_filter)
         if allow_all_employees:
             employee_options = [{"id": "all", "name": "All Employee"}] + employee_options
