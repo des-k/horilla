@@ -20,7 +20,8 @@
               {% endfor %}
             </select>
           {% else %}
-            <input type="text" class="oh-input w-100" value="{{ self_employee }}" readonly>
+            <input type="hidden" name="employee_id" value="{{ punch_filter_data.employee_id|default:selected_scope_employee.id }}">
+            <input type="text" class="oh-input w-100" value="{{ selected_scope_employee|default:"" }}" readonly>
           {% endif %}
         </div>
 
