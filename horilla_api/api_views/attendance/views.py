@@ -2200,7 +2200,6 @@ class WorkModeRequestView(APIView):
                 end_date=serializer.validated_data["end_date"],
                 reason=serializer.validated_data["reason"],
                 duty_destination_location=serializer.validated_data.get("duty_destination_location"),
-                duty_destination_detail=serializer.validated_data.get("duty_destination_detail"),
                 uploaded_files=uploaded,
             )
         except WorkModeRequestConsistencyError as exc:
@@ -2229,7 +2228,7 @@ class WorkModeRequestView(APIView):
         }
         if any(k in data for k in forbidden):
             return Response(
-                {"error": "You can only update note, destination/detail, and attachments from this endpoint."},
+                {"error": "You can only update note, destination, and attachments from this endpoint."},
                 status=400,
             )
 
@@ -2247,7 +2246,6 @@ class WorkModeRequestView(APIView):
                 request=request,
                 reason=note,
                 duty_destination_location=data.get("duty_destination_location"),
-                duty_destination_detail=data.get("duty_destination_detail"),
                 uploaded_files=uploaded,
                 remark=remark,
             )
