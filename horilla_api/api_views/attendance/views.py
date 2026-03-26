@@ -3178,16 +3178,6 @@ class CheckingStatus(APIView):
         worked_minutes = max(0, int(worked_seconds // 60))
         worked_hours = f"{worked_minutes//60:02d}:{worked_minutes%60:02d}"
 
-        # Missing check-in flag (for UI messaging)
-        invalid_check_in = bool(clock_in_t and not valid_check_in_for_note)
-        missing_check_in = (
-            ((not clock_in_t) or invalid_check_in)
-            and (
-                bool(clock_out_t)
-                or (bool(check_in_cutoff_has_passed) and not bool(check_out_cutoff_has_passed))
-            )
-        )
-
         # Action permissions
         in_allowed = _is_punch_allowed(in_mode, in_req, in_source)
         out_allowed = _is_punch_allowed(out_mode, out_req, out_source)
@@ -3236,6 +3226,18 @@ class CheckingStatus(APIView):
                     out_window_start = earliest_check_out_dt - timedelta(minutes=early_grace_min)
             except Exception:
                 effective_start_dt, earliest_check_out_dt, valid_check_in_for_note = None, None, True
+
+        # Missing/invalid check-in flag for UI messaging.
+        # Compute this only after valid_check_in_for_note has been resolved above,
+        # otherwise the status endpoint can crash when an existing IN punch is present.
+        invalid_check_in = bool(clock_in_t and not valid_check_in_for_note)
+        missing_check_in = (
+            ((not clock_in_t) or invalid_check_in)
+            and (
+                bool(clock_out_t)
+                or (bool(check_in_cutoff_has_passed) and not bool(check_out_cutoff_has_passed))
+            )
+        )
 
         def _in_window_ok(start_dt, end_dt) -> bool:
             if start_dt and dt_now < start_dt:
