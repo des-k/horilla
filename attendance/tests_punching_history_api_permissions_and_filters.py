@@ -2,7 +2,8 @@ from datetime import date, datetime, time, timedelta
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from django.test import SimpleTestCase, override_settings
+from django.test import SimpleTestCase, TestCase, override_settings
+from django.urls import reverse
 from django.utils import timezone
 from rest_framework.test import APITestCase, APIRequestFactory, force_authenticate
 
@@ -404,8 +405,10 @@ class AttendancePunchingHistoryApiRepresentationTests(AttendanceApiIntegrationMi
         self.assertTrue(by_id[out_punch.id]['accepted_to_attendance'])
         self.assertEqual(by_id[in_punch.id]['decision_status'], in_punch.decision_status)
         self.assertEqual(by_id[out_punch.id]['decision_status'], out_punch.decision_status)
-        self.assertEqual(by_id[in_punch.id]['decision_source'], in_punch.decision_source)
-        self.assertEqual(by_id[out_punch.id]['decision_source'], out_punch.decision_source)
+        self.assertNotIn('decision_source', by_id[in_punch.id])
+        self.assertNotIn('decision_source', by_id[out_punch.id])
+        self.assertNotIn('work_mode', by_id[in_punch.id])
+        self.assertNotIn('work_mode', by_id[out_punch.id])
         self.assertEqual(by_id[in_punch.id]['source'], 'Biometric')
         self.assertEqual(by_id[out_punch.id]['source'], 'Mobile')
         self.assertEqual(data['selected_employee_id'], self.employee.id)
@@ -466,3 +469,120 @@ class AttendancePunchingHistoryApiRepresentationTests(AttendanceApiIntegrationMi
         self.assertEqual(response.status_code, 200)
         self.assertEqual(data['results'], baseline_data['results'])
         self.assertEqual([item['id'] for item in data['results']], [latest_out.id, early_out.id, in_punch.id])
+
+
+class AttendancePunchingHistoryVisibilityTests(AttendanceApiIntegrationMixin, TestCase):
+    endpoint = '/api/attendance/punching-history/'
+
+    def setUp(self):
+        super().setUp()
+        self.target_date = date.today() + timedelta(days=20)
+        self.owner_user, self.owner = self.create_employee('VisibilityOwner')
+        self.manager_user, self.manager = self.create_employee('VisibilityManager')
+        self.subordinate_user, self.subordinate = self.create_employee('VisibilitySubordinate', manager=self.manager)
+        self.admin_user, self.admin = self.create_employee('VisibilityAdmin', is_superuser=True)
+        AttendancePunchingHistory.objects.create(
+            employee_id=self.owner,
+            attendance_date=self.target_date,
+            punch_timestamp=self.aware_dt(self.target_date.year, self.target_date.month, self.target_date.day, 8, 5),
+            source=AttendancePunchSource.MOBILE,
+            punch_direction=AttendancePunchDirection.IN,
+            raw_employee_identifier='VIS-OWNER',
+            decision_status=PunchDecisionStatus.ACCEPTED,
+            decision_source='Leave',
+            work_mode=AttendanceWorkMode.WFA,
+            reason='Owner visible row',
+        )
+        AttendancePunchingHistory.objects.create(
+            employee_id=self.subordinate,
+            attendance_date=self.target_date,
+            punch_timestamp=self.aware_dt(self.target_date.year, self.target_date.month, self.target_date.day, 8, 10),
+            source=AttendancePunchSource.BIOMETRIC,
+            punch_direction=AttendancePunchDirection.IN,
+            raw_employee_identifier='VIS-SUB',
+            decision_status=PunchDecisionStatus.ACCEPTED,
+            decision_source='On Duty',
+            work_mode=AttendanceWorkMode.ON_DUTY,
+            reason='Manager visible row',
+        )
+
+    def _api_json(self, user, params):
+        response = self.auth_client(user).get(self.endpoint, params, format='json')
+        self._clear_request_context()
+        self.assertEqual(response.status_code, 200)
+        return response.json()
+
+    def _force_login(self, user):
+        self.client.force_login(user)
+        session = self.client.session
+        session['selected_company'] = 'all'
+        session.save()
+
+    def test_api_admin_sees_decision_source_and_work_mode(self):
+        data = self._api_json(self.admin_user, {
+            'employee_id': self.owner.id,
+            'start_date': self.target_date.isoformat(),
+            'end_date': self.target_date.isoformat(),
+        })
+        self.assertEqual(len(data['results']), 1)
+        row = data['results'][0]
+        self.assertIn('decision_source', row)
+        self.assertIn('work_mode', row)
+        self.assertEqual(row['decision_source'], 'Leave')
+        self.assertEqual(row['work_mode'], AttendanceWorkMode.WFA)
+
+    def test_api_employee_hides_decision_source_and_work_mode(self):
+        data = self._api_json(self.owner_user, {
+            'start_date': self.target_date.isoformat(),
+            'end_date': self.target_date.isoformat(),
+        })
+        self.assertEqual(len(data['results']), 1)
+        row = data['results'][0]
+        self.assertNotIn('decision_source', row)
+        self.assertNotIn('work_mode', row)
+
+    def test_api_manager_hides_decision_source_and_work_mode(self):
+        data = self._api_json(self.manager_user, {
+            'employee_id': self.subordinate.id,
+            'start_date': self.target_date.isoformat(),
+            'end_date': self.target_date.isoformat(),
+        })
+        self.assertEqual(len(data['results']), 1)
+        row = data['results'][0]
+        self.assertNotIn('decision_source', row)
+        self.assertNotIn('work_mode', row)
+
+    def test_web_admin_shows_audit_columns(self):
+        self._force_login(self.admin_user)
+        response = self.client.get(reverse('attendance-punching-history-view'), {
+            'employee_id': self.owner.id,
+            'punch_date_from': self.target_date.isoformat(),
+            'punch_date_till': self.target_date.isoformat(),
+        })
+        self.assertEqual(response.status_code, 200)
+        content = response.content.decode()
+        self.assertIn('Decision Source', content)
+        self.assertIn('Work Mode', content)
+
+    def test_web_employee_hides_audit_columns(self):
+        self._force_login(self.owner_user)
+        response = self.client.get(reverse('attendance-punching-history-view'), {
+            'punch_date_from': self.target_date.isoformat(),
+            'punch_date_till': self.target_date.isoformat(),
+        })
+        self.assertEqual(response.status_code, 200)
+        content = response.content.decode()
+        self.assertNotIn('Decision Source', content)
+        self.assertNotIn('Work Mode', content)
+
+    def test_web_manager_hides_audit_columns(self):
+        self._force_login(self.manager_user)
+        response = self.client.get(reverse('attendance-punching-history-view'), {
+            'employee_id': self.subordinate.id,
+            'punch_date_from': self.target_date.isoformat(),
+            'punch_date_till': self.target_date.isoformat(),
+        })
+        self.assertEqual(response.status_code, 200)
+        content = response.content.decode()
+        self.assertNotIn('Decision Source', content)
+        self.assertNotIn('Work Mode', content)
