@@ -16,8 +16,14 @@ from attendance.services.work_type_request_exceptions import WorkModeRequestCons
 from attendance.services.work_type_request_permissions import build_permission_flags
 
 logger = logging.getLogger(__name__)
-from attendance.services.attendance_request_files import build_attachment_url as build_attendance_attachment_url
-from attendance.services.work_type_request_files import build_attachment_url as build_work_mode_attachment_url
+from attendance.services.attendance_request_files import (
+    build_attachment_metadata as build_attendance_attachment_metadata,
+    build_attachment_url as build_attendance_attachment_url,
+)
+from attendance.services.work_type_request_files import (
+    build_attachment_metadata as build_work_mode_attachment_metadata,
+    build_attachment_url as build_work_mode_attachment_url,
+)
 
 
 class AttendanceSerializer(serializers.ModelSerializer):
@@ -31,6 +37,7 @@ class AttendanceSerializer(serializers.ModelSerializer):
     badge_id = serializers.CharField(source="employee_id.badge_id", read_only=True)
     employee_profile_url = serializers.SerializerMethodField(read_only=True)
     # Direct attachments uploaded on the attendance request
+    attachments = serializers.SerializerMethodField(read_only=True)
     attachment_urls = serializers.SerializerMethodField(read_only=True)
     # Alias for UI parity with Work Type Requests
     file_urls = serializers.SerializerMethodField(read_only=True)
@@ -71,21 +78,29 @@ class AttendanceSerializer(serializers.ModelSerializer):
             )
         return data
 
-    def get_attachment_urls(self, obj):
+    def get_attachments(self, obj):
         try:
             from attendance.services.attendance_request_access import iter_request_attachments
             request = self.context.get("request") if hasattr(self, "context") else None
-            urls = []
+            attachments = []
             for f in iter_request_attachments(obj):
                 try:
-                    u = build_attendance_attachment_url(request, obj, f) if request is not None else getattr(getattr(f, "file", None), "url", None)
-                    if u:
-                        urls.append(u)
+                    attachments.append(
+                        build_attendance_attachment_metadata(
+                            request,
+                            obj,
+                            f,
+                            include_delete_url=False,
+                        )
+                    )
                 except Exception:
                     continue
-            return urls
+            return attachments
         except Exception:
             return []
+
+    def get_attachment_urls(self, obj):
+        return [item.get("url") for item in self.get_attachments(obj) if item.get("url")]
 
     def get_file_urls(self, obj):
         # Backward/UX compatibility with WorkModeRequestSerializer
@@ -111,6 +126,7 @@ class AttendanceRequestSerializer(serializers.ModelSerializer):
     employee_profile_url = serializers.SerializerMethodField(read_only=True)
 
     # Direct attachments uploaded on the attendance request
+    attachments = serializers.SerializerMethodField(read_only=True)
     attachment_urls = serializers.SerializerMethodField(read_only=True)
     # Alias for UI parity with Work Type Requests
     file_urls = serializers.SerializerMethodField(read_only=True)
@@ -203,21 +219,29 @@ class AttendanceRequestSerializer(serializers.ModelSerializer):
             validated_data.pop("employee_id")
         return super().update(instance, validated_data)
 
-    def get_attachment_urls(self, obj):
+    def get_attachments(self, obj):
         try:
             from attendance.services.attendance_request_access import iter_request_attachments
             request = self.context.get("request") if hasattr(self, "context") else None
-            urls = []
+            attachments = []
             for f in iter_request_attachments(obj):
                 try:
-                    u = build_attendance_attachment_url(request, obj, f) if request is not None else getattr(getattr(f, "file", None), "url", None)
-                    if u:
-                        urls.append(u)
+                    attachments.append(
+                        build_attendance_attachment_metadata(
+                            request,
+                            obj,
+                            f,
+                            include_delete_url=True,
+                        )
+                    )
                 except Exception:
                     continue
-            return urls
+            return attachments
         except Exception:
             return []
+
+    def get_attachment_urls(self, obj):
+        return [item.get("url") for item in self.get_attachments(obj) if item.get("url")]
 
     def get_file_urls(self, obj):
         # Backward/UX compatibility with WorkModeRequestSerializer
@@ -409,6 +433,7 @@ class WorkModeRequestSerializer(serializers.ModelSerializer):
     )
     badge_id = serializers.CharField(source="employee_id.badge_id", read_only=True)
     employee_profile_url = serializers.SerializerMethodField(read_only=True)
+    attachments = serializers.SerializerMethodField(read_only=True)
     attachment_urls = serializers.SerializerMethodField(read_only=True)
     file_urls = serializers.SerializerMethodField(read_only=True)
     approved_by_name = serializers.SerializerMethodField(read_only=True)
@@ -709,25 +734,25 @@ class WorkModeRequestSerializer(serializers.ModelSerializer):
                 continue
             seen.add(fid)
             request = self._request()
-            url = build_work_mode_attachment_url(request, obj, f) if request is not None else None
-            out.append({
-                "id": fid,
-                "name": getattr(getattr(f, "file", None), "name", None),
-                "url": url,
-            })
+            metadata = build_work_mode_attachment_metadata(request, obj, f)
+            metadata["id"] = fid
+            out.append(metadata)
         return out
 
-    def get_attachment_urls(self, obj):
+    def get_attachments(self, obj):
         try:
             resolver = getattr(obj, "current_document_files", None)
             files = resolver() if callable(resolver) else []
             files = files or []
-            return [item.get("url") for item in self._serialize_file_links(obj, files) if item.get("url")]
+            return self._serialize_file_links(obj, files)
         except WorkModeRequestConsistencyError:
-            logger.exception("Failed to serialize attachment URLs for work mode request %s", getattr(obj, "id", None))
+            logger.exception("Failed to serialize attachments for work mode request %s", getattr(obj, "id", None))
             return []
         except Exception:
             return []
+
+    def get_attachment_urls(self, obj):
+        return [item.get("url") for item in self.get_attachments(obj) if item.get("url")]
 
     def get_file_urls(self, obj):
         return self.get_attachment_urls(obj)
