@@ -2182,6 +2182,8 @@ class WorkModeRequestView(APIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
+        data["employee_id"] = getattr(my_emp, "id", my_emp)
+
         try:
             uploaded = self._collect_uploaded_files(request)
         except ValidationError as exc:
