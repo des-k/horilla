@@ -445,6 +445,7 @@ class WorkModeRequestSerializer(serializers.ModelSerializer):
         fields = "__all__"
         extra_kwargs = {
             "employee_id": {"required": False},
+            "files": {"read_only": True},
         }
 
     def _request(self):
