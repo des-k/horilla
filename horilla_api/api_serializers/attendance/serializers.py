@@ -14,7 +14,6 @@ from attendance.services.work_type_request_rules import (
 )
 from attendance.services.work_type_request_exceptions import WorkModeRequestConsistencyError
 from attendance.services.work_type_request_permissions import build_permission_flags
-from attendance.services.attendance_access import is_admin_employee
 
 logger = logging.getLogger(__name__)
 from attendance.services.attendance_request_files import build_attachment_url as build_attendance_attachment_url
@@ -885,15 +884,21 @@ class AttendancePunchingHistorySerializer(serializers.ModelSerializer):
             "raw_timestamp",
         ]
 
-    def _request_user_is_admin(self) -> bool:
+    def _can_view_audit_fields(self):
         request = self.context.get("request")
-        user = getattr(request, "user", None) if request is not None else None
-        employee = getattr(user, "employee_get", None) if user is not None else None
-        return bool(is_admin_employee(employee=employee, user=user))
+        user = getattr(request, "user", None)
+        if not user:
+            return False
+        try:
+            if getattr(user, "is_superuser", False):
+                return True
+            return bool(user.has_perm("attendance.change_attendance"))
+        except Exception:
+            return False
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
-        if not self._request_user_is_admin():
+        if not self._can_view_audit_fields():
             data.pop("decision_source", None)
             data.pop("work_mode", None)
         return data
