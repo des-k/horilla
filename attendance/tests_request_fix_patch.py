@@ -118,12 +118,23 @@ class AttendanceAttachmentUrlTests(SimpleTestCase):
         attendance = Attendance(id=5)
 
         with patch("attendance.services.attendance_request_access.iter_request_attachments", return_value=[fake_file]), patch(
-            "horilla_api.api_serializers.attendance.serializers.build_attendance_attachment_url",
-            return_value="https://example.test/protected/attendance/5/1?token=abc",
+            "horilla_api.api_serializers.attendance.serializers.build_attendance_attachment_metadata",
+            return_value={
+                "id": 1,
+                "name": "proof.pdf",
+                "mime_type": "application/pdf",
+                "size": 123,
+                "view_url": "https://example.test/protected/attendance/5/1/view?token=abc",
+                "download_url": "https://example.test/protected/attendance/5/1/download?token=abc",
+                "url": "https://example.test/protected/attendance/5/1/view?token=abc",
+            },
         ):
             urls = serializer.get_attachment_urls(attendance)
+            attachments = serializer.get_attachments(attendance)
 
-        self.assertEqual(urls, ["https://example.test/protected/attendance/5/1?token=abc"])
+        self.assertEqual(urls, ["https://example.test/protected/attendance/5/1/view?token=abc"])
+        self.assertEqual(attachments[0]["name"], "proof.pdf")
+        self.assertEqual(attachments[0]["mime_type"], "application/pdf")
 
 
 class WorkModeSerializerTests(SimpleTestCase):
@@ -150,13 +161,22 @@ class WorkModeSerializerTests(SimpleTestCase):
         dummy_file = SimpleNamespace(id=4, file=SimpleNamespace(name="media/private/proof.pdf"))
 
         with patch(
-            "horilla_api.api_serializers.attendance.serializers.build_work_mode_attachment_url",
-            return_value="https://example.test/protected/work-mode/9/4?token=def",
+            "horilla_api.api_serializers.attendance.serializers.build_work_mode_attachment_metadata",
+            return_value={
+                "id": 4,
+                "name": "proof.pdf",
+                "mime_type": "application/pdf",
+                "size": 456,
+                "view_url": "https://example.test/protected/work-mode/9/4/view?token=def",
+                "download_url": "https://example.test/protected/work-mode/9/4/download?token=def",
+                "url": "https://example.test/protected/work-mode/9/4/view?token=def",
+            },
         ):
             payload = serializer._serialize_file_links(dummy_req, [dummy_file])
 
-        self.assertEqual(payload[0]["url"], "https://example.test/protected/work-mode/9/4?token=def")
+        self.assertEqual(payload[0]["url"], "https://example.test/protected/work-mode/9/4/view?token=def")
         self.assertEqual(payload[0]["id"], 4)
+        self.assertEqual(payload[0]["mime_type"], "application/pdf")
 
 
 class PermissionFallbackTests(SimpleTestCase):
@@ -224,11 +244,11 @@ class AttachmentSecurityTests(SimpleTestCase):
         with patch('horilla_api.api_views.attendance.views.get_object_or_404', side_effect=[attendance, file_obj]), \
              patch('horilla_api.api_views.attendance.views.attendance_attachment_belongs_to_request', return_value=True), \
              patch('horilla_api.api_views.attendance.views.attendance_request_can_view_attachment', return_value=True), \
-             patch('horilla_api.api_views.attendance.views.verify_attendance_attachment_token', return_value=True), \
-             patch('horilla_api.api_views.attendance.views.FileResponse', return_value=SimpleNamespace(status_code=200)):
+             patch('horilla_api.api_views.attendance.views.verify_attendance_attachment_token', return_value=True):
             response = AttendanceRequestAttachmentDownloadView().get(request, 1, 2)
 
         self.assertEqual(response.status_code, 200)
+        self.assertEqual(response['Cache-Control'], 'private, no-store')
 
     def test_work_mode_download_source_requires_auth_and_valid_token(self):
         from pathlib import Path
