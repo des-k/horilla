@@ -1,16 +1,21 @@
 from __future__ import annotations
 
-import logging
-import os
 from dataclasses import dataclass
 from typing import Iterable
+
+import logging
 
 from django.core.signing import BadSignature, SignatureExpired, TimestampSigner
 from django.urls import reverse
 
 from attendance.models import WorkModeRequest
+from attendance.services.attachment_contract import (
+    attachment_mime_type,
+    attachment_name,
+    attachment_size,
+    preferred_attachment_url,
+)
 from attendance.services.work_type_request_permissions import can_manage_as_approver, is_owner
-
 
 SIGNER_SALT = "attendance.work_type_request_attachment"
 DEFAULT_MAX_AGE_SECONDS = 60 * 60 * 24
@@ -23,13 +28,6 @@ class AttachmentLink:
     file_id: int
     file_name: str
     url: str
-
-
-def _attachment_name(file_obj) -> str:
-    try:
-        return os.path.basename(getattr(file_obj.file, "name", "") or "attachment")
-    except Exception:
-        return "attachment"
 
 
 def attachment_belongs_to_request(req: WorkModeRequest, file_obj) -> bool:
@@ -60,17 +58,41 @@ def verify_attachment_token(req_id: int, file_id: int, token: str | None, *, max
     return value == f"{req_id}:{file_id}"
 
 
-def build_attachment_url(request, req: WorkModeRequest, file_obj) -> str:
-    path = reverse(
-        "attendance-work-type-request-attachment-download",
-        kwargs={"obj_id": req.id, "file_id": file_obj.id},
-    )
+def build_attachment_url(request, req: WorkModeRequest, file_obj, *, kind: str = "preferred") -> str:
+    if kind == "view":
+        route_name = "api-work-mode-request-attachment-view"
+    elif kind == "download":
+        route_name = "api-work-mode-request-attachment-download"
+    else:
+        route_name = None
+
     token = build_attachment_token(req.id, file_obj.id)
-    url = f"{path}?token={token}"
+    if route_name:
+        path = reverse(route_name, kwargs={"pk": req.id, "file_id": file_obj.id})
+        url = f"{path}?token={token}"
+    else:
+        metadata = build_attachment_metadata(request, req, file_obj)
+        url = preferred_attachment_url(metadata) or metadata.get("download_url") or metadata.get("view_url") or ""
+
     try:
         return request.build_absolute_uri(url)
     except Exception:
         return url
+
+
+def build_attachment_metadata(request, req: WorkModeRequest, file_obj) -> dict:
+    view_url = build_attachment_url(request, req, file_obj, kind="view")
+    download_url = build_attachment_url(request, req, file_obj, kind="download")
+    metadata = {
+        "id": getattr(file_obj, "id", None),
+        "name": attachment_name(file_obj),
+        "mime_type": attachment_mime_type(file_obj),
+        "size": attachment_size(file_obj),
+        "view_url": view_url,
+        "download_url": download_url,
+    }
+    metadata["url"] = preferred_attachment_url(metadata) or download_url or view_url
+    return metadata
 
 
 def request_can_view_attachment(request, req: WorkModeRequest) -> bool:
@@ -98,11 +120,12 @@ def build_attachment_links(request, req: WorkModeRequest, files: Iterable) -> li
         if file_id in seen:
             continue
         seen.add(file_id)
+        metadata = build_attachment_metadata(request, req, file_obj)
         links.append(
             AttachmentLink(
                 file_id=file_id,
-                file_name=_attachment_name(file_obj),
-                url=build_attachment_url(request, req, file_obj),
+                file_name=metadata.get("name") or "attachment",
+                url=metadata.get("url") or "",
             )
         )
     return links
