@@ -443,6 +443,9 @@ class WorkModeRequestSerializer(serializers.ModelSerializer):
     class Meta:
         model = WorkModeRequest
         fields = "__all__"
+        extra_kwargs = {
+            "employee_id": {"required": False},
+        }
 
     def _request(self):
         return self.context.get("request") if hasattr(self, "context") else None
