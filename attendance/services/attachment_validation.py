@@ -19,7 +19,7 @@ ALLOWED_ATTACHMENT_EXTENSIONS = (
 )
 
 ALLOWED_ATTACHMENT_MIME_TYPES = {
-    ".jpg": {"image/jpeg"},
+    ".jpg": {"image/jpeg", "image/jpg"},
     ".jpeg": {"image/jpeg"},
     ".png": {"image/png"},
     ".pdf": {"application/pdf"},
@@ -45,8 +45,12 @@ def validate_uploaded_files(uploaded_files: Iterable) -> None:
             )
         content_type = (getattr(uploaded, "content_type", None) or "").lower().strip()
         guessed_type, guessed_encoding = mimetypes.guess_type(name)
+        guessed_type = (guessed_type or "").lower().strip()
         allowed_mime_types = ALLOWED_ATTACHMENT_MIME_TYPES.get(ext, set())
-        effective_type = content_type or (guessed_type or "").lower().strip()
+        generic_types = {"application/octet-stream", "binary/octet-stream"}
+        effective_type = content_type
+        if not effective_type or effective_type in generic_types:
+            effective_type = guessed_type
         if allowed_mime_types and effective_type and effective_type not in allowed_mime_types:
             raise ValidationError(
                 _("MIME type mismatch for %(name)s. Allowed types: %(allowed)s."),
