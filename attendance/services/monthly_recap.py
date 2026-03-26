@@ -530,6 +530,9 @@ def _canonical_row_from_attendance(
         attendance_date,
     )
 
+    if (final_in_dt is None) != (final_out_dt is None):
+        return None
+
     display_in_mode = _session_mode(best_att, "IN") or _attendance_level_mode(best_att) or AttendanceWorkMode.WFO
     display_out_mode = _session_mode(best_att, "OUT") or display_in_mode
 
