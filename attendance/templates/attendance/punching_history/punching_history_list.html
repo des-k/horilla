@@ -24,8 +24,10 @@
             <div class="oh-sticky-table__th">{% trans "Punch Time" %}</div>
             <div class="oh-sticky-table__th">{% trans "Source" %}</div>
             <div class="oh-sticky-table__th">{% trans "Decision Status" %}</div>
+            {% if show_audit_fields %}
             <div class="oh-sticky-table__th">{% trans "Decision Source" %}</div>
             <div class="oh-sticky-table__th">{% trans "Work Mode" %}</div>
+            {% endif %}
             <div class="oh-sticky-table__th">{% trans "Device Info" %}</div>
             <div class="oh-sticky-table__th">{% trans "Photo" %}</div>
             <div class="oh-sticky-table__th">{% trans "Location" %}</div>
@@ -45,8 +47,10 @@
               </span>
             </div>
             <div class="oh-sticky-table__td ph-wrap">{{ punch.get_decision_status_display|default:'-' }}</div>
+            {% if show_audit_fields %}
             <div class="oh-sticky-table__td ph-wrap">{{ punch.decision_source|default:'-' }}</div>
             <div class="oh-sticky-table__td ph-wrap">{{ punch.get_work_mode_display|default:'-' }}</div>
+            {% endif %}
             <div class="oh-sticky-table__td ph-wrap">{{ punch.device_info|default:'-' }}</div>
             <div class="oh-sticky-table__td ph-nowrap">
               {% if punch.photo %}
