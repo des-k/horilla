@@ -332,21 +332,19 @@ def work_type_request_view(request):
     for row in getattr(my_page, "object_list", []):
         for key, value in build_permission_flags(request, row).items():
             setattr(row, key, value)
-        current_version = getattr(row, "current_document_version", None)
-        setattr(row, "current_document_version_number", getattr(current_version, "version_number", None))
         try:
-            setattr(row, "current_document_file_count", len(row.current_document_files()))
+            current_document_file_count = len(row.current_document_files())
         except Exception:
-            setattr(row, "current_document_file_count", row.files.count())
+            current_document_file_count = row.files.count()
+        setattr(row, "_ui_current_document_file_count", current_document_file_count)
     for row in getattr(approvals_page, "object_list", []):
         for key, value in build_permission_flags(request, row).items():
             setattr(row, key, value)
-        current_version = getattr(row, "current_document_version", None)
-        setattr(row, "current_document_version_number", getattr(current_version, "version_number", None))
         try:
-            setattr(row, "current_document_file_count", len(row.current_document_files()))
+            current_document_file_count = len(row.current_document_files())
         except Exception:
-            setattr(row, "current_document_file_count", row.files.count())
+            current_document_file_count = row.files.count()
+        setattr(row, "_ui_current_document_file_count", current_document_file_count)
 
     context = {
         "my_requests": my_page,
