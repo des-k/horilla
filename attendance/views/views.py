@@ -108,7 +108,7 @@ from attendance.models import (
 from attendance.views.handle_attendance_errors import handle_attendance_errors
 from attendance.views.process_attendance_data import process_attendance_data
 from attendance.services.punching_history import reconcile_attendance_punches
-from attendance.services.attendance_access import can_access_attendance_scope_views, get_attendance_subject_employees
+from attendance.services.attendance_access import can_access_attendance_scope_views, get_attendance_subject_employees, is_admin_employee
 from base.forms import AttendanceAllowedIPForm
 from base.methods import (
     choosesubordinates,
@@ -1445,6 +1445,12 @@ def _punching_history_forbidden_response(request):
     return HttpResponseForbidden(_("You dont have permission."))
 
 
+def _show_punching_history_audit_fields(request) -> bool:
+    user = getattr(request, "user", None)
+    employee = getattr(user, "employee_get", None) if user is not None else None
+    return bool(is_admin_employee(employee=employee, user=user))
+
+
 def _scoped_punching_history_queryset(request):
     queryset = AttendancePunchingHistory.objects.select_related("employee_id", "attendance_id").all()
     employee_options, _, _, _ = _get_punching_history_employee_scope(request)
@@ -1513,6 +1519,7 @@ def attendance_punching_history_view(request):
             "punch_ids": json.dumps([instance.id for instance in page_obj]),
             "show_employee_filter": show_employee_filter,
             "punch_filter_data": filter_data,
+            "show_audit_fields": _show_punching_history_audit_fields(request),
             "self_employee": getattr(request.user, "employee_get", None),
             "selected_scope_employee": _resolve_selected_scope_employee(
                 employee_options, filter_data.get("employee_id")
