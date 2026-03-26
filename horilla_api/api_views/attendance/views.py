@@ -1477,7 +1477,7 @@ class AttendanceRequestView(APIView):
         )
 
         # Never include own requests in approvals list (cannot self-approve)
-        approvals_qs = approvals_qs.exclude(employee_id__employee_user_id=request.user)
+        approvals_qs = approvals_qs.exclude(employee_id__employee_user_id=request.user).distinct()
 
         # 2) My requests: history (pending/approved/rejected/canceled) but not all attendance rows
         request_history_filter = (
