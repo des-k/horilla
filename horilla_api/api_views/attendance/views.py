@@ -1531,7 +1531,25 @@ class AttendanceRequestView(APIView):
         from attendance.services.attachment_validation import validate_uploaded_files
 
         # Self-only: force employee_id to the logged-in employee.
-        data = request.data.copy() if hasattr(request, 'data') else getattr(request, 'POST', {}).copy()
+        # For multipart requests with uploaded files, request.data.copy() can trigger
+        # deepcopy on UploadedFile objects and crash with
+        # `TypeError: cannot pickle '_io.BufferedRandom' object`.
+        if getattr(request, "FILES", None):
+            data = request.POST.copy()
+        else:
+            raw_data = getattr(request, "data", None)
+            if hasattr(raw_data, "copy"):
+                data = raw_data.copy()
+            elif raw_data is not None:
+                data = QueryDict("", mutable=True)
+                for key, value in dict(raw_data).items():
+                    if isinstance(value, (list, tuple)):
+                        for item in value:
+                            data.appendlist(key, item)
+                    else:
+                        data[key] = value
+            else:
+                data = getattr(request, "POST", QueryDict("", mutable=True)).copy()
         try:
             data['employee_id'] = request.user.employee_get.id
         except Exception:
