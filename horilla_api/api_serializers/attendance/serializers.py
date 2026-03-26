@@ -14,6 +14,7 @@ from attendance.services.work_type_request_rules import (
 )
 from attendance.services.work_type_request_exceptions import WorkModeRequestConsistencyError
 from attendance.services.work_type_request_permissions import build_permission_flags
+from attendance.services.attendance_access import is_admin_employee
 
 logger = logging.getLogger(__name__)
 from attendance.services.attendance_request_files import build_attachment_url as build_attendance_attachment_url
@@ -883,6 +884,19 @@ class AttendancePunchingHistorySerializer(serializers.ModelSerializer):
             "reason",
             "raw_timestamp",
         ]
+
+    def _request_user_is_admin(self) -> bool:
+        request = self.context.get("request")
+        user = getattr(request, "user", None) if request is not None else None
+        employee = getattr(user, "employee_get", None) if user is not None else None
+        return bool(is_admin_employee(employee=employee, user=user))
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        if not self._request_user_is_admin():
+            data.pop("decision_source", None)
+            data.pop("work_mode", None)
+        return data
 
     def _localized_timestamp(self, obj):
         try:
