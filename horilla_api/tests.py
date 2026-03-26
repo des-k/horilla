@@ -285,6 +285,42 @@ class MobileAttendanceActionParityTests(SimpleTestCase):
         self.assertEqual(update_punch_history.call_args.kwargs["work_mode"], AttendanceWorkMode.WFA)
         self.assertIs(update_punch_history.call_args.kwargs["related_work_mode_request"], approved_req)
 
+    def test_checking_status_with_existing_check_in_does_not_crash(self):
+        attendance = SimpleNamespace(
+            attendance_clock_in=time(8, 0),
+            attendance_clock_out=None,
+            attendance_clock_in_date=self.attendance_date,
+            attendance_clock_out_date=None,
+            in_attendance_status="VALID",
+            out_attendance_status=None,
+            in_attendance_reject_reason_code=None,
+            out_attendance_reject_reason_code=None,
+            in_related_work_type_request_id=None,
+            out_related_work_type_request_id=None,
+            reconciliation_source="mobile",
+            attendance_worked_hour="00:05",
+        )
+        status_request = self._status_request()
+        status_patches = self._status_patches(
+            modes=[(AttendanceWorkMode.WFO, "schedule", None), (AttendanceWorkMode.WFO, "schedule", None)],
+            allowed=[True, True],
+            attendance=attendance,
+        )
+
+        for manager in status_patches:
+            manager.start()
+        try:
+            status_response = CheckingStatus.as_view()(status_request)
+        finally:
+            for manager in reversed(status_patches):
+                manager.stop()
+
+        self.assertEqual(status_response.status_code, 200)
+        self.assertFalse(status_response.data["missing_check_in"])
+        self.assertEqual(status_response.data["earliest_check_out"], "17:00")
+        self.assertFalse(status_response.data["can_clock_in"])
+        self.assertFalse(status_response.data["can_clock_out"])
+
     def test_checking_status_matches_clock_in_rejection_for_blocked_mobile_mode(self):
         status_request = self._status_request()
         status_patches = self._status_patches(
