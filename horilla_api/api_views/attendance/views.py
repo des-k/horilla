@@ -2141,6 +2141,7 @@ class WorkModeRequestView(APIView):
         if scope_q:
             qs = qs.filter(scope=scope_q)
 
+        ordered = qs.order_by("-id")
         pagenation = PageNumberPagination()
         page = pagenation.paginate_queryset(ordered, request)
         serializer = self.serializer_class(page, many=True, context={"request": request})
@@ -3223,9 +3224,6 @@ class CheckingStatus(APIView):
                     clock_in_type=clock_in_type,
                     flex_seconds=grace_seconds,
                 )
-                if earliest_check_out_dt:
-                    early_grace_min = int((((rules or {}).get("window_config") or {}).get("early_checkout_minutes") or 0))
-                    out_window_start = earliest_check_out_dt - timedelta(minutes=early_grace_min)
             except Exception:
                 effective_start_dt, earliest_check_out_dt, valid_check_in_for_note = None, None, True
 
