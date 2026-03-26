@@ -11,7 +11,7 @@ from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import connection
 from django.db import models as django_models
-from django.http import Http404
+from django.http import Http404, QueryDict
 from django.test import RequestFactory, SimpleTestCase, TestCase, override_settings
 from django.urls import reverse
 from rest_framework.test import APIRequestFactory, force_authenticate
@@ -704,6 +704,75 @@ class AttendanceRequestDirectAttachmentApiViewTests(SimpleTestCase):
         create_file.assert_called_once()
         attendance.request_attachments.add.assert_called_once_with(arf)
 
+
+
+class AttendanceRequestMultipartCopyRegressionTests(SimpleTestCase):
+    databases = {"default"}
+
+    def test_post_avoids_request_data_copy_for_multipart_uploads(self):
+        view = AttendanceRequestView()
+        attendance = SimpleNamespace(
+            id=77,
+            pk=77,
+            employee_id=SimpleNamespace(id=10),
+            request_attachments=SimpleNamespace(add=MagicMock()),
+            save=MagicMock(),
+        )
+        form = MagicMock()
+        form.is_valid.return_value = True
+        form.cleaned_data = {"work_type_id": None}
+        form.new_instance = attendance
+        form.errors = {}
+        upload = SimpleUploadedFile("create-proof.pdf", b"%PDF-1.4\ncreate", content_type="application/pdf")
+
+        class ExplodingData(dict):
+            def copy(self):
+                raise AssertionError("request.data.copy() must not be called for multipart uploads")
+
+        class FakeFiles:
+            def __init__(self, files):
+                self._files = files
+
+            def getlist(self, key):
+                if key in ("files", "files[]"):
+                    return list(self._files)
+                return []
+
+            def get(self, key, default=None):
+                if key == "file" and self._files:
+                    return self._files[0]
+                return default
+
+            def __bool__(self):
+                return bool(self._files)
+
+        post_data = QueryDict("", mutable=True)
+        post_data.update({"attendance_date": "2026-03-10", "request_description": "Need fix"})
+        request = SimpleNamespace(
+            POST=post_data,
+            data=ExplodingData({"attendance_date": "2026-03-10", "request_description": "Need fix", "files": upload}),
+            FILES=FakeFiles([upload]),
+            user=SimpleNamespace(employee_get=SimpleNamespace(id=10)),
+        )
+
+        worktype_filter = MagicMock()
+        worktype_filter.exists.return_value = False
+        arf = SimpleNamespace(id=5, file=SimpleNamespace(url="/media/private/create-proof.pdf"))
+        with patch("attendance.forms.NewRequestForm", return_value=form), patch(
+            "horilla_api.api_views.attendance.views.WorkType.objects.filter",
+            return_value=worktype_filter,
+        ), patch(
+            "horilla_api.api_views.attendance.views.AttendanceRequestFile.objects.create",
+            return_value=arf,
+        ) as create_file, patch(
+            "horilla_api.api_views.attendance.views.AttendanceRequestSerializer",
+            return_value=SimpleNamespace(data={"id": attendance.id, "attachment_urls": ["protected-url"]}),
+        ):
+            response = view.post(request)
+
+        self.assertEqual(response.status_code, 201)
+        create_file.assert_called_once()
+        attendance.request_attachments.add.assert_called_once_with(arf)
 
 
 class AttendanceRequestListApiRegressionTests(SimpleTestCase):
