@@ -83,6 +83,16 @@ from attendance.services.attendance_request_files import (
     request_can_view_attachment as attendance_request_can_view_attachment,
     verify_attachment_token as verify_attendance_attachment_token,
 )
+from attendance.services.attachment_contract import (
+    attachment_mime_type,
+    attachment_name,
+    is_inline_viewable_mime_type,
+)
+from attendance.services.work_type_request_files import (
+    attachment_belongs_to_request as work_mode_attachment_belongs_to_request,
+    request_can_view_attachment as work_mode_request_can_view_attachment,
+    verify_attachment_token as verify_work_mode_attachment_token,
+)
 from attendance.services.attendance_request_access import (
     hard_delete_request_attachment,
     user_can_approve_request,
@@ -2044,10 +2054,29 @@ class AttendanceRequestRejectView(APIView):
         return Response(AttendanceRequestSerializer(attendance, context={"request": request}).data, status=200)
 
 
-class AttendanceRequestAttachmentDownloadView(APIView):
-    permission_classes = []
+def _attachment_file_response(file_obj, *, disposition: str = "download"):
+    try:
+        file_handle = file_obj.file.open("rb")
+    except Exception:
+        return Response({"error": "Attachment file is missing."}, status=404)
 
-    def get(self, request, attendance_id, file_id):
+    filename = attachment_name(file_obj)
+    content_type = attachment_mime_type(file_obj)
+    allow_inline = disposition == "view" and is_inline_viewable_mime_type(content_type)
+    response = FileResponse(
+        file_handle,
+        as_attachment=not allow_inline,
+        filename=filename,
+        content_type=content_type,
+    )
+    response["Cache-Control"] = "private, no-store"
+    return response
+
+
+class AttendanceRequestAttachmentDownloadView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, attendance_id, file_id, disposition="download"):
         attendance = get_object_or_404(Attendance, id=attendance_id)
         file_obj = get_object_or_404(AttendanceRequestFile, id=file_id)
         if not attendance_attachment_belongs_to_request(attendance, file_obj):
@@ -2057,10 +2086,9 @@ class AttendanceRequestAttachmentDownloadView(APIView):
             return Response({"error": "You do not have permission to access this attachment."}, status=403)
         if not verify_attendance_attachment_token(attendance.id, file_obj.id, token):
             return Response({"error": "Invalid or expired attachment token."}, status=403)
-        file_obj.file.open("rb")
-        return FileResponse(file_obj.file, as_attachment=False)
+        return _attachment_file_response(file_obj, disposition=disposition)
 
-    def delete(self, request, attendance_id, file_id):
+    def delete(self, request, attendance_id, file_id, disposition="download"):
         attendance = get_object_or_404(Attendance, id=attendance_id)
         file_obj = get_object_or_404(AttendanceRequestFile, id=file_id)
         if not attendance_attachment_belongs_to_request(attendance, file_obj):
@@ -2069,6 +2097,29 @@ class AttendanceRequestAttachmentDownloadView(APIView):
             return Response({"error": "You do not have permission to delete this attachment."}, status=403)
         hard_delete_request_attachment(attendance, file_obj)
         return Response(status=204)
+
+
+class WorkModeRequestAttachmentAccessView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk, file_id, disposition="download"):
+        req = get_object_or_404(WorkModeRequest, id=pk)
+        file_obj = get_object_or_404(AttendanceRequestFile, id=file_id)
+        if not work_mode_attachment_belongs_to_request(req, file_obj):
+            return Response({"error": "Attachment not found for this request."}, status=404)
+
+        allowed = bool(getattr(request.user, "is_authenticated", False)) and (
+            work_mode_request_can_view_attachment(request, req) or bool(getattr(request.user, "is_superuser", False))
+        )
+        if not allowed:
+            return Response({"error": "You do not have permission to access this attachment."}, status=403)
+
+        token = request.GET.get("token")
+        if not verify_work_mode_attachment_token(req.id, file_obj.id, token):
+            return Response({"error": "Invalid or expired attachment token."}, status=403)
+
+        return _attachment_file_response(file_obj, disposition=disposition)
+
 
 def _work_mode_request_text(data, *keys):
     try:
