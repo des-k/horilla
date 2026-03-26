@@ -57,6 +57,18 @@ urlpatterns = [
         AttendanceRequestAttachmentDownloadView.as_view(),
         name="api-attendance-request-attachment-download",
     ),
+    path(
+        "attendance-request-attachments/<int:attendance_id>/<int:file_id>/view",
+        AttendanceRequestAttachmentDownloadView.as_view(),
+        {"disposition": "view"},
+        name="api-attendance-request-attachment-view",
+    ),
+    path(
+        "attendance-request-attachments/<int:attendance_id>/<int:file_id>/download",
+        AttendanceRequestAttachmentDownloadView.as_view(),
+        {"disposition": "download"},
+        name="api-attendance-request-attachment-download-v2",
+    ),
     path("overtime-approve/<int:pk>", OvertimeApproveView.as_view(), name="api-"),
     path(
         "attendance-hour-account/<int:pk>/",
@@ -154,6 +166,18 @@ urlpatterns = [
         "work-mode-request-cancel/<int:pk>/",
         WorkModeRequestCancelView.as_view(),
         name="api-work-mode-request-cancel-slash",
+    ),
+    path(
+        "work-mode-request-attachments/<int:pk>/<int:file_id>/view",
+        WorkModeRequestAttachmentAccessView.as_view(),
+        {"disposition": "view"},
+        name="api-work-mode-request-attachment-view",
+    ),
+    path(
+        "work-mode-request-attachments/<int:pk>/<int:file_id>/download",
+        WorkModeRequestAttachmentAccessView.as_view(),
+        {"disposition": "download"},
+        name="api-work-mode-request-attachment-download",
     ),
     path(
         "work-mode-request-action/<int:pk>/<str:action>",
