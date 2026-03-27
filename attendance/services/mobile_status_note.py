@@ -51,10 +51,33 @@ def _late_detail_text(late_by: str | None) -> str | None:
 
 
 def _short_by_text(checked_out_early: bool, checked_out_early_by: str | None) -> str | None:
-    if checked_out_early_by:
+    if checked_out_early and checked_out_early_by:
         return f"Short by {checked_out_early_by}"
-    if checked_out_early:
-        return "Short by 00:00"
+    return None
+
+
+def _missing_check_in_early_header(has_check_out: bool, checked_out_early: bool) -> str:
+    if has_check_out and checked_out_early:
+        return "Missing Check In, Check Out Early"
+    return "Missing Check In"
+
+
+def _missing_check_in_detail(
+    *,
+    has_check_out: bool,
+    can_clock_out: bool,
+    checked_out_early: bool,
+    checked_out_early_by: str | None,
+) -> str | None:
+    if has_check_out and checked_out_early:
+        return _join_details(
+            _short_by_text(checked_out_early, checked_out_early_by),
+            "Check Out saved",
+        )
+    if has_check_out:
+        return "Check Out saved"
+    if can_clock_out:
+        return "Check Out available"
     return None
 
 
@@ -126,9 +149,12 @@ def build_mobile_header_state(payload: Mapping[str, Any]) -> dict[str, str | Non
     if missing_check_in or invalid_check_in:
         return MobileAttendanceHeaderState(
             code=MISSING_CHECK_IN,
-            message="Missing Check In",
-            detail_message=(
-                "Check Out saved" if has_check_out else ("Check Out available" if can_clock_out else None)
+            message=_missing_check_in_early_header(has_check_out, checked_out_early),
+            detail_message=_missing_check_in_detail(
+                has_check_out=has_check_out,
+                can_clock_out=can_clock_out,
+                checked_out_early=checked_out_early,
+                checked_out_early_by=checked_out_early_by,
             ),
         ).as_payload()
 
@@ -169,8 +195,13 @@ def build_mobile_header_state(payload: Mapping[str, Any]) -> dict[str, str | Non
     if has_check_out and not has_check_in:
         return MobileAttendanceHeaderState(
             code=MISSING_CHECK_IN,
-            message="Missing Check In",
-            detail_message="Check Out saved",
+            message=_missing_check_in_early_header(has_check_out, checked_out_early),
+            detail_message=_missing_check_in_detail(
+                has_check_out=has_check_out,
+                can_clock_out=can_clock_out,
+                checked_out_early=checked_out_early,
+                checked_out_early_by=checked_out_early_by,
+            ),
         ).as_payload()
 
     if not has_attendance and check_in_cutoff_passed and can_clock_out:
