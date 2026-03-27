@@ -5,6 +5,7 @@ This module is used to register the endpoints to the attendance requests
 """
 
 import copy
+import logging
 import json
 from datetime import date, datetime, time
 from urllib.parse import parse_qs
@@ -71,6 +72,7 @@ from base.methods import (
     closest_numbers,
     eval_validate,
     filtersubordinates,
+    filtersubordinatesemployeemodel,
     get_key_instances,
     is_reportingmanager,
 )
@@ -86,6 +88,8 @@ from horilla.decorators import (
     permission_required,
 )
 from notifications.signals import notify
+
+logger = logging.getLogger(__name__)
 
 
 # -----------------------------------------------------------------------------
@@ -266,15 +270,14 @@ def request_attendance(request):
 def request_attendance_view(request):
     """Attendance Requests page aligned with mobile Attendance Correction Request.
 
-    Two tabs:
+    Tabs:
       - My Requests: current user's requests (pending + history)
-      - Approvals: pending requests the current user can approve (admin/reporting manager)
+      - Approvals: actionable queue + approval history for subordinate requests
     """
     employee = getattr(request.user, "employee_get", None)
     is_super = bool(getattr(request.user, "is_superuser", False))
     has_global_perm = bool(getattr(request.user, "has_perm", lambda _p: False)("attendance.change_attendance"))
 
-    # Some deployments have admin users not linked to Employee.
     if employee is None and not (is_super or has_global_perm):
         return HttpResponseForbidden("Employee profile required")
 
@@ -284,30 +287,31 @@ def request_attendance_view(request):
     if status_my not in allowed_status_my:
         status_my = "all"
 
-    # ----------------------------
-    # Build Approvals queryset
-    # ----------------------------
-    approvals_qs = Attendance.objects.filter(is_validate_request=True)
+    approval_subtab = (request.GET.get("approval_subtab") or "active").strip().lower()
+    if approval_subtab not in {"active", "history"}:
+        approval_subtab = "active"
+    show_approval_tab = any(
+        key in request.GET
+        for key in ("tab", "approval_subtab", "page_app", "page_app_hist", "history_date", "history_status", "history_employee_id")
+    ) or (request.GET.get("tab") or "").strip().lower() == "approvals"
 
-    # Hardening:
-    # - Superuser/global approver can see all pending requests.
-    # - Reporting manager can see pending requests of subordinates.
-    # - Others see none.
-    if is_reportingmanager(request) and not (has_global_perm or is_super):
-        approvals_qs = filtersubordinates(
-            request=request,
-            perm="attendance.change_attendance",
-            queryset=approvals_qs,
-        )
-    elif not (has_global_perm or is_super):
-        approvals_qs = Attendance.objects.none()
+    history_status = (request.GET.get("history_status") or "all").strip().lower()
+    allowed_history_status = {"all", "waiting", "approved", "rejected", "revoked", "canceled", "cancel"}
+    if history_status not in allowed_history_status:
+        history_status = "all"
+    history_employee_id = (request.GET.get("history_employee_id") or "").strip()
+    history_date_raw = (request.GET.get("history_date") or "").strip()
+    history_date = None
+    for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%Y/%m/%d"):
+        try:
+            history_date = datetime.strptime(history_date_raw, fmt).date() if history_date_raw else None
+            if history_date:
+                break
+        except Exception:
+            history_date = None
+    if history_date is None:
+        history_date = timezone.localdate()
 
-    # Never include own requests in approvals list (cannot self-approve)
-    approvals_qs = approvals_qs.exclude(employee_id__employee_user_id=request.user)
-
-    # ----------------------------
-    # Build My Requests queryset
-    # ----------------------------
     request_history_filter = (
         Q(is_validate_request=True)
         | Q(is_validate_request_approved=True)
@@ -320,11 +324,18 @@ def request_attendance_view(request):
         | Q(request_type__in=["create_request", "cancel_request", "reject_request", "revoke_request"])
     )
 
-    my_qs = Attendance.objects.filter(employee_id__employee_user_id=request.user).filter(
-        request_history_filter
-    ).distinct()
+    approvals_qs = Attendance.objects.filter(is_validate_request=True)
+    if is_reportingmanager(request) and not (has_global_perm or is_super):
+        approvals_qs = filtersubordinates(
+            request=request,
+            perm="attendance.change_attendance",
+            queryset=approvals_qs,
+        )
+    elif not (has_global_perm or is_super):
+        approvals_qs = Attendance.objects.none()
+    approvals_qs = approvals_qs.exclude(employee_id__employee_user_id=request.user).distinct()
 
-    # My Requests status filter
+    my_qs = Attendance.objects.filter(employee_id__employee_user_id=request.user).filter(request_history_filter).distinct()
     if status_my == "waiting":
         my_qs = my_qs.filter(is_validate_request=True)
     elif status_my == "approved":
@@ -340,7 +351,32 @@ def request_attendance_view(request):
     elif status_my in ("canceled", "cancel"):
         my_qs = my_qs.filter(request_type="cancel_request")
 
-    # Shared search filter
+    history_base_qs = Attendance.objects.filter(request_history_filter).exclude(employee_id__employee_user_id=request.user).distinct()
+    if is_reportingmanager(request) and not (has_global_perm or is_super):
+        history_base_qs = filtersubordinates(
+            request=request,
+            perm="attendance.change_attendance",
+            queryset=history_base_qs,
+        )
+    elif not (has_global_perm or is_super):
+        history_base_qs = Attendance.objects.none()
+
+    history_qs = history_base_qs.filter(attendance_date=history_date)
+    if history_employee_id:
+        history_qs = history_qs.filter(employee_id_id=history_employee_id)
+    if history_status == "waiting":
+        history_qs = history_qs.filter(is_validate_request=True)
+    elif history_status == "approved":
+        history_qs = history_qs.filter(Q(is_validate_request_approved=True) | Q(attendance_validated=True)).exclude(is_validate_request=True)
+    elif history_status == "rejected":
+        history_qs = history_qs.filter(Q(request_type="reject_request") | Q(action_type=AttendanceRequestActionType.REJECTED))
+    elif history_status == "revoked":
+        history_qs = history_qs.filter(Q(request_type="revoke_request") | Q(action_type=AttendanceRequestActionType.REVOKED))
+    elif history_status in ("canceled", "cancel"):
+        history_qs = history_qs.filter(Q(request_type="cancel_request") | Q(action_type=AttendanceRequestActionType.CANCELED))
+    else:
+        history_qs = history_qs.exclude(is_validate_request=True)
+
     if search:
         parsed_date = None
         for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%Y/%m/%d"):
@@ -352,6 +388,7 @@ def request_attendance_view(request):
         if parsed_date:
             approvals_qs = approvals_qs.filter(attendance_date=parsed_date)
             my_qs = my_qs.filter(attendance_date=parsed_date)
+            history_qs = history_qs.filter(attendance_date=parsed_date)
         else:
             approvals_qs = approvals_qs.filter(
                 Q(employee_id__employee_first_name__icontains=search)
@@ -363,10 +400,16 @@ def request_attendance_view(request):
                 Q(request_description__icontains=search)
                 | Q(request_type__icontains=search)
             )
+            history_qs = history_qs.filter(
+                Q(employee_id__employee_first_name__icontains=search)
+                | Q(employee_id__employee_last_name__icontains=search)
+                | Q(employee_id__badge_id__icontains=search)
+                | Q(request_description__icontains=search)
+            )
 
-    # Pagination (separate query params)
     page_my = request.GET.get("page_my")
     page_app = request.GET.get("page_app")
+    page_app_hist = request.GET.get("page_app_hist")
 
     my_requests = paginator_qry(
         my_qs.select_related("employee_id", "action_by", "shift_id", "work_type_id").order_by("-id"),
@@ -376,27 +419,30 @@ def request_attendance_view(request):
         approvals_qs.select_related("employee_id", "action_by", "shift_id", "work_type_id").order_by("-id"),
         page_app,
     )
+    approval_history = paginator_qry(
+        history_qs.select_related("employee_id", "action_by", "shift_id", "work_type_id").order_by("-id"),
+        page_app_hist,
+    )
 
-    # Attachment counts for current page (used as badges like Work Type Requests)
     try:
         my_attach_counts = {obj.id: len(list(iter_request_attachments(obj))) for obj in getattr(my_requests, "object_list", [])}
         app_attach_counts = {obj.id: len(list(iter_request_attachments(obj))) for obj in getattr(approvals, "object_list", [])}
+        history_attach_counts = {obj.id: len(list(iter_request_attachments(obj))) for obj in getattr(approval_history, "object_list", [])}
     except Exception:
         my_attach_counts = {}
         app_attach_counts = {}
+        history_attach_counts = {}
 
-    # Shift info for current page (name + start/end + flexi in)
     try:
         my_shift_info = _build_shift_info_map(list(getattr(my_requests, 'object_list', []) or []))
         app_shift_info = _build_shift_info_map(list(getattr(approvals, 'object_list', []) or []))
+        history_shift_info = _build_shift_info_map(list(getattr(approval_history, 'object_list', []) or []))
     except Exception:
         my_shift_info = {}
         app_shift_info = {}
+        history_shift_info = {}
 
-    can_approve = bool(
-        request.user.has_perm("attendance.change_attendance") or is_reportingmanager(request)
-    )
-
+    can_approve = bool(request.user.has_perm("attendance.change_attendance") or is_reportingmanager(request))
     status_my_options = [
         ("all", _("All")),
         ("waiting", _("Waiting")),
@@ -405,20 +451,34 @@ def request_attendance_view(request):
         ("revoked", _("Revoked")),
         ("canceled", _("Canceled")),
     ]
+    history_status_options = [
+        ("all", _("All")),
+        ("approved", _("Approved")),
+        ("rejected", _("Rejected")),
+        ("revoked", _("Revoked")),
+        ("canceled", _("Canceled")),
+    ]
 
-
-
-    # Preserve filters for pagination links
     try:
-        q_my = request.GET.copy()
-        q_my.pop("page_my", None)
-        pd_my = q_my.urlencode()
-        q_app = request.GET.copy()
-        q_app.pop("page_app", None)
-        pd_app = q_app.urlencode()
+        history_employees = Employee.objects.all()
+        if not request.user.has_perm("attendance.change_attendance"):
+            history_employees = filtersubordinatesemployeemodel(
+                request,
+                history_employees,
+                perm="attendance.change_attendance",
+            )
+        if employee is not None:
+            history_employees = history_employees.exclude(id=employee.id)
+        history_employees = history_employees.order_by("employee_first_name", "employee_last_name").distinct()
     except Exception:
-        pd_my = ""
-        pd_app = ""
+        history_employees = Employee.objects.none()
+
+    try:
+        q_my = request.GET.copy(); q_my.pop("page_my", None); pd_my = q_my.urlencode()
+        q_app = request.GET.copy(); q_app.pop("page_app", None); pd_app = q_app.urlencode()
+        q_app_hist = request.GET.copy(); q_app_hist.pop("page_app_hist", None); pd_app_hist = q_app_hist.urlencode()
+    except Exception:
+        pd_my = pd_app = pd_app_hist = ""
 
     return render(
         request,
@@ -426,16 +486,27 @@ def request_attendance_view(request):
         {
             "my_requests": my_requests,
             "approvals": approvals,
+            "approval_history": approval_history,
             "can_approve": can_approve,
             "search": search,
             "status_my": status_my,
             "status_my_options": status_my_options,
+            "history_status": history_status,
+            "history_status_options": history_status_options,
+            "history_employee_id": history_employee_id,
+            "history_employees": history_employees,
+            "history_date": history_date.strftime("%Y-%m-%d"),
+            "approval_subtab": approval_subtab,
+            "show_approval_tab": show_approval_tab,
             "my_attach_counts": my_attach_counts,
             "app_attach_counts": app_attach_counts,
+            "history_attach_counts": history_attach_counts,
             "my_shift_info": my_shift_info,
             "app_shift_info": app_shift_info,
+            "history_shift_info": history_shift_info,
             "pd_my": pd_my,
             "pd_app": pd_app,
+            "pd_app_hist": pd_app_hist,
         },
     )
 
