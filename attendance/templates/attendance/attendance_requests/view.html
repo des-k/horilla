@@ -8,15 +8,15 @@
 {% include 'attendance/attendance_requests/nav.html' %}
 
 <div class="oh-wrapper">
-  <div class="oh-tabs">
+  <div class="oh-tabs" data-tab-group="attendance-top">
     <ul class="oh-tabs__tablist">
-      <li class="oh-tabs__tab oh-tabs__tab--active" data-target="#tab_my">
+      <li class="oh-tabs__tab {% if not show_approval_tab %}oh-tabs__tab--active{% endif %}" data-target="#tab_my">
         <span class="oh-tabs__input-badge-container">
           <span class="oh-badge oh-badge--secondary oh-badge--small oh-badge--round mr-1">{{ my_requests.paginator.count|default:0 }}</span>
           {% trans "My Requests" %}
         </span>
       </li>
-      <li class="oh-tabs__tab" data-target="#tab_app">
+      <li class="oh-tabs__tab {% if show_approval_tab %}oh-tabs__tab--active{% endif %}" data-target="#tab_app">
         <span class="oh-tabs__input-badge-container">
           <span class="oh-badge oh-badge--secondary oh-badge--small oh-badge--round mr-1">{{ approvals.paginator.count|default:0 }}</span>
           {% trans "Approvals" %}
@@ -24,13 +24,24 @@
       </li>
     </ul>
 
-    <div id="tab_my" class="oh-tabs__content oh-tabs__content--active">
+    <div id="tab_my" class="oh-tabs__content {% if not show_approval_tab %}oh-tabs__content--active{% endif %}">
       {% include 'attendance/attendance_requests/table_my.html' %}
     </div>
 
-    <div id="tab_app" class="oh-tabs__content">
+    <div id="tab_app" class="oh-tabs__content {% if show_approval_tab %}oh-tabs__content--active{% endif %}">
       {% if can_approve %}
-        {% include 'attendance/attendance_requests/table_approvals.html' %}
+        <div class="oh-tabs" data-tab-group="attendance-approval-subtabs">
+          <ul class="oh-tabs__tablist" style="margin-bottom: 12px;">
+            <li class="oh-tabs__tab {% if approval_subtab != 'history' %}oh-tabs__tab--active{% endif %}" data-target="#attendanceApprovalQueue">{% trans "Approval" %} <span class="oh-badge oh-badge--secondary oh-badge--small oh-badge--round ml-1">{{ approvals.paginator.count|default:0 }}</span></li>
+            <li class="oh-tabs__tab {% if approval_subtab == 'history' %}oh-tabs__tab--active{% endif %}" data-target="#attendanceApprovalHistory">{% trans "Approval History" %} <span class="oh-badge oh-badge--secondary oh-badge--small oh-badge--round ml-1">{{ approval_history.paginator.count|default:0 }}</span></li>
+          </ul>
+          <div id="attendanceApprovalQueue" class="oh-tabs__content {% if approval_subtab != 'history' %}oh-tabs__content--active{% endif %}">
+            {% include 'attendance/attendance_requests/table_approvals.html' %}
+          </div>
+          <div id="attendanceApprovalHistory" class="oh-tabs__content {% if approval_subtab == 'history' %}oh-tabs__content--active{% endif %}">
+            {% include 'attendance/attendance_requests/table_approval_history.html' %}
+          </div>
+        </div>
       {% else %}
         <div class="oh-card">
           <div class="oh-card__body" style="text-align:center; padding: 28px;">
@@ -45,18 +56,29 @@
 </div>
 
 <script>
-  // basic tabs switching (same as Work Type Requests)
-  document.querySelectorAll('.oh-tabs__tab').forEach(function(tab){
-    tab.addEventListener('click', function(e){
-      e.preventDefault();
-      document.querySelectorAll('.oh-tabs__tab').forEach(t => t.classList.remove('oh-tabs__tab--active'));
-      tab.classList.add('oh-tabs__tab--active');
+  function initScopedTabs(root) {
+    if (!root || root.dataset.tabsInitialized === '1') return;
+    root.dataset.tabsInitialized = '1';
 
-      document.querySelectorAll('.oh-tabs__content').forEach(c => c.classList.remove('oh-tabs__content--active'));
-      const target = tab.getAttribute('data-target');
-      const el = document.querySelector(target);
-      if (el) el.classList.add('oh-tabs__content--active');
+    const children = Array.from(root.children || []);
+    const tablist = children.find((el) => el.classList && el.classList.contains('oh-tabs__tablist'));
+    const contents = children.filter((el) => el.classList && el.classList.contains('oh-tabs__content'));
+    if (!tablist) return;
+
+    const tabs = Array.from(tablist.querySelectorAll('.oh-tabs__tab'));
+    tabs.forEach((tab) => {
+      tab.addEventListener('click', function (e) {
+        e.preventDefault();
+        tabs.forEach((item) => item.classList.remove('oh-tabs__tab--active'));
+        contents.forEach((item) => item.classList.remove('oh-tabs__content--active'));
+        tab.classList.add('oh-tabs__tab--active');
+        const target = tab.getAttribute('data-target');
+        const content = target ? root.querySelector(target) : null;
+        if (content) content.classList.add('oh-tabs__content--active');
+      });
     });
-  });
+  }
+
+  document.querySelectorAll('[data-tab-group]').forEach(initScopedTabs);
 </script>
 {% endblock content %}
