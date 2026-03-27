@@ -27,8 +27,8 @@ class Phase2ApprovalHistorySourceRegressionTests(unittest.TestCase):
 
         self.assertIn('approval_view = (request.GET.get("approval_view") or "").strip().lower()', source)
         self.assertIn('if approval_view == "history":', source)
-        self.assertIn('history_date = _parse_filter_date(request.GET.get("date")) or dj_timezone.localdate()', source)
-        self.assertIn('attendance_date=history_date', source)
+        self.assertIn('history_month_start, history_month_end, _ = _parse_filter_month_range(', source)
+        self.assertIn('attendance_date__range=(history_month_start, history_month_end)', source)
         self.assertIn('employee_id = (request.GET.get("employee_id") or "").strip()', source)
         self.assertIn('_attendance_history_status_filter(requests, request.GET.get("status"))', source)
         self.assertIn('response.data["employee_options"] = _approval_scope_employee_options(request, work_type=False)', source)
@@ -38,8 +38,8 @@ class Phase2ApprovalHistorySourceRegressionTests(unittest.TestCase):
 
         self.assertIn('queue = (request.GET.get("queue") or "approval").strip().lower()', source)
         self.assertIn('if queue == "history":', source)
-        self.assertIn('history_date = _parse_filter_date(request.GET.get("date")) or dj_timezone.localdate()', source)
-        self.assertIn('start_date__lte=history_date, end_date__gte=history_date', source)
+        self.assertIn('history_month_start, history_month_end, _ = _parse_filter_month_range(', source)
+        self.assertIn('start_date__lte=history_month_end, end_date__gte=history_month_start', source)
         self.assertIn('if queue_type in {"approval", "document_review"}:', source)
         self.assertIn('return qs.exclude(status=WorkModeRequestStatus.PENDING)', source)
         self.assertIn('response.data["employee_options"] = _approval_scope_employee_options(request, work_type=True)', source)
@@ -50,7 +50,7 @@ class Phase2ApprovalHistorySourceRegressionTests(unittest.TestCase):
 
         self.assertIn('approval_history', attendance_view_source)
         self.assertIn('approval_subtab', attendance_view_source)
-        self.assertIn('history_date', attendance_view_source)
+        self.assertIn('history_month', attendance_view_source)
         self.assertIn('history_status_options', attendance_view_source)
 
         self.assertIn('approval_history', work_type_view_source)
