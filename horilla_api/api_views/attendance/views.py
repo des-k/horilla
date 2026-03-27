@@ -221,6 +221,33 @@ def _parse_filter_date(value):
         return None
 
 
+def _parse_filter_month_range(value):
+    raw = (value or "").strip()
+    parsed_date = _parse_filter_date(raw)
+    if parsed_date is not None:
+        month_start = parsed_date.replace(day=1)
+    elif raw:
+        month_start = None
+        for fmt in ("%Y-%m", "%m-%Y", "%m/%Y", "%Y/%m"):
+            try:
+                parsed = datetime.strptime(raw, fmt)
+                month_start = date(parsed.year, parsed.month, 1)
+                break
+            except Exception:
+                continue
+        if month_start is None:
+            return None
+    else:
+        return None
+
+    if month_start.month == 12:
+        next_month = date(month_start.year + 1, 1, 1)
+    else:
+        next_month = date(month_start.year, month_start.month + 1, 1)
+    month_end = next_month - timedelta(days=1)
+    return month_start, month_end, month_start.strftime("%Y-%m")
+
+
 def _attendance_request_history_scope(request):
     request_history_filter = (
         Q(is_validate_request=True)
@@ -1629,8 +1656,10 @@ class AttendanceRequestView(APIView):
             employee_id = (request.GET.get("employee_id") or "").strip()
             if employee_id:
                 requests = requests.filter(employee_id_id=employee_id)
-            history_date = _parse_filter_date(request.GET.get("date")) or dj_timezone.localdate()
-            requests = requests.filter(attendance_date=history_date)
+            history_month_start, history_month_end, _ = _parse_filter_month_range(
+                request.GET.get("month") or request.GET.get("date")
+            ) or _parse_filter_month_range(dj_timezone.localdate().strftime("%Y-%m"))
+            requests = requests.filter(attendance_date__range=(history_month_start, history_month_end))
             requests = _attendance_history_status_filter(requests, request.GET.get("status"))
         else:
             requests = (approvals_qs | my_qs).distinct()
@@ -2522,8 +2551,10 @@ class WorkModeRequestApprovalsView(APIView):
             employee_id = (request.GET.get("employee_id") or "").strip()
             if employee_id:
                 qs = qs.filter(employee_id_id=employee_id)
-            history_date = _parse_filter_date(request.GET.get("date")) or dj_timezone.localdate()
-            qs = qs.filter(start_date__lte=history_date, end_date__gte=history_date)
+            history_month_start, history_month_end, _ = _parse_filter_month_range(
+                request.GET.get("month") or request.GET.get("date")
+            ) or _parse_filter_month_range(dj_timezone.localdate().strftime("%Y-%m"))
+            qs = qs.filter(start_date__lte=history_month_end, end_date__gte=history_month_start)
             qs = _work_mode_history_status_filter(qs, request.GET.get("status"))
             ordered = list(qs.order_by("-id"))
             filtered = []
