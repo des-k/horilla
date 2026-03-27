@@ -14,6 +14,7 @@ Spec:
 
 from __future__ import annotations
 
+from datetime import datetime
 from django.contrib import messages
 from django.http import FileResponse, Http404, HttpResponse, HttpResponseForbidden
 from django.shortcuts import get_object_or_404, render
@@ -33,7 +34,7 @@ from attendance.models import (
     WorkModeRequestRejectReasonCode,
     WorkModeRequestStatus,
 )
-from attendance.services.work_type_request_rules import work_mode_request_approval_q
+from attendance.services.work_type_request_rules import work_mode_request_approval_q, work_mode_request_document_review_q, classify_work_mode_request_queue
 from attendance.services.work_type_request_exceptions import WorkModeRequestConsistencyError
 from attendance.services.work_type_request_files import (
     attachment_belongs_to_request,
@@ -51,8 +52,9 @@ from attendance.services.work_type_request_permissions import (
     request_actor_employee,
 )
 from attendance.methods.utils import paginator_qry
-from base.methods import filtersubordinates, get_subordinate_employee_ids
+from base.methods import filtersubordinates, filtersubordinatesemployeemodel, get_subordinate_employee_ids
 from horilla.decorators import hx_request_required, login_required
+from employee.models import Employee
 
 
 def _is_global_work_type_approver(user) -> bool:
@@ -144,48 +146,46 @@ def _apply_sort(qs, *, sort_field: str, direction: str, secondary: str = "-id"):
 
 @login_required
 def work_type_request_view(request):
-    """Main page: My Requests + Approvals.
-
-    Some deployments have admin/superuser accounts that are not linked to an
-    Employee profile (employee_get=None). For those users, we still want the
-    page (especially Approvals) to work when they have global permission or are
-    a Django superuser.
-    """
+    """Main page: My Requests + Approvals + Approval History."""
 
     employee = _request_actor_employee(request)
     is_super = bool(getattr(request.user, "is_superuser", False))
     has_global_perm = _is_global_work_type_approver(request.user)
 
-    # Only forbid when the user is not a superuser/global approver AND has no employee.
     if employee is None and not (is_super or has_global_perm):
         return HttpResponseForbidden("Employee profile required")
 
     search = (request.GET.get("search") or "").strip()
-
-    # Shared quick filters (apply to both My Requests & Approvals)
     mode_filter = (request.GET.get("mode_filter") or "").strip().lower()
     scope_filter = (request.GET.get("scope_filter") or "").strip().lower()
+    approval_subtab = (request.GET.get("approval_subtab") or "active").strip().lower()
+    if approval_subtab not in {"active", "history"}:
+        approval_subtab = "active"
+    show_approval_tab = any(
+        key in request.GET
+        for key in ("tab", "approval_subtab", "page_app", "page_app_hist", "history_date", "history_status", "history_employee_id")
+    ) or (request.GET.get("tab") or "").strip().lower() == "approvals"
+    history_status = (request.GET.get("history_status") or "all").strip().lower()
+    history_employee_id = (request.GET.get("history_employee_id") or "").strip()
+    history_date_raw = (request.GET.get("history_date") or "").strip()
+    history_date = None
+    for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%Y/%m/%d"):
+        try:
+            history_date = datetime.strptime(history_date_raw, fmt).date() if history_date_raw else None
+            if history_date:
+                break
+        except Exception:
+            history_date = None
+    if history_date is None:
+        history_date = timezone.localdate()
 
-    allowed_mode_filter = {
-        "": None,
-        "all": None,
-        "wfa": AttendanceWorkMode.WFA,
-        "on_duty": AttendanceWorkMode.ON_DUTY,
-    }
-    allowed_scope_filter = {
-        "": None,
-        "all": None,
-        "in": "in",
-        "out": "out",
-        "full": "full",
-    }
-
+    allowed_mode_filter = {"": None, "all": None, "wfa": AttendanceWorkMode.WFA, "on_duty": AttendanceWorkMode.ON_DUTY}
+    allowed_scope_filter = {"": None, "all": None, "in": "in", "out": "out", "full": "full"}
     if mode_filter not in allowed_mode_filter:
         mode_filter = ""
     if scope_filter not in allowed_scope_filter:
         scope_filter = ""
 
-    # Quick filters (My Requests only)
     status_my = (request.GET.get("status_my") or "").strip().lower()
     allowed_status_my = {
         "": None,
@@ -201,101 +201,56 @@ def work_type_request_view(request):
     if status_my not in allowed_status_my:
         status_my = ""
 
-    # Sorting (independent per table)
-    allowed_sort_my = {
-        "mode": "mode",
-        "scope": "scope",
-        "start_date": "start_date",
-        "end_date": "end_date",
-        "status": "status",
+    allowed_history_status = {
+        "all": None,
+        "approved": WorkModeRequestStatus.APPROVED,
+        "rejected": WorkModeRequestStatus.REJECTED,
+        "revoked": WorkModeRequestStatus.REVOKED,
+        "canceled": WorkModeRequestStatus.CANCELED,
     }
-    allowed_sort_app = {
-        "employee": "employee_id__employee_first_name",
-        "mode": "mode",
-        "scope": "scope",
-        "start_date": "start_date",
-        "end_date": "end_date",
-    }
+    if history_status not in allowed_history_status:
+        history_status = "all"
 
-    sort_my = (request.GET.get("sort_my") or "start_date").strip()
-    dir_my = (request.GET.get("dir_my") or "desc").strip().lower()
-    if sort_my not in allowed_sort_my:
-        sort_my = "start_date"
-    if dir_my not in ("asc", "desc"):
-        dir_my = "desc"
+    allowed_sort_my = {"mode": "mode", "scope": "scope", "start_date": "start_date", "end_date": "end_date", "status": "status"}
+    allowed_sort_app = {"employee": "employee_id__employee_first_name", "mode": "mode", "scope": "scope", "start_date": "start_date", "end_date": "end_date"}
+    sort_my = (request.GET.get("sort_my") or "start_date").strip(); dir_my = (request.GET.get("dir_my") or "desc").strip().lower()
+    if sort_my not in allowed_sort_my: sort_my = "start_date"
+    if dir_my not in ("asc", "desc"): dir_my = "desc"
+    sort_app = (request.GET.get("sort_app") or "start_date").strip(); dir_app = (request.GET.get("dir_app") or "desc").strip().lower()
+    if sort_app not in allowed_sort_app: sort_app = "start_date"
+    if dir_app not in ("asc", "desc"): dir_app = "desc"
 
-    sort_app = (request.GET.get("sort_app") or "start_date").strip()
-    dir_app = (request.GET.get("dir_app") or "desc").strip().lower()
-    if sort_app not in allowed_sort_app:
-        sort_app = "start_date"
-    if dir_app not in ("asc", "desc"):
-        dir_app = "desc"
-
-    # My Requests table requires an employee profile.
     my_qs = WorkModeRequest.objects.none() if employee is None else WorkModeRequest.objects.filter(employee_id=employee)
-
-    # Apply shared quick filters
     mode_value = allowed_mode_filter.get(mode_filter)
-    if mode_value:
-        my_qs = my_qs.filter(mode=mode_value)
+    if mode_value: my_qs = my_qs.filter(mode=mode_value)
     scope_value = allowed_scope_filter.get(scope_filter)
-    if scope_value:
-        my_qs = my_qs.filter(scope=scope_value)
-
-    # Apply quick filter
+    if scope_value: my_qs = my_qs.filter(scope=scope_value)
     status_value = allowed_status_my.get(status_my)
-    if status_value:
-        my_qs = my_qs.filter(status=status_value)
+    if status_value: my_qs = my_qs.filter(status=status_value)
     if search:
         try:
             from django.db.models import Q
-
-            my_qs = my_qs.filter(
-                Q(mode__icontains=search)
-                | Q(scope__icontains=search)
-                | Q(status__icontains=search)
-            )
+            my_qs = my_qs.filter(Q(mode__icontains=search) | Q(scope__icontains=search) | Q(status__icontains=search))
         except Exception:
             pass
-
-    # Apply sorting
     my_qs = _apply_sort(my_qs, sort_field=allowed_sort_my[sort_my], direction=dir_my)
 
-    # Approvals:
-    # - Global approver/superuser => see all.
-    # - Reporting manager => see subordinates.
     sub_ids = _subordinate_ids(request)
     can_approve = bool(is_super or has_global_perm or bool(sub_ids))
 
     include_pending_on_duty = bool(is_super or has_global_perm)
     approvals_qs = WorkModeRequest.objects.filter(
-        work_mode_request_approval_q(
-            include_pending_on_duty=include_pending_on_duty
-        )
+        work_mode_request_approval_q(include_pending_on_duty=include_pending_on_duty) | work_mode_request_document_review_q()
     )
     if not (is_super or has_global_perm):
-        approvals_qs = filtersubordinates(
-            request=request,
-            queryset=approvals_qs,
-            perm="attendance.change_workmoderequest",
-            field="employee_id",
-        )
-
-    # Exclude own requests from Approvals tab (admin can still view them in My Requests).
-    # Self-approve is also blocked in the action endpoints for safety.
+        approvals_qs = filtersubordinates(request=request, queryset=approvals_qs, perm="attendance.change_workmoderequest", field="employee_id")
     if employee is not None:
         approvals_qs = approvals_qs.exclude(employee_id=employee)
-
-    # Apply shared quick filters
-    if mode_value:
-        approvals_qs = approvals_qs.filter(mode=mode_value)
-    if scope_value:
-        approvals_qs = approvals_qs.filter(scope=scope_value)
-
+    if mode_value: approvals_qs = approvals_qs.filter(mode=mode_value)
+    if scope_value: approvals_qs = approvals_qs.filter(scope=scope_value)
     if search:
         try:
             from django.db.models import Q
-
             approvals_qs = approvals_qs.filter(
                 Q(employee_id__employee_first_name__icontains=search)
                 | Q(employee_id__employee_last_name__icontains=search)
@@ -304,99 +259,119 @@ def work_type_request_view(request):
             )
         except Exception:
             pass
-
     approvals_qs = _apply_sort(approvals_qs, sort_field=allowed_sort_app[sort_app], direction=dir_app)
+    active_rows = []
+    for req in list(approvals_qs):
+        try:
+            if classify_work_mode_request_queue(req) in {"approval", "document_review"}:
+                active_rows.append(req)
+        except WorkModeRequestConsistencyError:
+            continue
+
+    history_base_qs = WorkModeRequest.objects.all()
+    if employee is not None:
+        history_base_qs = history_base_qs.exclude(employee_id=employee)
+    if not (is_super or has_global_perm):
+        history_base_qs = filtersubordinates(request=request, queryset=history_base_qs, perm="attendance.change_workmoderequest", field="employee_id")
+    if mode_value: history_base_qs = history_base_qs.filter(mode=mode_value)
+    if scope_value: history_base_qs = history_base_qs.filter(scope=scope_value)
+    history_base_qs = history_base_qs.filter(start_date__lte=history_date, end_date__gte=history_date).exclude(status=WorkModeRequestStatus.PENDING)
+    if history_employee_id:
+        history_base_qs = history_base_qs.filter(employee_id_id=history_employee_id)
+    history_status_value = allowed_history_status.get(history_status)
+    if history_status_value:
+        history_base_qs = history_base_qs.filter(status=history_status_value)
+    if search:
+        try:
+            from django.db.models import Q
+            history_base_qs = history_base_qs.filter(
+                Q(employee_id__employee_first_name__icontains=search)
+                | Q(employee_id__employee_last_name__icontains=search)
+                | Q(mode__icontains=search)
+                | Q(scope__icontains=search)
+            )
+        except Exception:
+            pass
+    history_base_qs = _apply_sort(history_base_qs, sort_field=allowed_sort_app[sort_app], direction=dir_app)
+    history_rows = []
+    for req in list(history_base_qs):
+        try:
+            if classify_work_mode_request_queue(req) not in {"approval", "document_review"}:
+                history_rows.append(req)
+        except WorkModeRequestConsistencyError:
+            continue
 
     def _sort_url(which: str, field: str) -> str:
-        """Build sort link for a table.
-
-        which: 'my'|'app'
-        """
         if which == "my":
-            current_sort, current_dir = sort_my, dir_my
-            sort_key, dir_key, page_key = "sort_my", "dir_my", "page_my"
+            current_sort, current_dir = sort_my, dir_my; sort_key, dir_key, page_key = "sort_my", "dir_my", "page_my"
         else:
-            current_sort, current_dir = sort_app, dir_app
-            sort_key, dir_key, page_key = "sort_app", "dir_app", "page_app"
-
-        # Toggle direction if clicking active field
-        if field == current_sort:
-            new_dir = "asc" if current_dir == "desc" else "desc"
-        else:
-            new_dir = "asc"
-
+            current_sort, current_dir = sort_app, dir_app; sort_key, dir_key, page_key = "sort_app", "dir_app", "page_app"
+        new_dir = "asc" if field != current_sort else ("asc" if current_dir == "desc" else "desc")
         return _qs_update(request, **{sort_key: field, dir_key: new_dir, page_key: None})
 
     my_page = paginator_qry(my_qs, request.GET.get("page_my"))
-    approvals_page = paginator_qry(approvals_qs, request.GET.get("page_app"))
+    approvals_page = paginator_qry(active_rows, request.GET.get("page_app"))
+    history_page = paginator_qry(history_rows, request.GET.get("page_app_hist"))
     for row in getattr(my_page, "object_list", []):
-        for key, value in build_permission_flags(request, row).items():
-            setattr(row, key, value)
-        try:
-            current_document_file_count = len(row.current_document_files())
-        except Exception:
-            current_document_file_count = row.files.count()
+        for key, value in build_permission_flags(request, row).items(): setattr(row, key, value)
+        try: current_document_file_count = len(row.current_document_files())
+        except Exception: current_document_file_count = row.files.count()
         setattr(row, "_ui_current_document_file_count", current_document_file_count)
     for row in getattr(approvals_page, "object_list", []):
-        for key, value in build_permission_flags(request, row).items():
-            setattr(row, key, value)
-        try:
-            current_document_file_count = len(row.current_document_files())
-        except Exception:
-            current_document_file_count = row.files.count()
+        for key, value in build_permission_flags(request, row).items(): setattr(row, key, value)
+        try: current_document_file_count = len(row.current_document_files())
+        except Exception: current_document_file_count = row.files.count()
         setattr(row, "_ui_current_document_file_count", current_document_file_count)
+    for row in getattr(history_page, "object_list", []):
+        for key, value in build_permission_flags(request, row).items(): setattr(row, key, value)
+        try: current_document_file_count = len(row.current_document_files())
+        except Exception: current_document_file_count = row.files.count()
+        setattr(row, "_ui_current_document_file_count", current_document_file_count)
+
+    try:
+        history_employees = Employee.objects.all()
+        if not (is_super or has_global_perm):
+            history_employees = filtersubordinatesemployeemodel(
+                request,
+                history_employees,
+                perm="attendance.change_workmoderequest",
+            )
+        if employee is not None:
+            history_employees = history_employees.exclude(id=employee.id)
+        history_employees = history_employees.order_by('employee_first_name', 'employee_last_name').distinct()
+    except Exception:
+        history_employees = Employee.objects.none()
 
     context = {
         "my_requests": my_page,
         "approvals": approvals_page,
+        "approval_history": history_page,
         "can_approve": bool(can_approve),
         "current_user_id": getattr(request.user, "id", None),
         "search": search,
         "status_my": status_my,
+        "history_status": history_status,
+        "history_employee_id": history_employee_id,
+        "history_employees": history_employees,
+        "history_date": history_date.strftime('%Y-%m-%d'),
+        "approval_subtab": approval_subtab,
+        "show_approval_tab": show_approval_tab,
         "mode_filter": mode_filter,
         "scope_filter": scope_filter,
-        "mode_filter_options": [
-            ("", _("All")),
-            ("wfa", _("WFA")),
-            ("on_duty", _("ON DUTY")),
-        ],
-        "scope_filter_options": [
-            ("", _("All")),
-            ("in", _("IN")),
-            ("out", _("OUT")),
-            ("full", _("FULL")),
-        ],
-        "status_my_options": [
-            ("", _("All")),
-            ("pending", _("Pending")),
-            ("waiting", _("Waiting for approval")),
-            ("approved", _("Approved")),
-            ("rejected", _("Rejected")),
-            ("revoked", _("Revoked")),
-            ("canceled", _("Canceled")),
-        ],
+        "mode_filter_options": [("", _("All")), ("wfa", _("WFA")), ("on_duty", _("ON DUTY"))],
+        "scope_filter_options": [("", _("All")), ("in", _("IN")), ("out", _("OUT")), ("full", _("FULL"))],
+        "status_my_options": [("", _("All")), ("pending", _("Pending")), ("waiting", _("Waiting for approval")), ("approved", _("Approved")), ("rejected", _("Rejected")), ("revoked", _("Revoked")), ("canceled", _("Canceled"))],
+        "history_status_options": [("all", _("All")), ("approved", _("Approved")), ("rejected", _("Rejected")), ("revoked", _("Revoked")), ("canceled", _("Canceled"))],
         "mode_label": _mode_label,
         "pd_my": _qs_without(request, ["page_my"]),
         "pd_app": _qs_without(request, ["page_app"]),
-
+        "pd_app_hist": _qs_without(request, ["page_app_hist"]),
         "sort_my": sort_my,
         "dir_my": dir_my,
         "sort_app": sort_app,
         "dir_app": dir_app,
-        "sort_my_urls": {
-            "mode": _sort_url("my", "mode"),
-            "scope": _sort_url("my", "scope"),
-            "start_date": _sort_url("my", "start_date"),
-            "end_date": _sort_url("my", "end_date"),
-            "status": _sort_url("my", "status"),
-        },
-        "sort_app_urls": {
-            "employee": _sort_url("app", "employee"),
-            "mode": _sort_url("app", "mode"),
-            "scope": _sort_url("app", "scope"),
-            "start_date": _sort_url("app", "start_date"),
-            "end_date": _sort_url("app", "end_date"),
-        },
+        "sort_my_urls": {"mode": _sort_url("my", "mode"), "scope": _sort_url("my", "scope"), "start_date": _sort_url("my", "start_date"), "end_date": _sort_url("my", "end_date"), "status": _sort_url("my", "status")},
+        "sort_app_urls": {"employee": _sort_url("app", "employee"), "mode": _sort_url("app", "mode"), "scope": _sort_url("app", "scope"), "start_date": _sort_url("app", "start_date"), "end_date": _sort_url("app", "end_date")},
     }
 
     return render(request, "attendance/work_type_requests/view.html", context)
