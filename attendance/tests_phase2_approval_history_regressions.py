@@ -64,6 +64,7 @@ class Phase2ApprovalHistorySourceRegressionTests(unittest.TestCase):
 
     def test_web_templates_render_nested_approval_history_tabs(self):
         attendance_template = _read('attendance/templates/attendance/attendance_requests/view.html')
+        attendance_history_template = _read('attendance/templates/attendance/attendance_requests/table_approval_history.html')
         work_type_template = _read('attendance/templates/attendance/work_type_requests/view.html')
 
         self.assertIn('Approval History', attendance_template)
@@ -71,6 +72,15 @@ class Phase2ApprovalHistorySourceRegressionTests(unittest.TestCase):
         self.assertIn('table_approval_history.html', attendance_template)
         self.assertIn('data-tab-group', attendance_template)
         self.assertIn('show_approval_tab', attendance_template)
+
+        self.assertIn('attendance_date', attendance_history_template)
+        self.assertIn('request_description', attendance_history_template)
+        self.assertIn('history_attach_counts', attendance_history_template)
+        self.assertIn('history_shift_info', attendance_history_template)
+        self.assertNotIn('r.action_reason', attendance_history_template)
+        self.assertNotIn('r.document_remark', attendance_history_template)
+        self.assertNotIn('r.mode', attendance_history_template)
+        self.assertNotIn('r.scope', attendance_history_template)
 
         self.assertIn('Approval History', work_type_template)
         self.assertIn('approval_subtab', work_type_template)
