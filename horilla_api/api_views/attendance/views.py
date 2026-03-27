@@ -2611,7 +2611,10 @@ class WorkModeRequestApprovalsView(APIView):
         pagenation = PageNumberPagination()
         page = pagenation.paginate_queryset(ordered, request)
         serializer = self.serializer_class(page, many=True, context={"request": request})
-        return pagenation.get_paginated_response(serializer.data)
+        response = pagenation.get_paginated_response(serializer.data)
+        if queue == "history":
+            response.data["employee_options"] = _approval_scope_employee_options(request, work_type=True)
+        return response
 
 
 class WorkModeRequestApproveView(APIView):
