@@ -2369,8 +2369,6 @@ class WorkModeRequestView(APIView):
         page = pagenation.paginate_queryset(ordered, request)
         serializer = self.serializer_class(page, many=True, context={"request": request})
         response = pagenation.get_paginated_response(serializer.data)
-        if queue == "history":
-            response.data["employee_options"] = _approval_scope_employee_options(request, work_type=True)
         return response
 
     def _collect_uploaded_files(self, request):
