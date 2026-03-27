@@ -1,0 +1,114 @@
+{% load i18n %}
+{% load generic_template_filters %}
+<div class="oh-card">
+  <div class="oh-card__body">
+    <form method="get" class="mb-3">
+      <input type="hidden" name="tab" value="approvals">
+      <input type="hidden" name="approval_subtab" value="history">
+      {% if search %}<input type="hidden" name="search" value="{{ search }}">{% endif %}
+      {% if status_my %}<input type="hidden" name="status_my" value="{{ status_my }}">{% endif %}
+      <div class="d-flex flex-wrap" style="gap: 8px; align-items: end;">
+        <div>
+          <label class="oh-label">{% trans "Employee" %}</label>
+          <select name="history_employee_id" class="oh-select">
+            <option value="">{% trans "All employees" %}</option>
+            {% for employee in history_employees %}
+              <option value="{{ employee.id }}" {% if history_employee_id == employee.id|stringformat:'s' %}selected{% endif %}>{{ employee.get_full_name }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div>
+          <label class="oh-label">{% trans "Date" %}</label>
+          <input type="date" name="history_date" class="oh-input" value="{{ history_date }}">
+        </div>
+        <div>
+          <label class="oh-label">{% trans "Request Status" %}</label>
+          <select name="history_status" class="oh-select">
+            {% for value,label in history_status_options %}
+              <option value="{{ value }}" {% if history_status == value %}selected{% endif %}>{{ label }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div>
+          <button type="submit" class="oh-btn oh-btn--secondary">{% trans "Apply" %}</button>
+        </div>
+      </div>
+    </form>
+
+    <div class="oh-sticky-table oh-sticky-table--no-overflow">
+      <div class="oh-sticky-table__table">
+        <div class="oh-sticky-table__thead">
+          <div class="oh-sticky-table__tr">
+            <div class="oh-sticky-table__th">{% trans "Employee" %}</div>
+            <div class="oh-sticky-table__th">{% trans "Date" %}</div>
+            <div class="oh-sticky-table__th">{% trans "Status" %}</div>
+            <div class="oh-sticky-table__th">{% trans "Attachments" %}</div>
+            <div class="oh-sticky-table__th">{% trans "Action" %}</div>
+            <div class="oh-sticky-table__th">{% trans "Reason / Note" %}</div>
+          </div>
+        </div>
+        <div class="oh-sticky-table__tbody">
+          {% if approval_history.paginator.count %}
+            {% for r in approval_history %}
+              <div class="oh-sticky-table__tr">
+                <div class="oh-sticky-table__td">{{ r.employee_id.get_full_name }}</div>
+                <div class="oh-sticky-table__td">{{ r.attendance_date|default:'-' }}</div>
+                <div class="oh-sticky-table__td">
+                  {% with rt=r.request_type|default:'' at=r.action_type|default:'' %}
+                    {% if r.is_validate_request %}
+                      <span class="oh-badge oh-badge--warning oh-badge--small oh-badge--round">{% trans "WAITING" %}</span>
+                    {% elif r.is_validate_request_approved or r.attendance_validated or rt == 'create_request' or at == 'APPROVED' %}
+                      <span class="oh-badge oh-badge--info oh-badge--small oh-badge--round">{% trans "APPROVED" %}</span>
+                    {% elif rt == 'reject_request' or at == 'REJECTED' %}
+                      <span class="oh-badge oh-badge--danger oh-badge--small oh-badge--round">{% trans "REJECTED" %}</span>
+                    {% elif rt == 'revoke_request' or at == 'REVOKED' %}
+                      <span class="oh-badge oh-badge--secondary oh-badge--small oh-badge--round">{% trans "REVOKED" %}</span>
+                    {% elif rt == 'cancel_request' or at == 'CANCELED' %}
+                      <span class="oh-badge oh-badge--secondary oh-badge--small oh-badge--round">{% trans "CANCELED" %}</span>
+                    {% else %}
+                      <span class="oh-badge oh-badge--secondary oh-badge--small oh-badge--round">{{ r.request_type|default:r.action_type|default:'-' }}</span>
+                    {% endif %}
+                  {% endwith %}
+                </div>
+                <div class="oh-sticky-table__td">
+                  <button class="oh-btn oh-btn--light-bkg"
+                    data-toggle="oh-modal-toggle" data-target="#attendanceRequestAttachmentsModal"
+                    hx-get="{% url 'attendance-request-attachments' r.id %}"
+                    hx-target="#attendanceRequestAttachmentsModalBody"
+                    onclick="event.preventDefault()">
+                    <ion-icon name="attach-outline" class="mr-1"></ion-icon>
+                    <span class="oh-badge oh-badge--secondary oh-badge--small oh-badge--round mr-1">{{ history_attach_counts|get_item:r.id|default:'0' }}</span>
+                    {% trans "View" %}
+                  </button>
+                </div>
+                <div class="oh-sticky-table__td">
+                  {% if r.action_by %}{{ r.action_by.get_full_name|default:r.action_by }}{% else %}-{% endif %}
+                  {% if r.action_at %}<div class="text-muted" style="font-size: 11px; margin-top: 4px;">{{ r.action_at }}</div>{% endif %}
+                </div>
+                <div class="oh-sticky-table__td">
+                  {{ r.request_description|default:'-' }}
+                </div>
+              </div>
+            {% endfor %}
+          {% else %}
+            <div class="oh-sticky-table__tr"><div class="oh-sticky-table__td" style="padding:18px;">{% trans "No approval history found." %}</div></div>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+
+    {% if approval_history.paginator.num_pages > 1 %}
+      <nav class="oh-pagination mt-3"><ul class="oh-pagination__list">
+        {% if approval_history.has_previous %}
+          <li class="oh-pagination__item oh-pagination__item--wide"><a class="oh-pagination__link" href="?{% if pd_app_hist %}{{ pd_app_hist }}&{% endif %}page_app_hist=1">{% trans "First" %}</a></li>
+          <li class="oh-pagination__item oh-pagination__item--wide"><a class="oh-pagination__link" href="?{% if pd_app_hist %}{{ pd_app_hist }}&{% endif %}page_app_hist={{ approval_history.previous_page_number }}">{% trans "Previous" %}</a></li>
+        {% endif %}
+        <li class="oh-pagination__item"><span class="oh-pagination__link">{{ approval_history.number }} / {{ approval_history.paginator.num_pages }}</span></li>
+        {% if approval_history.has_next %}
+          <li class="oh-pagination__item oh-pagination__item--wide"><a class="oh-pagination__link" href="?{% if pd_app_hist %}{{ pd_app_hist }}&{% endif %}page_app_hist={{ approval_history.next_page_number }}">{% trans "Next" %}</a></li>
+          <li class="oh-pagination__item oh-pagination__item--wide"><a class="oh-pagination__link" href="?{% if pd_app_hist %}{{ pd_app_hist }}&{% endif %}page_app_hist={{ approval_history.paginator.num_pages }}">{% trans "Last" %}</a></li>
+        {% endif %}
+      </ul></nav>
+    {% endif %}
+  </div>
+</div>
