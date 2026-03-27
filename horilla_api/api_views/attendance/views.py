@@ -206,6 +206,119 @@ def _log_attendance_request_status_change(attendance: Attendance, request, *, ac
         )
         raise
 
+def _parse_filter_date(value):
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(raw, fmt).date()
+        except Exception:
+            continue
+    try:
+        return date.fromisoformat(raw)
+    except Exception:
+        return None
+
+
+def _attendance_request_history_scope(request):
+    request_history_filter = (
+        Q(is_validate_request=True)
+        | Q(is_validate_request_approved=True)
+        | Q(action_type__in=[
+            AttendanceRequestActionType.APPROVED,
+            AttendanceRequestActionType.REJECTED,
+            AttendanceRequestActionType.CANCELED,
+            AttendanceRequestActionType.REVOKED,
+        ])
+        | Q(request_type__in=["create_request", "cancel_request", "reject_request", "revoke_request"])
+    )
+    qs = Attendance.objects.filter(request_history_filter).exclude(employee_id__employee_user_id=request.user).distinct()
+    is_super = bool(getattr(request.user, "is_superuser", False))
+    has_global_perm = bool(getattr(request.user, "has_perm", lambda _p: False)("attendance.change_attendance"))
+    if is_super or has_global_perm:
+        return qs
+    if is_reportingmanager(request):
+        return filtersubordinates(request=request, perm="attendance.change_attendance", queryset=qs)
+    return Attendance.objects.none()
+
+
+def _attendance_history_status_filter(qs, status_value):
+    status_value = (status_value or "").strip().lower()
+    if not status_value or status_value == "all":
+        return qs.exclude(is_validate_request=True)
+    if status_value == "waiting":
+        return qs.filter(is_validate_request=True)
+    if status_value == "approved":
+        return qs.filter(Q(is_validate_request_approved=True) | Q(attendance_validated=True)).exclude(is_validate_request=True)
+    if status_value == "rejected":
+        return qs.filter(Q(request_type="reject_request") | Q(action_type=AttendanceRequestActionType.REJECTED))
+    if status_value in {"canceled", "cancel"}:
+        return qs.filter(Q(request_type="cancel_request") | Q(action_type=AttendanceRequestActionType.CANCELED))
+    if status_value == "revoked":
+        return qs.filter(Q(request_type="revoke_request") | Q(action_type=AttendanceRequestActionType.REVOKED))
+    return qs.exclude(is_validate_request=True)
+
+
+def _work_mode_history_scope(request):
+    qs = WorkModeRequest.objects.all().exclude(employee_id__employee_user_id=request.user)
+    include_all = _is_admin_with_perm(request, "attendance.change_workmoderequest")
+    if not include_all:
+        sub_ids = _subordinate_employee_ids(request)
+        if not sub_ids:
+            return WorkModeRequest.objects.none()
+        qs = qs.filter(employee_id__id__in=sub_ids)
+    return qs
+
+
+def _work_mode_history_status_filter(qs, status_value):
+    status_value = (status_value or "").strip().lower()
+    if not status_value or status_value == "all":
+        return qs.exclude(status=WorkModeRequestStatus.PENDING)
+    mapping = {
+        "waiting": WorkModeRequestStatus.WAITING_FOR_APPROVAL,
+        "waiting_for_approval": WorkModeRequestStatus.WAITING_FOR_APPROVAL,
+        "approved": WorkModeRequestStatus.APPROVED,
+        "rejected": WorkModeRequestStatus.REJECTED,
+        "revoked": WorkModeRequestStatus.REVOKED,
+        "canceled": WorkModeRequestStatus.CANCELED,
+        "cancel": WorkModeRequestStatus.CANCELED,
+    }
+    wanted = mapping.get(status_value)
+    return qs.filter(status=wanted) if wanted else qs.exclude(status=WorkModeRequestStatus.PENDING)
+
+
+def _approval_scope_employee_options(request, *, work_type=False):
+    queryset = Employee.objects.all().order_by("employee_first_name", "employee_last_name", "id")
+    if work_type:
+        if not _is_admin_with_perm(request, "attendance.change_workmoderequest"):
+            subordinate_ids = _subordinate_employee_ids(request)
+            if not subordinate_ids:
+                queryset = Employee.objects.none()
+            else:
+                queryset = queryset.filter(id__in=subordinate_ids)
+    else:
+        is_super = bool(getattr(request.user, "is_superuser", False))
+        has_global_perm = bool(getattr(request.user, "has_perm", lambda _p: False)("attendance.change_attendance"))
+        if not (is_super or has_global_perm):
+            if is_reportingmanager(request):
+                queryset = filtersubordinatesemployeemodel(request, queryset, "attendance.change_attendance")
+            else:
+                queryset = Employee.objects.none()
+    employee = getattr(getattr(request.user, "employee_get", None), "id", None)
+    if employee is not None:
+        queryset = queryset.exclude(id=employee)
+    return [
+        {
+            "id": emp.id,
+            "employee_first_name": (getattr(emp, "employee_first_name", "") or "").strip(),
+            "employee_last_name": (getattr(emp, "employee_last_name", "") or "").strip(),
+            "name": (f"{(getattr(emp, 'employee_first_name', '') or '').strip()} {(getattr(emp, 'employee_last_name', '') or '').strip()}").strip() or f"Employee #{emp.id}",
+        }
+        for emp in queryset.distinct()
+    ]
+
+
 def _is_attendance_exempt_manager(employee) -> bool:
     """Return True if employee should be excluded from IN/OUT attendance.
 
@@ -1478,6 +1591,8 @@ class AttendanceRequestView(APIView):
             return Response(serializer.data, status=200)
 
         # List
+        approval_view = (request.GET.get("approval_view") or "").strip().lower()
+
         # 1) Approvals: pending requests that the current user can act on (admin/supervisor/manager)
         approvals_qs = Attendance.objects.filter(is_validate_request=True)
         approvals_qs = filtersubordinates(
@@ -1485,8 +1600,6 @@ class AttendanceRequestView(APIView):
             perm="attendance.change_attendance",
             queryset=approvals_qs,
         )
-
-        # Never include own requests in approvals list (cannot self-approve)
         approvals_qs = approvals_qs.exclude(employee_id__employee_user_id=request.user).distinct()
 
         # 2) My requests: history (pending/approved/rejected/canceled) but not all attendance rows
@@ -1511,7 +1624,16 @@ class AttendanceRequestView(APIView):
             request_history_filter
         ).distinct()
 
-        requests = (approvals_qs | my_qs).distinct()
+        if approval_view == "history":
+            requests = _attendance_request_history_scope(request)
+            employee_id = (request.GET.get("employee_id") or "").strip()
+            if employee_id:
+                requests = requests.filter(employee_id_id=employee_id)
+            history_date = _parse_filter_date(request.GET.get("date")) or dj_timezone.localdate()
+            requests = requests.filter(attendance_date=history_date)
+            requests = _attendance_history_status_filter(requests, request.GET.get("status"))
+        else:
+            requests = (approvals_qs | my_qs).distinct()
 
         request_filtered_queryset = AttendanceFilters(request.GET, requests).qs
         field_name = request.GET.get("groupby_field", None)
@@ -1522,7 +1644,10 @@ class AttendanceRequestView(APIView):
         pagenation = PageNumberPagination()
         page = pagenation.paginate_queryset(request_filtered_queryset.order_by("-id"), request)
         serializer = self.serializer_class(page, many=True, context={"request": request})
-        return pagenation.get_paginated_response(serializer.data)
+        response = pagenation.get_paginated_response(serializer.data)
+        if approval_view == "history":
+            response.data["employee_options"] = _approval_scope_employee_options(request, work_type=False)
+        return response
 
 
     @transaction.atomic
@@ -2214,7 +2339,10 @@ class WorkModeRequestView(APIView):
         pagenation = PageNumberPagination()
         page = pagenation.paginate_queryset(ordered, request)
         serializer = self.serializer_class(page, many=True, context={"request": request})
-        return pagenation.get_paginated_response(serializer.data)
+        response = pagenation.get_paginated_response(serializer.data)
+        if queue == "history":
+            response.data["employee_options"] = _approval_scope_employee_options(request, work_type=True)
+        return response
 
     def _collect_uploaded_files(self, request):
         uploaded = []
@@ -2388,24 +2516,16 @@ class WorkModeRequestApprovalsView(APIView):
 
         include_pending_on_duty = _is_admin_with_perm(request, "attendance.change_workmoderequest")
         queue = (request.GET.get("queue") or "approval").strip().lower()
-        if queue == "document_review":
-            queue_q = work_mode_request_document_review_q()
-        elif queue == "all":
-            queue_q = work_mode_request_approval_q(include_pending_on_duty=include_pending_on_duty) | work_mode_request_document_review_q()
-        else:
-            queue_q = work_mode_request_approval_q(include_pending_on_duty=include_pending_on_duty)
 
-        qs = WorkModeRequest.objects.filter(queue_q).exclude(employee_id__employee_user_id=request.user)
-
-        if not include_pending_on_duty:
-            sub_ids = _subordinate_employee_ids(request)
-            if not sub_ids:
-                qs = qs.none()
-            else:
-                qs = qs.filter(employee_id__id__in=sub_ids)
-
-        ordered = list(qs.order_by("-id"))
-        if queue in {"approval", "document_review", "all"}:
+        if queue == "history":
+            qs = _work_mode_history_scope(request)
+            employee_id = (request.GET.get("employee_id") or "").strip()
+            if employee_id:
+                qs = qs.filter(employee_id_id=employee_id)
+            history_date = _parse_filter_date(request.GET.get("date")) or dj_timezone.localdate()
+            qs = qs.filter(start_date__lte=history_date, end_date__gte=history_date)
+            qs = _work_mode_history_status_filter(qs, request.GET.get("status"))
+            ordered = list(qs.order_by("-id"))
             filtered = []
             for req in ordered:
                 try:
@@ -2417,14 +2537,48 @@ class WorkModeRequestApprovalsView(APIView):
                         queue,
                     )
                     continue
-                if queue == "approval" and queue_type != "approval":
-                    continue
-                if queue == "document_review" and queue_type != "document_review":
-                    continue
-                if queue == "all" and queue_type not in {"approval", "document_review"}:
+                if queue_type in {"approval", "document_review"}:
                     continue
                 filtered.append(req)
             ordered = filtered
+        else:
+            if queue == "document_review":
+                queue_q = work_mode_request_document_review_q()
+            elif queue == "all":
+                queue_q = work_mode_request_approval_q(include_pending_on_duty=include_pending_on_duty) | work_mode_request_document_review_q()
+            else:
+                queue_q = work_mode_request_approval_q(include_pending_on_duty=include_pending_on_duty)
+
+            qs = WorkModeRequest.objects.filter(queue_q).exclude(employee_id__employee_user_id=request.user)
+
+            if not include_pending_on_duty:
+                sub_ids = _subordinate_employee_ids(request)
+                if not sub_ids:
+                    qs = qs.none()
+                else:
+                    qs = qs.filter(employee_id__id__in=sub_ids)
+
+            ordered = list(qs.order_by("-id"))
+            if queue in {"approval", "document_review", "all"}:
+                filtered = []
+                for req in ordered:
+                    try:
+                        queue_type = classify_work_mode_request_queue(req)
+                    except WorkModeRequestConsistencyError:
+                        logger.exception(
+                            "Skipping inconsistent work-mode request %s while building queue %s",
+                            getattr(req, "id", None),
+                            queue,
+                        )
+                        continue
+                    if queue == "approval" and queue_type != "approval":
+                        continue
+                    if queue == "document_review" and queue_type != "document_review":
+                        continue
+                    if queue == "all" and queue_type not in {"approval", "document_review"}:
+                        continue
+                    filtered.append(req)
+                ordered = filtered
         pagenation = PageNumberPagination()
         page = pagenation.paginate_queryset(ordered, request)
         serializer = self.serializer_class(page, many=True, context={"request": request})
