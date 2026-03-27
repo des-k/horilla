@@ -204,7 +204,6 @@ DOCUMENT_REVIEW_DOCUMENT_STATUSES = {
     WorkModeRequestDocumentStatus.SUBMITTED,
     WorkModeRequestDocumentStatus.PENDING_VERIFICATION,
     WorkModeRequestDocumentStatus.REJECTED,
-    WorkModeRequestDocumentStatus.VERIFIED,
 }
 
 
