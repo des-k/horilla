@@ -7,7 +7,7 @@ This module is used to register the endpoints to the attendance requests
 import copy
 import logging
 import json
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from urllib.parse import parse_qs
 
 from django.contrib import messages
@@ -90,6 +90,41 @@ from horilla.decorators import (
 from notifications.signals import notify
 
 logger = logging.getLogger(__name__)
+
+
+
+def _parse_history_month_range(raw_value):
+    raw = (raw_value or "").strip()
+    parsed_date = None
+    if raw:
+        for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%Y/%m/%d"):
+            try:
+                parsed_date = datetime.strptime(raw, fmt).date()
+                break
+            except Exception:
+                parsed_date = None
+    if parsed_date is not None:
+        month_start = parsed_date.replace(day=1)
+    elif raw:
+        month_start = None
+        for fmt in ("%Y-%m", "%m-%Y", "%m/%Y", "%Y/%m"):
+            try:
+                parsed = datetime.strptime(raw, fmt)
+                month_start = date(parsed.year, parsed.month, 1)
+                break
+            except Exception:
+                month_start = None
+        if month_start is None:
+            month_start = timezone.localdate().replace(day=1)
+    else:
+        month_start = timezone.localdate().replace(day=1)
+
+    if month_start.month == 12:
+        next_month = date(month_start.year + 1, 1, 1)
+    else:
+        next_month = date(month_start.year, month_start.month + 1, 1)
+    month_end = next_month - timedelta(days=1)
+    return month_start, month_end, month_start.strftime("%Y-%m")
 
 
 # -----------------------------------------------------------------------------
@@ -292,7 +327,7 @@ def request_attendance_view(request):
         approval_subtab = "active"
     show_approval_tab = any(
         key in request.GET
-        for key in ("tab", "approval_subtab", "page_app", "page_app_hist", "history_date", "history_status", "history_employee_id")
+        for key in ("tab", "approval_subtab", "page_app", "page_app_hist", "history_month", "history_status", "history_employee_id")
     ) or (request.GET.get("tab") or "").strip().lower() == "approvals"
 
     history_status = (request.GET.get("history_status") or "all").strip().lower()
@@ -300,17 +335,9 @@ def request_attendance_view(request):
     if history_status not in allowed_history_status:
         history_status = "all"
     history_employee_id = (request.GET.get("history_employee_id") or "").strip()
-    history_date_raw = (request.GET.get("history_date") or "").strip()
-    history_date = None
-    for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%Y/%m/%d"):
-        try:
-            history_date = datetime.strptime(history_date_raw, fmt).date() if history_date_raw else None
-            if history_date:
-                break
-        except Exception:
-            history_date = None
-    if history_date is None:
-        history_date = timezone.localdate()
+    history_month_start, history_month_end, history_month = _parse_history_month_range(
+        request.GET.get("history_month") or request.GET.get("history_date")
+    )
 
     request_history_filter = (
         Q(is_validate_request=True)
@@ -361,7 +388,7 @@ def request_attendance_view(request):
     elif not (has_global_perm or is_super):
         history_base_qs = Attendance.objects.none()
 
-    history_qs = history_base_qs.filter(attendance_date=history_date)
+    history_qs = history_base_qs.filter(attendance_date__range=(history_month_start, history_month_end))
     if history_employee_id:
         history_qs = history_qs.filter(employee_id_id=history_employee_id)
     if history_status == "waiting":
@@ -495,7 +522,7 @@ def request_attendance_view(request):
             "history_status_options": history_status_options,
             "history_employee_id": history_employee_id,
             "history_employees": history_employees,
-            "history_date": history_date.strftime("%Y-%m-%d"),
+            "history_month": history_month,
             "approval_subtab": approval_subtab,
             "show_approval_tab": show_approval_tab,
             "my_attach_counts": my_attach_counts,
