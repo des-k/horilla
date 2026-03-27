@@ -1,12 +1,12 @@
 {% load i18n %}
+{% load generic_template_filters %}
+
 <div class="oh-card">
   <div class="oh-card__body">
     <form method="get" class="mb-3">
       <input type="hidden" name="tab" value="approvals">
       <input type="hidden" name="approval_subtab" value="history">
       {% if search %}<input type="hidden" name="search" value="{{ search }}">{% endif %}
-      {% if mode_filter %}<input type="hidden" name="mode_filter" value="{{ mode_filter }}">{% endif %}
-      {% if scope_filter %}<input type="hidden" name="scope_filter" value="{{ scope_filter }}">{% endif %}
       <div class="d-flex flex-wrap" style="gap: 8px; align-items: end;">
         <div>
           <label class="oh-label">{% trans "Employee" %}</label>
@@ -38,27 +38,62 @@
         <div class="oh-sticky-table__thead">
           <div class="oh-sticky-table__tr">
             <div class="oh-sticky-table__th">{% trans "Employee" %}</div>
-            <div class="oh-sticky-table__th">{% trans "Work Type" %}</div>
-            <div class="oh-sticky-table__th">{% trans "Scope" %}</div>
             <div class="oh-sticky-table__th">{% trans "Date" %}</div>
+            <div class="oh-sticky-table__th">{% trans "Shift" %}</div>
+            <div class="oh-sticky-table__th">{% trans "Check In" %}</div>
+            <div class="oh-sticky-table__th">{% trans "Check Out" %}</div>
             <div class="oh-sticky-table__th">{% trans "Status" %}</div>
-            <div class="oh-sticky-table__th">{% trans "Document Status" %}</div>
-            <div class="oh-sticky-table__th">{% trans "Action" %}</div>
+            <div class="oh-sticky-table__th">{% trans "Attachments" %}</div>
             <div class="oh-sticky-table__th">{% trans "Reason / Note" %}</div>
+            <div class="oh-sticky-table__th">{% trans "Action By" %}</div>
+            <div class="oh-sticky-table__th">{% trans "Action At" %}</div>
           </div>
         </div>
         <div class="oh-sticky-table__tbody">
           {% if approval_history %}
             {% for r in approval_history %}
               <div class="oh-sticky-table__tr">
-                <div class="oh-sticky-table__td">{{ r.employee_id.get_full_name }}</div>
-                <div class="oh-sticky-table__td">{{ r.mode|upper }}</div>
-                <div class="oh-sticky-table__td">{{ r.scope|upper }}</div>
-                <div class="oh-sticky-table__td">{% if r.end_date and r.end_date != r.start_date %}{{ r.start_date }} → {{ r.end_date }}{% else %}{{ r.start_date }}{% endif %}</div>
-                <div class="oh-sticky-table__td"><span class="oh-badge oh-badge--secondary oh-badge--small oh-badge--round">{{ r.status|upper }}</span></div>
-                <div class="oh-sticky-table__td">{% if r.mode == 'on_duty' %}{{ r.get_document_status_display }}{% else %}-{% endif %}</div>
-                <div class="oh-sticky-table__td">{% if r.action_by %}{{ r.action_by.get_full_name|default:r.action_by }}{% else %}-{% endif %}{% if r.action_at %}<div class="text-muted" style="font-size:11px; margin-top:4px;">{{ r.action_at }}</div>{% endif %}</div>
-                <div class="oh-sticky-table__td">{{ r.reason|default:r.action_reason|default:r.document_remark|default:'-' }}</div>
+                <div class="oh-sticky-table__td"><span class="fw-semibold">{{ r.employee_id.get_full_name }}</span></div>
+                <div class="oh-sticky-table__td">{{ r.attendance_date|default:"-" }}</div>
+                <div class="oh-sticky-table__td">
+                  {% with s=history_shift_info|get_item:r.id %}
+                    {% if s %}
+                      <div class="fw-semibold">{{ s.name }}</div>
+                      <div class="text-muted" style="font-size: 12px;">{{ s.start }} - {{ s.end }}{% if s.flexi_minutes %} • Flexi In: {{ s.flexi_minutes }}m{% endif %}</div>
+                    {% else %}
+                      -
+                    {% endif %}
+                  {% endwith %}
+                </div>
+                <div class="oh-sticky-table__td">{% if r.attendance_clock_in %}{{ r.attendance_clock_in|time:"H:i" }}{% else %}-{% endif %}</div>
+                <div class="oh-sticky-table__td">{% if r.attendance_clock_out %}{{ r.attendance_clock_out|time:"H:i" }}{% else %}-{% endif %}</div>
+                <div class="oh-sticky-table__td">
+                  {% if r.request_type == 'cancel_request' %}
+                    <span class="oh-badge oh-badge--secondary oh-badge--small oh-badge--round">{% trans "CANCELED" %}</span>
+                  {% elif r.request_type == 'revoke_request' %}
+                    <span class="oh-badge oh-badge--warning oh-badge--small oh-badge--round">{% trans "REVOKED" %}</span>
+                  {% elif r.request_type == 'reject_request' or r.action_type == 'rejected' %}
+                    <span class="oh-badge oh-badge--danger oh-badge--small oh-badge--round">{% trans "REJECTED" %}</span>
+                  {% elif r.is_validate_request_approved or r.attendance_validated %}
+                    <span class="oh-badge oh-badge--success oh-badge--small oh-badge--round">{% trans "APPROVED" %}</span>
+                  {% else %}
+                    <span class="oh-badge oh-badge--secondary oh-badge--small oh-badge--round">-</span>
+                  {% endif %}
+                </div>
+                <div class="oh-sticky-table__td">
+                  <button class="oh-btn oh-btn--light-bkg"
+                    data-toggle="oh-modal-toggle" data-target="#attendanceRequestAttachmentsModal"
+                    hx-get="{% url 'attendance-request-attachments' r.id %}"
+                    hx-target="#attendanceRequestAttachmentsModalBody"
+                    onclick="event.preventDefault()">
+                    <ion-icon name="attach-outline" class="mr-1"></ion-icon>
+                    <span class="oh-badge oh-badge--secondary oh-badge--small oh-badge--round mr-1">{{ history_attach_counts|get_item:r.id|default:"0" }}</span>
+                    {% trans "View" %}
+                  </button>
+                </div>
+                <div class="oh-sticky-table__td"><span class="text-truncate" style="max-width: 320px; display: inline-block;">{{ r.request_description|default:"-" }}</span></div>
+                <div class="oh-sticky-table__td">{% if r.action_by %}{{ r.action_by.get_full_name }}{% else %}-{% endif %}</div>
+                <div class="oh-sticky-table__td">{% if r.action_at %}{{ r.action_at|date:"Y-m-d H:i" }}{% else %}-{% endif %}</div>
               </div>
             {% endfor %}
           {% else %}
