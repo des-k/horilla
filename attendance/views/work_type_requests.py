@@ -14,7 +14,7 @@ Spec:
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from django.contrib import messages
 from django.http import FileResponse, Http404, HttpResponse, HttpResponseForbidden
 from django.shortcuts import get_object_or_404, render
@@ -77,6 +77,41 @@ def _can_act_on_request(request, req: WorkModeRequest) -> bool:
 
 def _request_actor_employee(request):
     return request_actor_employee(request)
+
+
+
+def _parse_history_month_range(raw_value):
+    raw = (raw_value or "").strip()
+    parsed_date = None
+    if raw:
+        for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%Y/%m/%d"):
+            try:
+                parsed_date = datetime.strptime(raw, fmt).date()
+                break
+            except Exception:
+                parsed_date = None
+    if parsed_date is not None:
+        month_start = parsed_date.replace(day=1)
+    elif raw:
+        month_start = None
+        for fmt in ("%Y-%m", "%m-%Y", "%m/%Y", "%Y/%m"):
+            try:
+                parsed = datetime.strptime(raw, fmt)
+                month_start = parsed.date().replace(day=1)
+                break
+            except Exception:
+                month_start = None
+        if month_start is None:
+            month_start = timezone.localdate().replace(day=1)
+    else:
+        month_start = timezone.localdate().replace(day=1)
+
+    if month_start.month == 12:
+        next_month = month_start.replace(year=month_start.year + 1, month=1, day=1)
+    else:
+        next_month = month_start.replace(month=month_start.month + 1, day=1)
+    month_end = next_month - timedelta(days=1)
+    return month_start, month_end, month_start.strftime("%Y-%m")
 
 
 def _request_actor_label(request, fallback):
@@ -163,21 +198,13 @@ def work_type_request_view(request):
         approval_subtab = "active"
     show_approval_tab = any(
         key in request.GET
-        for key in ("tab", "approval_subtab", "page_app", "page_app_hist", "history_date", "history_status", "history_employee_id")
+        for key in ("tab", "approval_subtab", "page_app", "page_app_hist", "history_month", "history_status", "history_employee_id")
     ) or (request.GET.get("tab") or "").strip().lower() == "approvals"
     history_status = (request.GET.get("history_status") or "all").strip().lower()
     history_employee_id = (request.GET.get("history_employee_id") or "").strip()
-    history_date_raw = (request.GET.get("history_date") or "").strip()
-    history_date = None
-    for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%Y/%m/%d"):
-        try:
-            history_date = datetime.strptime(history_date_raw, fmt).date() if history_date_raw else None
-            if history_date:
-                break
-        except Exception:
-            history_date = None
-    if history_date is None:
-        history_date = timezone.localdate()
+    history_month_start, history_month_end, history_month = _parse_history_month_range(
+        request.GET.get("history_month") or request.GET.get("history_date")
+    )
 
     allowed_mode_filter = {"": None, "all": None, "wfa": AttendanceWorkMode.WFA, "on_duty": AttendanceWorkMode.ON_DUTY}
     allowed_scope_filter = {"": None, "all": None, "in": "in", "out": "out", "full": "full"}
@@ -275,7 +302,7 @@ def work_type_request_view(request):
         history_base_qs = filtersubordinates(request=request, queryset=history_base_qs, perm="attendance.change_workmoderequest", field="employee_id")
     if mode_value: history_base_qs = history_base_qs.filter(mode=mode_value)
     if scope_value: history_base_qs = history_base_qs.filter(scope=scope_value)
-    history_base_qs = history_base_qs.filter(start_date__lte=history_date, end_date__gte=history_date).exclude(status=WorkModeRequestStatus.PENDING)
+    history_base_qs = history_base_qs.filter(start_date__lte=history_month_end, end_date__gte=history_month_start).exclude(status=WorkModeRequestStatus.PENDING)
     if history_employee_id:
         history_base_qs = history_base_qs.filter(employee_id_id=history_employee_id)
     history_status_value = allowed_history_status.get(history_status)
@@ -353,7 +380,7 @@ def work_type_request_view(request):
         "history_status": history_status,
         "history_employee_id": history_employee_id,
         "history_employees": history_employees,
-        "history_date": history_date.strftime('%Y-%m-%d'),
+        "history_month": history_month,
         "approval_subtab": approval_subtab,
         "show_approval_tab": show_approval_tab,
         "mode_filter": mode_filter,
