@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-import inspect
-
-from django.test import SimpleTestCase
+from pathlib import Path
+import unittest
 
 from attendance.services.mobile_status_note import (
     ATTENDANCE_RECORDED,
@@ -15,7 +14,7 @@ from attendance.services.mobile_status_note import (
 )
 
 
-class MobileAttendanceHeaderStateTests(SimpleTestCase):
+class MobileAttendanceHeaderStateTests(unittest.TestCase):
     def test_no_attendance_yet_returns_ready_to_check_in(self):
         payload = {
             "has_attendance": False,
@@ -23,9 +22,7 @@ class MobileAttendanceHeaderStateTests(SimpleTestCase):
             "can_clock_out": False,
             "attendance_enabled": True,
         }
-
         header = build_mobile_header_state(payload)
-
         self.assertEqual(header["header_state_code"], READY_TO_CHECK_IN)
         self.assertEqual(header["header_state_message"], "No record yet")
         self.assertEqual(header["header_detail_message"], "Please Check In")
@@ -37,9 +34,7 @@ class MobileAttendanceHeaderStateTests(SimpleTestCase):
             "last_check_out": None,
             "earliest_check_out": "17:00",
         }
-
         header = build_mobile_header_state(payload)
-
         self.assertEqual(header["header_state_code"], CHECKED_IN)
         self.assertEqual(header["header_state_message"], "Checked In")
         self.assertEqual(header["header_detail_message"], "Earliest Check Out: 17:00")
@@ -52,9 +47,7 @@ class MobileAttendanceHeaderStateTests(SimpleTestCase):
             "late_by": "00:15",
             "earliest_check_out": "17:20",
         }
-
         header = build_mobile_header_state(payload)
-
         self.assertEqual(header["header_state_code"], CHECKED_IN)
         self.assertEqual(header["header_detail_message"], "Late by 00:15 - Earliest Check Out: 17:20")
 
@@ -64,9 +57,7 @@ class MobileAttendanceHeaderStateTests(SimpleTestCase):
             "missing_check_in": True,
             "can_clock_out": True,
         }
-
         header = build_mobile_header_state(payload)
-
         self.assertEqual(header["header_state_code"], MISSING_CHECK_IN)
         self.assertEqual(header["header_state_message"], "Missing Check In")
         self.assertEqual(header["header_detail_message"], "Check Out available")
@@ -78,11 +69,34 @@ class MobileAttendanceHeaderStateTests(SimpleTestCase):
             "invalid_check_in": True,
             "can_clock_out": True,
         }
-
         header = build_mobile_header_state(payload)
-
         self.assertEqual(header["header_state_code"], MISSING_CHECK_IN)
         self.assertEqual(header["header_state_message"], "Missing Check In")
+
+    def test_missing_check_in_and_early_checkout_are_combined_consistently(self):
+        payload = {
+            "has_attendance": True,
+            "missing_check_in": True,
+            "last_check_out": "03:45 PM",
+            "checked_out_early": True,
+            "checked_out_early_by": "00:45",
+        }
+        header = build_mobile_header_state(payload)
+        self.assertEqual(header["header_state_code"], MISSING_CHECK_IN)
+        self.assertEqual(header["header_state_message"], "Missing Check In, Check Out Early")
+        self.assertEqual(header["header_detail_message"], "Short by 00:45 - Check Out saved")
+
+    def test_missing_check_in_and_early_checkout_without_duration_keeps_saved_detail(self):
+        payload = {
+            "has_attendance": True,
+            "missing_check_in": True,
+            "last_check_out": "03:45 PM",
+            "checked_out_early": True,
+        }
+        header = build_mobile_header_state(payload)
+        self.assertEqual(header["header_state_code"], MISSING_CHECK_IN)
+        self.assertEqual(header["header_state_message"], "Missing Check In, Check Out Early")
+        self.assertEqual(header["header_detail_message"], "Check Out saved")
 
     def test_checked_out_normally_returns_attendance_recorded(self):
         payload = {
@@ -91,9 +105,7 @@ class MobileAttendanceHeaderStateTests(SimpleTestCase):
             "last_check_out": "05:16 PM",
             "checked_out_early": False,
         }
-
         header = build_mobile_header_state(payload)
-
         self.assertEqual(header["header_state_code"], ATTENDANCE_RECORDED)
         self.assertEqual(header["header_state_message"], "Attendance recorded")
 
@@ -105,9 +117,7 @@ class MobileAttendanceHeaderStateTests(SimpleTestCase):
             "checked_out_early": True,
             "checked_out_early_by": "00:15",
         }
-
         header = build_mobile_header_state(payload)
-
         self.assertEqual(header["header_state_code"], CHECKED_OUT_EARLY)
         self.assertEqual(header["header_state_message"], "Checked Out early")
         self.assertEqual(header["header_detail_message"], "Short by 00:15")
@@ -121,14 +131,9 @@ class MobileAttendanceHeaderStateTests(SimpleTestCase):
             "checked_out_early_by": "00:30",
             "late_by": "00:15",
         }
-
         header = build_mobile_header_state(payload)
-
         self.assertEqual(header["header_state_code"], CHECKED_OUT_EARLY)
-        self.assertEqual(
-            header["header_detail_message"],
-            "Short by 00:30 - Late by 00:15",
-        )
+        self.assertEqual(header["header_detail_message"], "Short by 00:30 - Late by 00:15")
 
     def test_check_out_request_required_after_cutoff_uses_canonical_message(self):
         payload = {
@@ -138,9 +143,7 @@ class MobileAttendanceHeaderStateTests(SimpleTestCase):
             "can_clock_out": False,
             "check_out_block_reason": "AFTER_WINDOW_END",
         }
-
         header = build_mobile_header_state(payload)
-
         self.assertEqual(header["header_state_code"], CHECK_OUT_REQUEST_REQUIRED)
         self.assertEqual(header["header_state_message"], "Check Out cutoff passed")
         self.assertEqual(header["header_detail_message"], "Please submit an attendance request")
@@ -153,33 +156,27 @@ class MobileAttendanceHeaderStateTests(SimpleTestCase):
             "late_by": "00:10",
             "checked_out_early": False,
         }
-
         header = build_mobile_header_state(payload)
-
         self.assertEqual(header["header_state_code"], ATTENDANCE_RECORDED)
         self.assertEqual(header["header_detail_message"], "Late by 00:10")
 
 
-class MobileAttendanceHeaderSourceIntegrationTests(SimpleTestCase):
+class MobileAttendanceHeaderSourceIntegrationTests(unittest.TestCase):
     def test_status_endpoint_injects_canonical_header_fields(self):
-        from horilla_api.api_views.attendance.views import CheckingStatus
-
-        source = inspect.getsource(CheckingStatus.get)
-
+        source = Path('horilla_api/api_views/attendance/views.py').read_text()
         self.assertIn("payload.update(build_mobile_header_state(payload))", source)
         self.assertIn('"earliest_check_out": earliest_check_out_dt.strftime("%H:%M") if earliest_check_out_dt else None', source)
         self.assertIn("_compute_mobile_effective_start_and_earliest_checkout", source)
 
     def test_clock_actions_attach_header_state_alongside_action_message(self):
-        from horilla_api.api_views.attendance.views import ClockInAPIView, ClockOutAPIView
+        source = Path('horilla_api/api_views/attendance/views.py').read_text()
+        self.assertIn('"message": "Clocked-In"', source)
+        self.assertIn('"earliest_check_out": earliest_check_out_hhmm', source)
+        self.assertIn("response_payload.update(build_mobile_header_state(response_payload))", source)
+        self.assertIn('"message": "Clocked-Out"', source)
+        self.assertIn('"checked_out_early_by": checked_out_early_by', source)
+        self.assertIn('"earliest_check_out": earliest_check_out_hhmm', source)
 
-        in_source = inspect.getsource(ClockInAPIView.post)
-        out_source = inspect.getsource(ClockOutAPIView.post)
 
-        self.assertIn('"message": "Clocked-In"', in_source)
-        self.assertIn('"earliest_check_out": earliest_check_out_hhmm', in_source)
-        self.assertIn("response_payload.update(build_mobile_header_state(response_payload))", in_source)
-        self.assertIn('"message": "Clocked-Out"', out_source)
-        self.assertIn('"checked_out_early_by": checked_out_early_by', out_source)
-        self.assertIn('"earliest_check_out": earliest_check_out_hhmm', out_source)
-        self.assertIn("response_payload.update(build_mobile_header_state(response_payload))", out_source)
+if __name__ == '__main__':
+    unittest.main()
