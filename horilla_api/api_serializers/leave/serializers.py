@@ -2,7 +2,7 @@ from rest_framework import serializers
 
 from employee.models import Employee
 from leave.half_day_rules import validate_second_half_leave_submission
-from leave.methods import calculate_requested_days
+from leave.methods import calculate_requested_days, active_overlapping_leave_requests
 from leave.models import *
 
 
@@ -54,11 +54,12 @@ def leave_Validations(self, data):
     )
     errors = {}
     # checking if there is any requested days is overlapping with the existing leave request
-    leave_requests = employee.leaverequest_set.exclude(
-        status__in=["cancelled", "rejected"]
-    ).filter(start_date__lte=end_date, end_date__gte=start_date)
-    if self.instance:
-        leave_requests = leave_requests.exclude(id=self.instance.id)
+    leave_requests = active_overlapping_leave_requests(
+        employee=employee,
+        start_date=start_date,
+        end_date=end_date,
+        exclude_id=getattr(self.instance, "id", None),
+    )
     if leave_requests:
         raise serializers.ValidationError(
             "There is already a leave request for this date range."
