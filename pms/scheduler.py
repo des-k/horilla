@@ -1,4 +1,6 @@
 from datetime import datetime, timedelta
+import os
+import sys
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -37,11 +39,15 @@ def cyclic_feedback_creation():
     return
 
 
-scheduler = BackgroundScheduler()
-cron_trigger = CronTrigger(hour=8)
-grace_time_seconds = int(timedelta(days=1).total_seconds())
-scheduler.add_job(
-    cyclic_feedback_creation, cron_trigger, misfire_grace_time=grace_time_seconds
-)
+if os.environ.get("HORILLA_DISABLE_SCHEDULERS") != "1" and not any(
+    cmd in sys.argv
+    for cmd in ["makemigrations", "migrate", "compilemessages", "flush", "shell", "test"]
+):
+    scheduler = BackgroundScheduler()
+    cron_trigger = CronTrigger(hour=8)
+    grace_time_seconds = int(timedelta(days=1).total_seconds())
+    scheduler.add_job(
+        cyclic_feedback_creation, cron_trigger, misfire_grace_time=grace_time_seconds
+    )
 
-scheduler.start()
+    scheduler.start()
