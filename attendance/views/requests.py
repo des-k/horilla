@@ -67,6 +67,7 @@ from attendance.services.attendance_request_access import (
     user_can_view_request,
 )
 from attendance.services.attendance_correction_scope_rules import load_requested_data
+from attendance.services.attendance_request_presentation import build_attendance_request_time_surface
 from base.methods import (
     choosesubordinates,
     closest_numbers,
@@ -469,6 +470,14 @@ def request_attendance_view(request):
         app_shift_info = {}
         history_shift_info = {}
 
+    try:
+        history_time_surface = {
+            obj.id: build_attendance_request_time_surface(obj)
+            for obj in list(getattr(approval_history, "object_list", []) or [])
+        }
+    except Exception:
+        history_time_surface = {}
+
     can_approve = bool(request.user.has_perm("attendance.change_attendance") or is_reportingmanager(request))
     status_my_options = [
         ("all", _("All")),
@@ -531,6 +540,7 @@ def request_attendance_view(request):
             "my_shift_info": my_shift_info,
             "app_shift_info": app_shift_info,
             "history_shift_info": history_shift_info,
+            "history_time_surface": history_time_surface,
             "pd_my": pd_my,
             "pd_app": pd_app,
             "pd_app_hist": pd_app_hist,
@@ -622,6 +632,10 @@ def request_new(request):
                 for up in uploaded:
                     arf = AttendanceRequestFile.objects.create(file=up)
                     attendance_obj.request_attachments.add(arf)
+
+            warning_text = " ".join(dict.fromkeys(getattr(form, "window_warnings", []) or []))
+            if warning_text:
+                messages.warning(request, warning_text)
 
             if is_created:
                 messages.success(request, _("New attendance request created"))
@@ -1115,8 +1129,10 @@ def approve_validate_attendance_request(request, attendance_id):
 
     is_valid_request, validation_error = validate_requested_data_with_windows(attendance)
     if not is_valid_request:
-        messages.error(request, validation_error or _("Requested attendance is outside the allowed attendance window."))
+        messages.error(request, validation_error or _("Requested attendance cannot be approved because required shift context is missing."))
         return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+    if validation_error:
+        messages.warning(request, validation_error)
 
     wants_in, wants_out = get_requested_sessions(attendance)
     _apply_request_override_snapshot(attendance, include_in=wants_in, include_out=wants_out)
@@ -1514,6 +1530,7 @@ def bulk_approve_attendance_request(request):
     """Approve multiple attendance requests (single-session aware)."""
 
     ids = json.loads(request.POST["ids"])
+    warning_count = 0
     for attendance_id in ids:
         # Lock row per id to prevent partial updates in concurrent approvals
         attendance = Attendance.objects.select_for_update().get(id=attendance_id)
@@ -1535,6 +1552,8 @@ def bulk_approve_attendance_request(request):
         is_valid_request, _validation_error = validate_requested_data_with_windows(attendance)
         if not is_valid_request:
             continue
+        if _validation_error:
+            warning_count += 1
 
         wants_in, wants_out = get_requested_sessions(attendance)
         _apply_request_override_snapshot(attendance, include_in=wants_in, include_out=wants_out)
@@ -1614,6 +1633,8 @@ def bulk_approve_attendance_request(request):
                 recipient_role="approver",
             )
 
+    if warning_count:
+        messages.warning(request, _("%(count)s request(s) were approved outside the configured attendance window and require manual review context.") % {"count": warning_count})
     return HttpResponse("success")
 
 
