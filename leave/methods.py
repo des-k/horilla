@@ -29,6 +29,28 @@ def calculate_requested_days(
     return middle_days + start_day_value + end_day_value
 
 
+def active_overlapping_leave_requests(employee, start_date, end_date, exclude_id=None):
+    """Return active leave requests overlapping the given date range.
+
+    Active means any status except cancelled/rejected. Same-day half-day combinations
+    are intentionally treated as overlaps as well.
+    """
+    if employee is None or start_date is None or end_date is None:
+        LeaveRequest = apps.get_model("leave", "LeaveRequest")
+        return LeaveRequest.objects.none()
+
+    leave_requests = getattr(employee, "leaverequest_set", None)
+    if leave_requests is None:
+        LeaveRequest = apps.get_model("leave", "LeaveRequest")
+        leave_requests = LeaveRequest.objects.filter(employee_id=employee)
+
+    leave_requests = leave_requests.exclude(status__in=["cancelled", "rejected"])
+    leave_requests = leave_requests.filter(start_date__lte=end_date, end_date__gte=start_date)
+    if exclude_id is not None:
+        leave_requests = leave_requests.exclude(id=exclude_id)
+    return leave_requests
+
+
 def holiday_dates_list(holidays):
     """
     :return: This function returns a list of all holiday dates.
