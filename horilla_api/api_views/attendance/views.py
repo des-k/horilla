@@ -103,6 +103,11 @@ from attendance.services.attendance_correction_scope_rules import load_requested
 from attendance.services.request_audit import log_request_action
 from attendance.services.work_type_request_exceptions import WorkModeRequestConsistencyError
 from attendance.services.attendance_access import evaluate_attendance_access
+from attendance.services.canonical_attendance_policy import (
+    build_attendance_policy,
+    compute_attendance_metrics,
+    time_to_shift_instance_dt as canonical_time_to_shift_instance_dt,
+)
 from attendance.services.reconciliation import recompute_attendance, recompute_attendance_range
 from attendance.services.mobile_status_note import build_mobile_header_state
 from attendance.services.work_type_request_actions import WorkModeRequestActions
@@ -719,6 +724,10 @@ def _compute_mobile_effective_start_and_earliest_checkout(
     actual_check_in_dt: datetime | None,
     clock_in_type: str | None,
     flex_seconds: int | None,
+    schedule=None,
+    minimum_hour: str | None = None,
+    leave_kind: str | None = None,
+    check_in_cutoff_dt: datetime | None = None,
 ):
     """Return (effective_start_dt, earliest_checkout_dt, valid_check_in).
 
@@ -730,41 +739,23 @@ def _compute_mobile_effective_start_and_earliest_checkout(
     if not (shift_start_dt and shift_end_dt):
         return None, None, True
 
-    shift_duration = shift_end_dt - shift_start_dt
-    flex_delta = timedelta(seconds=max(0, int(flex_seconds or 0)))
-    mode = str(clock_in_type or "after").strip().lower()
-
-    effective_start_dt = shift_start_dt
-    valid_check_in = True
-
-    if actual_check_in_dt is None:
-        return effective_start_dt, effective_start_dt + shift_duration, True
-
-    if mode == "before_after":
-        window_start_dt = shift_start_dt - flex_delta
-        window_end_dt = shift_start_dt + flex_delta
-        valid_check_in = window_start_dt <= actual_check_in_dt <= window_end_dt
-        if actual_check_in_dt < window_start_dt:
-            effective_start_dt = window_start_dt
-        elif actual_check_in_dt > window_end_dt:
-            effective_start_dt = window_end_dt
-        else:
-            effective_start_dt = actual_check_in_dt
-    elif mode == "after":
-        window_start_dt = shift_start_dt
-        window_end_dt = shift_start_dt + flex_delta
-        valid_check_in = window_start_dt <= actual_check_in_dt <= window_end_dt
-        if actual_check_in_dt < window_start_dt:
-            effective_start_dt = window_start_dt
-        elif actual_check_in_dt > window_end_dt:
-            effective_start_dt = window_end_dt
-        else:
-            effective_start_dt = actual_check_in_dt
-    else:
-        effective_start_dt = shift_start_dt
-        valid_check_in = True
-
-    return effective_start_dt, effective_start_dt + shift_duration, valid_check_in
+    policy = build_attendance_policy(
+        schedule=schedule,
+        shift_start_dt=shift_start_dt,
+        shift_end_dt=shift_end_dt,
+        minimum_hour=minimum_hour or "00:00",
+        leave_kind=leave_kind,
+        check_in_cutoff_dt=check_in_cutoff_dt,
+    )
+    metrics = compute_attendance_metrics(
+        policy,
+        final_in_dt=actual_check_in_dt,
+        final_out_dt=None,
+        grace_seconds=int(flex_seconds or 0),
+        clock_in_type=clock_in_type,
+        is_presence_only=False,
+    )
+    return metrics.effective_start_dt, metrics.earliest_checkout_dt, metrics.valid_check_in
 
 
 def _shift_bounds_for_note_context(attendance_date: date, start_time_sec, end_time_sec):
@@ -791,10 +782,11 @@ def _note_time_to_shift_instance_dt(
     if not (threshold_time and shift_start_dt and shift_end_dt):
         return None
 
-    candidate = datetime.combine(shift_start_dt.date(), threshold_time)
-    if candidate < shift_start_dt and shift_end_dt.date() > shift_start_dt.date():
-        candidate = candidate + timedelta(days=1)
-    return candidate
+    return canonical_time_to_shift_instance_dt(
+        threshold_time,
+        shift_start_dt=shift_start_dt,
+        shift_end_dt=shift_end_dt,
+    )
 
 
 def _build_mobile_header_note_context(employee, shift, attendance_date: date, day, start_time_sec, end_time_sec) -> dict:
@@ -834,30 +826,19 @@ def _build_mobile_header_note_context(employee, shift, attendance_date: date, da
     except Exception:
         schedule = None
 
-    midpoint_dt = shift_start_dt + ((shift_end_dt - shift_start_dt) / 2)
-
-    if leave_breakdown == "first_half":
-        threshold_dt = None
-        if schedule and bool(schedule):
-            threshold_dt = _note_time_to_shift_instance_dt(
-                getattr(schedule, "first_half_leave_latest_check_in_time", None),
-                shift_start_dt=shift_start_dt,
-                shift_end_dt=shift_end_dt,
-            )
-        effective_start_dt = threshold_dt or midpoint_dt
-    elif leave_breakdown == "second_half":
-        threshold_dt = None
-        if schedule and bool(schedule):
-            threshold_dt = _note_time_to_shift_instance_dt(
-                getattr(schedule, "second_half_leave_earliest_check_out_time", None),
-                shift_start_dt=shift_start_dt,
-                shift_end_dt=shift_end_dt,
-            )
-        effective_end_dt = threshold_dt or midpoint_dt
-
-    duration_seconds = max(0, int((effective_end_dt - effective_start_dt).total_seconds()))
+    policy = build_attendance_policy(
+        schedule=schedule,
+        shift_start_dt=shift_start_dt,
+        shift_end_dt=shift_end_dt,
+        minimum_hour="00:00",
+        leave_kind=leave_breakdown,
+        check_in_cutoff_dt=None,
+    )
+    effective_start_dt = policy.late_reference_dt or shift_start_dt
+    effective_end_dt = policy.nominal_policy_end_dt or shift_end_dt
+    duration_seconds = int(policy.required_work_seconds or 0)
     payload["header_note_effective_duration_seconds"] = duration_seconds
-    payload["header_note_effective_minimum_hour"] = _seconds_to_hhmm(duration_seconds)
+    payload["header_note_effective_minimum_hour"] = policy.minimum_hour if leave_breakdown in {"first_half", "second_half"} else _seconds_to_hhmm(duration_seconds)
     return payload
 
 
@@ -1051,6 +1032,12 @@ class ClockInAPIView(APIView):
             late_by_hhmm = None
 
         try:
+            leave_kind_for_note = None
+            if leave_breakdown_for_attendance_date is not None:
+                try:
+                    leave_kind_for_note = leave_breakdown_for_attendance_date(employee, attendance_date) or None
+                except Exception:
+                    leave_kind_for_note = None
             actual_in_date = getattr(attendance, "attendance_clock_in_date", None) or attendance_date
             actual_in_dt = _coerce_datetime_like(datetime.combine(actual_in_date, attendance.attendance_clock_in), dt_now) if attendance and getattr(attendance, "attendance_clock_in", None) else None
             shift_start_dt, shift_end_dt = _shift_bounds_for_note_context(attendance_date, start_time_sec, end_time_sec)
@@ -1060,6 +1047,10 @@ class ClockInAPIView(APIView):
                 actual_check_in_dt=actual_in_dt,
                 clock_in_type=rules.get("clock_in_type") if isinstance(rules, dict) else None,
                 flex_seconds=grace_seconds,
+                schedule=rules.get("schedule") if isinstance(rules, dict) else None,
+                minimum_hour=minimum_hour,
+                leave_kind=leave_kind_for_note,
+                check_in_cutoff_dt=rules.get("check_in_window_end_dt") if isinstance(rules, dict) else None,
             )
             invalid_check_in = bool(actual_in_dt and not valid_check_in_for_note)
             if earliest_check_out_dt:
@@ -1255,6 +1246,12 @@ class ClockOutAPIView(APIView):
             late_by_hhmm = None
 
         try:
+            leave_kind_for_note = None
+            if leave_breakdown_for_attendance_date is not None:
+                try:
+                    leave_kind_for_note = leave_breakdown_for_attendance_date(employee, attendance_date) or None
+                except Exception:
+                    leave_kind_for_note = None
             actual_in_date = getattr(attendance, "attendance_clock_in_date", None) or attendance_date
             actual_in_dt = _coerce_datetime_like(datetime.combine(actual_in_date, attendance.attendance_clock_in), dt_now) if attendance and getattr(attendance, "attendance_clock_in", None) else None
             shift_start_dt, shift_end_dt = _shift_bounds_for_note_context(attendance_date, start_time_sec, end_time_sec)
@@ -1264,6 +1261,10 @@ class ClockOutAPIView(APIView):
                 actual_check_in_dt=actual_in_dt,
                 clock_in_type=rules.get("clock_in_type") if isinstance(rules, dict) else None,
                 flex_seconds=grace_seconds,
+                schedule=rules.get("schedule") if isinstance(rules, dict) else None,
+                minimum_hour=minimum_hour,
+                leave_kind=leave_kind_for_note,
+                check_in_cutoff_dt=rules.get("check_in_window_end_dt") if isinstance(rules, dict) else None,
             )
             invalid_check_in = bool(actual_in_dt and not valid_check_in_for_note)
             if earliest_check_out_dt:
@@ -1776,7 +1777,11 @@ class AttendanceRequestView(APIView):
                 instance=attendance_obj,
                 context={"request": request},
             )
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
+            payload = dict(serializer.data)
+            window_warning = " ".join(dict.fromkeys(getattr(form, "window_warnings", []) or []))
+            if window_warning:
+                payload["window_warning"] = window_warning
+            return Response(payload, status=status.HTTP_201_CREATED)
         employee_id = data.get("employee_id")
         attendance_date = data.get("attendance_date", date.today())
         if Attendance.objects.filter(
@@ -1879,7 +1884,11 @@ class AttendanceRequestView(APIView):
             instance=attendance,
             context={"request": request},
         )
-        return Response(serializer.data, status=status.HTTP_200_OK)
+        payload = dict(serializer.data)
+        window_warning = " ".join(dict.fromkeys(getattr(form, "window_warnings", []) or []))
+        if window_warning:
+            payload["window_warning"] = window_warning
+        return Response(payload, status=status.HTTP_200_OK)
 
 
 class AttendanceRequestApproveView(APIView):
@@ -1929,7 +1938,7 @@ class AttendanceRequestApproveView(APIView):
             is_valid_request, validation_error = validate_requested_data_with_windows(attendance)
             if not is_valid_request:
                 return Response(
-                    {"error": validation_error or "Requested attendance is outside the allowed attendance window."},
+                    {"error": validation_error or "Requested attendance cannot be approved because required shift context is missing."},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
@@ -1982,7 +1991,10 @@ class AttendanceRequestApproveView(APIView):
 
         except Exception as E:
             return Response({"error": str(E)}, status=400)
-        return Response(AttendanceRequestSerializer(attendance, context={"request": request}).data, status=200)
+        payload = dict(AttendanceRequestSerializer(attendance, context={"request": request}).data)
+        if validation_error:
+            payload["window_warning"] = validation_error
+        return Response(payload, status=200)
 
 
 
@@ -3376,6 +3388,20 @@ class CheckingStatus(APIView):
         attendance = Attendance.objects.filter(employee_id=employee, attendance_date=attendance_date).first()
         clock_in_t = getattr(attendance, "attendance_clock_in", None) if attendance else None
         clock_out_t = getattr(attendance, "attendance_clock_out", None) if attendance else None
+        leave_kind_for_note = None
+        if leave_breakdown_for_attendance_date is not None:
+            try:
+                leave_kind_for_note = leave_breakdown_for_attendance_date(employee, attendance_date) or None
+            except Exception:
+                leave_kind_for_note = None
+        policy_for_note = build_attendance_policy(
+            schedule=schedule,
+            shift_start_dt=shift_start_dt,
+            shift_end_dt=shift_end_dt,
+            minimum_hour=minimum_hour,
+            leave_kind=leave_kind_for_note,
+            check_in_cutoff_dt=check_in_window_end_dt,
+        )
 
         # If this attendance is presence-only (for example, final verified On Duty),
         # force worked hours to 00:00.
@@ -3394,27 +3420,34 @@ class CheckingStatus(APIView):
                 in_dt = _coerce_datetime_like(datetime.combine(in_date, clock_in_t), dt_now)
 
                 # FINAL spec: if checked-in earlier than shift_start, start counting at shift_start.
-                worked_start_dt = in_dt
-                try:
-                    if shift_start_dt and in_dt:
-                        worked_start_dt = max(in_dt, shift_start_dt)
-                except Exception:
-                    worked_start_dt = in_dt
-
                 # If OUT punch exists but was REJECTED, treat as not checked-out yet.
                 has_valid_out = bool(clock_out_t and not out_rejected)
 
                 if not has_valid_out:
                     is_working = True
                     try:
-                        worked_seconds = max(0, int((dt_now - worked_start_dt).total_seconds()))
+                        worked_seconds = compute_attendance_metrics(
+                            policy_for_note,
+                            final_in_dt=in_dt,
+                            final_out_dt=dt_now,
+                            grace_seconds=grace_seconds,
+                            clock_in_type=clock_in_type,
+                            is_presence_only=False,
+                        ).worked_seconds
                     except Exception:
                         worked_seconds = 0
                 else:
                     out_date = getattr(attendance, "attendance_clock_out_date", None) or attendance_date
                     out_dt = _coerce_datetime_like(datetime.combine(out_date, clock_out_t), dt_now)
                     try:
-                        worked_seconds = max(0, int((out_dt - worked_start_dt).total_seconds()))
+                        worked_seconds = compute_attendance_metrics(
+                            policy_for_note,
+                            final_in_dt=in_dt,
+                            final_out_dt=out_dt,
+                            grace_seconds=grace_seconds,
+                            clock_in_type=clock_in_type,
+                            is_presence_only=False,
+                        ).worked_seconds
                     except Exception:
                         worked_seconds = 0
             elif clock_out_t:
@@ -3424,10 +3457,14 @@ class CheckingStatus(APIView):
                     in_dt = _coerce_datetime_like(datetime.combine(activity.clock_in_date, activity.clock_in), dt_now)
                     out_dt = _coerce_datetime_like(datetime.combine(activity.clock_out_date, activity.clock_out), dt_now)
                     try:
-                        worked_start_dt = in_dt
-                        if shift_start_dt and in_dt:
-                            worked_start_dt = max(in_dt, shift_start_dt)
-                        worked_seconds = max(0, int((out_dt - worked_start_dt).total_seconds()))
+                        worked_seconds = compute_attendance_metrics(
+                            policy_for_note,
+                            final_in_dt=in_dt,
+                            final_out_dt=out_dt,
+                            grace_seconds=grace_seconds,
+                            clock_in_type=clock_in_type,
+                            is_presence_only=False,
+                        ).worked_seconds
                     except Exception:
                         worked_seconds = 0
                 else:
@@ -3466,6 +3503,10 @@ class CheckingStatus(APIView):
                     actual_check_in_dt=in_dt,
                     clock_in_type=clock_in_type,
                     flex_seconds=grace_seconds,
+                    schedule=schedule,
+                    minimum_hour=minimum_hour,
+                    leave_kind=leave_kind_for_note,
+                    check_in_cutoff_dt=check_in_window_end_dt,
                 )
             except Exception:
                 effective_start_dt, earliest_check_out_dt, valid_check_in_for_note = None, None, True
@@ -3478,6 +3519,10 @@ class CheckingStatus(APIView):
                     actual_check_in_dt=in_dt,
                     clock_in_type=clock_in_type,
                     flex_seconds=grace_seconds,
+                    schedule=schedule,
+                    minimum_hour=minimum_hour,
+                    leave_kind=leave_kind_for_note,
+                    check_in_cutoff_dt=check_in_window_end_dt,
                 )
             except Exception:
                 effective_start_dt, earliest_check_out_dt, valid_check_in_for_note = None, None, True
