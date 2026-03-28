@@ -3398,7 +3398,7 @@ class CheckingStatus(APIView):
             schedule=schedule,
             shift_start_dt=shift_start_dt,
             shift_end_dt=shift_end_dt,
-            minimum_hour=minimum_hour,
+            minimum_hour=min_hour,
             leave_kind=leave_kind_for_note,
             check_in_cutoff_dt=check_in_window_end_dt,
         )
@@ -3504,7 +3504,7 @@ class CheckingStatus(APIView):
                     clock_in_type=clock_in_type,
                     flex_seconds=grace_seconds,
                     schedule=schedule,
-                    minimum_hour=minimum_hour,
+                    minimum_hour=min_hour,
                     leave_kind=leave_kind_for_note,
                     check_in_cutoff_dt=check_in_window_end_dt,
                 )
@@ -3520,7 +3520,7 @@ class CheckingStatus(APIView):
                     clock_in_type=clock_in_type,
                     flex_seconds=grace_seconds,
                     schedule=schedule,
-                    minimum_hour=minimum_hour,
+                    minimum_hour=min_hour,
                     leave_kind=leave_kind_for_note,
                     check_in_cutoff_dt=check_in_window_end_dt,
                 )
