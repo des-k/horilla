@@ -24,6 +24,9 @@ from attendance.services.work_type_request_files import (
     build_attachment_metadata as build_work_mode_attachment_metadata,
     build_attachment_url as build_work_mode_attachment_url,
 )
+from attendance.services.attendance_request_presentation import (
+    build_attendance_request_time_surface,
+)
 
 
 class AttendanceSerializer(serializers.ModelSerializer):
@@ -140,6 +143,18 @@ class AttendanceRequestSerializer(serializers.ModelSerializer):
     approved_at = serializers.SerializerMethodField(read_only=True)
     rejected_at = serializers.SerializerMethodField(read_only=True)
     canceled_at = serializers.SerializerMethodField(read_only=True)
+    proposed_attendance_clock_in = serializers.SerializerMethodField(read_only=True)
+    proposed_attendance_clock_out = serializers.SerializerMethodField(read_only=True)
+    proposed_attendance_clock_in_date = serializers.SerializerMethodField(read_only=True)
+    proposed_attendance_clock_out_date = serializers.SerializerMethodField(read_only=True)
+    final_attendance_clock_in = serializers.SerializerMethodField(read_only=True)
+    final_attendance_clock_out = serializers.SerializerMethodField(read_only=True)
+    final_attendance_clock_in_date = serializers.SerializerMethodField(read_only=True)
+    final_attendance_clock_out_date = serializers.SerializerMethodField(read_only=True)
+    effective_attendance_clock_in = serializers.SerializerMethodField(read_only=True)
+    effective_attendance_clock_out = serializers.SerializerMethodField(read_only=True)
+    effective_attendance_clock_in_date = serializers.SerializerMethodField(read_only=True)
+    effective_attendance_clock_out_date = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = Attendance
@@ -323,6 +338,48 @@ class AttendanceRequestSerializer(serializers.ModelSerializer):
 
     def get_canceled_at(self, obj):
         return self._get_action_at(obj) if self._get_action_type(obj) == "CANCELED" else None
+
+    def _request_time_surface(self, obj):
+        return build_attendance_request_time_surface(obj)
+
+    def _surface_value(self, obj, key):
+        return self._request_time_surface(obj).get(key)
+
+    def get_proposed_attendance_clock_in(self, obj):
+        return self._surface_value(obj, "proposed_attendance_clock_in")
+
+    def get_proposed_attendance_clock_out(self, obj):
+        return self._surface_value(obj, "proposed_attendance_clock_out")
+
+    def get_proposed_attendance_clock_in_date(self, obj):
+        return self._surface_value(obj, "proposed_attendance_clock_in_date")
+
+    def get_proposed_attendance_clock_out_date(self, obj):
+        return self._surface_value(obj, "proposed_attendance_clock_out_date")
+
+    def get_final_attendance_clock_in(self, obj):
+        return self._surface_value(obj, "final_attendance_clock_in")
+
+    def get_final_attendance_clock_out(self, obj):
+        return self._surface_value(obj, "final_attendance_clock_out")
+
+    def get_final_attendance_clock_in_date(self, obj):
+        return self._surface_value(obj, "final_attendance_clock_in_date")
+
+    def get_final_attendance_clock_out_date(self, obj):
+        return self._surface_value(obj, "final_attendance_clock_out_date")
+
+    def get_effective_attendance_clock_in(self, obj):
+        return self._surface_value(obj, "effective_attendance_clock_in")
+
+    def get_effective_attendance_clock_out(self, obj):
+        return self._surface_value(obj, "effective_attendance_clock_out")
+
+    def get_effective_attendance_clock_in_date(self, obj):
+        return self._surface_value(obj, "effective_attendance_clock_in_date")
+
+    def get_effective_attendance_clock_out_date(self, obj):
+        return self._surface_value(obj, "effective_attendance_clock_out_date")
 
 
 class AttendanceOverTimeSerializer(serializers.ModelSerializer):
