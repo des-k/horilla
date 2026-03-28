@@ -205,6 +205,43 @@ class EmployeeShiftScheduleSerializer(serializers.ModelSerializer):
         model = EmployeeShiftSchedule
         fields = "__all__"
 
+    @staticmethod
+    def _direct_model_field_names():
+        return {field.name for field in EmployeeShiftSchedule._meta.fields}
+
+    def validate(self, attrs):
+        direct_fields = self._direct_model_field_names()
+        instance = self.instance or EmployeeShiftSchedule()
+        for attr, value in attrs.items():
+            if attr in direct_fields:
+                setattr(instance, attr, value)
+        try:
+            instance.clean()
+        except DjangoValidationError as e:
+            raise serializers.ValidationError(e)
+        return attrs
+
+    def create(self, validated_data):
+        company_ids = validated_data.pop("company_id", [])
+        instance = EmployeeShiftSchedule(**validated_data)
+        instance.clean()
+        instance.save()
+        if company_ids:
+            instance.company_id.set(company_ids)
+        return instance
+
+    def update(self, instance, validated_data):
+        company_ids = validated_data.pop("company_id", None)
+        direct_fields = self._direct_model_field_names()
+        for attr, value in validated_data.items():
+            if attr in direct_fields:
+                setattr(instance, attr, value)
+        instance.clean()
+        instance.save()
+        if company_ids is not None:
+            instance.company_id.set(company_ids)
+        return instance
+
 
 class RotatingShiftSerializer(serializers.ModelSerializer):
     class Meta:
