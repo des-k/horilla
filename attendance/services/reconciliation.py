@@ -24,6 +24,12 @@ from attendance.models import (
     WorkModeRequestStatus,
 )
 from attendance.methods.utils import format_time, strtime_seconds, shift_schedule_today
+from attendance.services.canonical_attendance_policy import (
+    AttendancePolicy,
+    build_attendance_policy,
+    compute_attendance_metrics,
+    compute_worked_seconds,
+)
 from base.models import EmployeeShiftDay
 
 try:
@@ -93,6 +99,7 @@ class LeaveContext:
     late_reference_dt: datetime | None
     early_reference_dt: datetime | None
     minimum_hour: str
+    policy: AttendancePolicy | None = None
 
     @property
     def is_full_day(self) -> bool:
@@ -281,8 +288,19 @@ def _leave_kind_for_date(leave_request, attendance_date: date) -> Optional[str]:
 
 
 def _resolve_leave_context(employee, attendance_date: date, ctx: ShiftContext) -> LeaveContext:
+    def _build_policy(kind: Optional[str]) -> AttendancePolicy:
+        return build_attendance_policy(
+            schedule=ctx.schedule,
+            shift_start_dt=ctx.shift_start_dt,
+            shift_end_dt=ctx.shift_end_dt,
+            minimum_hour=ctx.minimum_hour,
+            leave_kind=kind,
+            check_in_cutoff_dt=ctx.check_in_window_end_dt,
+        )
+
     if LeaveRequest is None:
-        return LeaveContext(None, None, ctx.shift_start_dt, ctx.shift_end_dt, ctx.minimum_hour)
+        policy = _build_policy(None)
+        return LeaveContext(None, None, policy.late_reference_dt, policy.nominal_policy_end_dt, policy.minimum_hour, policy=policy)
 
     leave_qs = LeaveRequest.objects.filter(employee_id=employee, status="approved").filter(
         start_date__lte=attendance_date + timedelta(days=1),
@@ -301,33 +319,18 @@ def _resolve_leave_context(employee, attendance_date: date, ctx: ShiftContext) -
         kind = _leave_kind_for_date(leave_request, attendance_date) or None
 
     if not kind:
-        return LeaveContext(None, None, ctx.shift_start_dt, ctx.shift_end_dt, ctx.minimum_hour)
+        policy = _build_policy(None)
+        return LeaveContext(None, None, policy.late_reference_dt, policy.nominal_policy_end_dt, policy.minimum_hour, policy=policy)
 
-    late_reference_dt = ctx.shift_start_dt
-    early_reference_dt = ctx.shift_end_dt
-    minimum_hour = ctx.minimum_hour
-    schedule = ctx.schedule
-
-    if kind == "first_half":
-        threshold_time = getattr(schedule, "first_half_leave_latest_check_in_time", None) if schedule else None
-        if bool(schedule) and threshold_time is not None:
-            late_reference_dt = _time_to_shift_instance_dt(
-                threshold_time,
-                shift_start_dt=ctx.shift_start_dt,
-                shift_end_dt=ctx.shift_end_dt,
-            )
-        minimum_hour = _half_minimum_hour(ctx.minimum_hour)
-    elif kind == "second_half":
-        threshold_time = getattr(schedule, "second_half_leave_earliest_check_out_time", None) if schedule else None
-        if bool(schedule) and threshold_time is not None:
-            early_reference_dt = _time_to_shift_instance_dt(
-                threshold_time,
-                shift_start_dt=ctx.shift_start_dt,
-                shift_end_dt=ctx.shift_end_dt,
-            )
-        minimum_hour = _half_minimum_hour(ctx.minimum_hour)
-
-    return LeaveContext(leave_request, kind, late_reference_dt, early_reference_dt, minimum_hour)
+    policy = _build_policy(kind)
+    return LeaveContext(
+        leave_request,
+        kind,
+        policy.late_reference_dt,
+        policy.nominal_policy_end_dt,
+        policy.minimum_hour,
+        policy=policy,
+    )
 
 
 def _approved_work_mode_request(employee, attendance_date: date) -> Optional[WorkModeRequest]:
@@ -685,17 +688,22 @@ def _select_raw_truth_punch(raw: dict, direction: str, *, preserve_raw_truth: bo
 def _minimum_for_final(ctx: ShiftContext, leave_ctx: LeaveContext, is_presence_only: bool) -> str:
     if is_presence_only:
         return "00:00"
+    if leave_ctx.policy is not None:
+        return leave_ctx.policy.minimum_hour or ctx.minimum_hour or "00:00"
     return leave_ctx.minimum_hour or ctx.minimum_hour or "00:00"
 
 
-def _work_hours(final_in_dt: Optional[datetime], final_out_dt: Optional[datetime], *, is_presence_only: bool) -> str:
+def _work_hours(policy: AttendancePolicy | None, final_in_dt: Optional[datetime], final_out_dt: Optional[datetime], *, is_presence_only: bool) -> str:
     if is_presence_only or not final_in_dt or not final_out_dt:
         return "00:00"
-    seconds = int(max(0, (final_out_dt - final_in_dt).total_seconds()))
+    if policy is not None:
+        seconds = compute_worked_seconds(policy, final_in_dt=final_in_dt, final_out_dt=final_out_dt)
+    else:
+        seconds = int(max(0, (final_out_dt - final_in_dt).total_seconds()))
     return format_time(seconds)
 
 
-def _sync_attendance_and_activity(attendance: Attendance, activity: AttendanceActivity, *, final_in_dt: Optional[datetime], final_out_dt: Optional[datetime], final_in_punch: Optional[AttendancePunchingHistory], final_out_punch: Optional[AttendancePunchingHistory], source: str, note: str, final_in_mode: str, final_out_mode: str, final_in_request: Optional[WorkModeRequest], final_out_request: Optional[WorkModeRequest], ctx: ShiftContext, minimum_hour: str, is_presence_only: bool, late_minutes: int, early_minutes: int):
+def _sync_attendance_and_activity(attendance: Attendance, activity: AttendanceActivity, *, final_in_dt: Optional[datetime], final_out_dt: Optional[datetime], final_in_punch: Optional[AttendancePunchingHistory], final_out_punch: Optional[AttendancePunchingHistory], source: str, note: str, final_in_mode: str, final_out_mode: str, final_in_request: Optional[WorkModeRequest], final_out_request: Optional[WorkModeRequest], ctx: ShiftContext, minimum_hour: str, is_presence_only: bool, late_minutes: int, early_minutes: int, policy: AttendancePolicy | None = None):
     existing_in_channel = getattr(attendance, "attendance_clock_in_channel", None)
     existing_out_channel = getattr(attendance, "attendance_clock_out_channel", None)
     existing_in_mode = getattr(attendance, "attendance_clock_in_mode", None)
@@ -772,7 +780,7 @@ def _sync_attendance_and_activity(attendance: Attendance, activity: AttendanceAc
             attendance.attendance_clock_out_location = None
             attendance.attendance_clock_out_image = None
 
-    attendance.attendance_worked_hour = _work_hours(final_in_dt, final_out_dt, is_presence_only=is_presence_only)
+    attendance.attendance_worked_hour = _work_hours(policy, final_in_dt, final_out_dt, is_presence_only=is_presence_only)
     attendance.attendance_validated = bool(final_in_dt or final_out_dt or note == NOTE_FULL_DAY_LEAVE)
     attendance.save()
 
@@ -949,8 +957,14 @@ def recompute_attendance(employee, attendance_date: date) -> ReconciliationResul
         elif final_in_dt and not final_out_dt:
             note = NOTE_MISSING_OUT if source == SOURCE_NORMAL else note
 
-    late_reference_dt = leave_ctx.late_reference_dt or ctx.shift_start_dt
-    early_reference_dt = leave_ctx.early_reference_dt or ctx.shift_end_dt
+    policy = leave_ctx.policy or build_attendance_policy(
+        schedule=ctx.schedule,
+        shift_start_dt=ctx.shift_start_dt,
+        shift_end_dt=ctx.shift_end_dt,
+        minimum_hour=ctx.minimum_hour,
+        leave_kind=leave_ctx.kind,
+        check_in_cutoff_dt=ctx.check_in_window_end_dt,
+    )
     minimum_hour = _minimum_for_final(ctx, leave_ctx, is_presence_only)
     late_minutes = 0
     early_minutes = 0
@@ -959,15 +973,16 @@ def recompute_attendance(employee, attendance_date: date) -> ReconciliationResul
         late_minutes = 0
         early_minutes = 0
     else:
-        late_minutes, early_minutes = _calculate_late_early(
-            final_in_dt,
-            final_out_dt,
-            late_reference_dt,
-            early_reference_dt,
-            ctx.grace_seconds,
-            ctx.grace_clock_in_type,
-            apply_grace_to_late=not leave_ctx.is_half_day,
+        metrics = compute_attendance_metrics(
+            policy,
+            final_in_dt=final_in_dt,
+            final_out_dt=final_out_dt,
+            grace_seconds=ctx.grace_seconds,
+            clock_in_type=ctx.grace_clock_in_type,
+            is_presence_only=is_presence_only,
         )
+        late_minutes = max(0, int(metrics.late_seconds // 60))
+        early_minutes = max(0, int(metrics.early_out_seconds // 60))
         if grant_on_duty_in_final:
             late_minutes = 0
         if grant_on_duty_out_final:
@@ -991,6 +1006,7 @@ def recompute_attendance(employee, attendance_date: date) -> ReconciliationResul
         is_presence_only=is_presence_only,
         late_minutes=late_minutes,
         early_minutes=early_minutes,
+        policy=policy,
     )
     _set_late_early_rows(attendance, late_minutes, early_minutes)
 
