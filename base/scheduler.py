@@ -1,4 +1,5 @@
 import calendar
+import os
 import sys
 from datetime import date, datetime, timedelta
 
@@ -435,9 +436,9 @@ def recurring_holiday():
         recurring_holiday.save()
 
 
-if not any(
+if os.environ.get("HORILLA_DISABLE_SCHEDULERS") != "1" and not any(
     cmd in sys.argv
-    for cmd in ["makemigrations", "migrate", "compilemessages", "flush", "shell"]
+    for cmd in ["makemigrations", "migrate", "compilemessages", "flush", "shell", "test"]
 ):
     scheduler = BackgroundScheduler()
 
