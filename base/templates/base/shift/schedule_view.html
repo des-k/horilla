@@ -163,8 +163,23 @@
                               </span>
 
                               <span>
+                                <b>{% trans "Break Start" %}:</b>
+                                {% if schedule.break_start_time %}{{ schedule.break_start_time|time:"H:i" }}{% else %}-{% endif %}
+                              </span>
+
+                              <span>
+                                <b>{% trans "Break End" %}:</b>
+                                {% if schedule.break_end_time %}{{ schedule.break_end_time|time:"H:i" }}{% else %}-{% endif %}
+                              </span>
+
+                              <span>
                                 <b>{% trans "1st Half Latest IN" %}:</b>
                                 {% if schedule.first_half_leave_latest_check_in_time %}{{ schedule.first_half_leave_latest_check_in_time|time:"H:i" }}{% else %}-{% endif %}
+                              </span>
+
+                              <span>
+                                <b>{% trans "1st Half New End" %}:</b>
+                                {% if schedule.first_half_leave_new_shift_end_time %}{{ schedule.first_half_leave_new_shift_end_time|time:"H:i" }}{% else %}-{% endif %}
                               </span>
 
                               <span>
