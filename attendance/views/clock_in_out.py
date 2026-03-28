@@ -65,6 +65,10 @@ from attendance.services.punching_history import (
 )
 from attendance.services.reconciliation import recompute_attendance
 from attendance.services.attendance_access import evaluate_attendance_access
+from attendance.services.canonical_attendance_policy import (
+    build_attendance_policy,
+    compute_worked_seconds,
+)
 from attendance.services.work_type_request_rules import resolve_biometric_work_mode
 from base.context_processors import (
     enable_late_come_early_out_tracking,
@@ -746,7 +750,7 @@ def _locked_activity(employee, attendance_date: date, defaults: dict):
         return activity, False
 
 
-def _recalculate_attendance_summary(attendance, *, shift_start_dt=None):
+def _recalculate_attendance_summary(attendance, *, shift_start_dt=None, shift_end_dt=None, schedule=None):
     if getattr(attendance, "is_presensi_only", False):
         attendance.attendance_worked_hour = "00:00"
         attendance.attendance_overtime = "00:00"
@@ -767,10 +771,15 @@ def _recalculate_attendance_summary(attendance, *, shift_start_dt=None):
     ):
         in_dt = _combine_local_datetime(attendance.attendance_clock_in_date, attendance.attendance_clock_in)
         out_dt = _combine_local_datetime(attendance.attendance_clock_out_date, attendance.attendance_clock_out)
-        worked_start_dt = max(in_dt, shift_start_dt) if shift_start_dt else in_dt
-        duration_seconds = int((out_dt - worked_start_dt).total_seconds())
-        if duration_seconds < 0:
-            duration_seconds = 0
+        policy = build_attendance_policy(
+            schedule=schedule,
+            shift_start_dt=shift_start_dt,
+            shift_end_dt=shift_end_dt,
+            minimum_hour=getattr(attendance, "minimum_hour", None) or "00:00",
+            leave_kind=None,
+            check_in_cutoff_dt=None,
+        )
+        duration_seconds = compute_worked_seconds(policy, final_in_dt=in_dt, final_out_dt=out_dt)
         attendance.attendance_worked_hour = format_time(duration_seconds)
         attendance.attendance_overtime = overtime_calculation(attendance)
         attendance.attendance_validated = attendance_validate(attendance)
@@ -918,7 +927,12 @@ def clock_in_attendance_and_activity(
             assign_raw_punch_to_attendance(attendance, punch=raw_punch_history, direction="in")
 
     if getattr(attendance, "attendance_clock_out", None) and getattr(attendance, "attendance_clock_out_date", None):
-        _recalculate_attendance_summary(attendance)
+        _recalculate_attendance_summary(
+            attendance,
+            shift_start_dt=rules.get("shift_start_dt"),
+            shift_end_dt=rules.get("shift_end_dt"),
+            schedule=rules.get("schedule"),
+        )
     if att_updates:
         attendance.save(update_fields=list(dict.fromkeys(att_updates)))
 
@@ -1109,7 +1123,12 @@ def clock_out_attendance_and_activity(
 
     if allow_update_clock_out and raw_punch_history is not None:
         assign_raw_punch_to_attendance(attendance, punch=raw_punch_history, direction="out")
-    _recalculate_attendance_summary(attendance, shift_start_dt=shift_start_dt)
+    _recalculate_attendance_summary(
+        attendance,
+        shift_start_dt=shift_start_dt,
+        shift_end_dt=rules.get("shift_end_dt"),
+        schedule=rules.get("schedule"),
+    )
     attendance.save(update_fields=list(dict.fromkeys(updates + [
         "attendance_worked_hour",
         "attendance_overtime",
