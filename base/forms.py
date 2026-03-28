@@ -1126,7 +1126,10 @@ def _model_default_time(field_name):
 def _set_half_day_threshold_initials(form, instance=None):
     mapping = {
         "first_half_leave_latest_check_in_time": _model_default_time("first_half_leave_latest_check_in_time"),
+        "first_half_leave_new_shift_end_time": None,
         "second_half_leave_earliest_check_out_time": _model_default_time("second_half_leave_earliest_check_out_time"),
+        "break_start_time": None,
+        "break_end_time": None,
     }
     for field_name, fallback in mapping.items():
         if field_name not in form.fields:
@@ -1182,6 +1185,8 @@ def _configure_shift_schedule_policy_fields(form):
         "minimum_working_hour",
         "start_time",
         "end_time",
+        "break_start_time",
+        "break_end_time",
         "early_checkin_minutes",
         "cutoff_check_in_offset",
         "early_checkout_grace_minutes",
@@ -1189,6 +1194,7 @@ def _configure_shift_schedule_policy_fields(form):
         "grace_time_id",
         "enable_first_half_leave_rule",
         "first_half_leave_latest_check_in_time",
+        "first_half_leave_new_shift_end_time",
         "enable_second_half_leave_rule",
         "second_half_leave_earliest_check_out_time",
         "require_check_out_before_second_half_leave",
@@ -1234,6 +1240,12 @@ class EmployeeShiftScheduleUpdateForm(ModelForm):
         widgets = {
             "start_time": forms.TimeInput(attrs={"type": "time"}),
             "end_time": forms.TimeInput(attrs={"type": "time"}),
+            "break_start_time": forms.TimeInput(
+                attrs={"type": "time", "class": "oh-input w-100 form-control"}
+            ),
+            "break_end_time": forms.TimeInput(
+                attrs={"type": "time", "class": "oh-input w-100 form-control"}
+            ),
             "cutoff_check_in_offset": forms.TextInput(
                 attrs={"placeholder": "04:30:00", "class": "oh-input w-100 form-control"}
             ),
@@ -1248,6 +1260,9 @@ class EmployeeShiftScheduleUpdateForm(ModelForm):
                 attrs={"class": "oh-input w-100 form-control", "min": 0}
             ),
             "first_half_leave_latest_check_in_time": forms.TimeInput(
+                attrs={"type": "time", "class": "oh-input w-100 form-control"}
+            ),
+            "first_half_leave_new_shift_end_time": forms.TimeInput(
                 attrs={"type": "time", "class": "oh-input w-100 form-control"}
             ),
             "second_half_leave_earliest_check_out_time": forms.TimeInput(
@@ -1276,6 +1291,9 @@ class EmployeeShiftScheduleUpdateForm(ModelForm):
 
             if "first_half_leave_latest_check_in_time" in self.fields and instance.first_half_leave_latest_check_in_time:
                 self.fields["first_half_leave_latest_check_in_time"].initial = instance.first_half_leave_latest_check_in_time.strftime("%H:%M")
+
+            if "first_half_leave_new_shift_end_time" in self.fields and instance.first_half_leave_new_shift_end_time:
+                self.fields["first_half_leave_new_shift_end_time"].initial = instance.first_half_leave_new_shift_end_time.strftime("%H:%M")
 
             if "second_half_leave_earliest_check_out_time" in self.fields and instance.second_half_leave_earliest_check_out_time:
                 self.fields["second_half_leave_earliest_check_out_time"].initial = instance.second_half_leave_earliest_check_out_time.strftime("%H:%M")
@@ -1389,13 +1407,18 @@ class EmployeeShiftScheduleForm(ModelForm):
         widgets = {
             "start_time": forms.TimeInput(attrs={"type": "time"}),
             "end_time": forms.TimeInput(attrs={"type": "time"}),
+            "break_start_time": forms.TimeInput(
+                attrs={"type": "time", "class": "oh-input w-100 form-control"}
+            ),
+            "break_end_time": forms.TimeInput(
+                attrs={"type": "time", "class": "oh-input w-100 form-control"}
+            ),
             "cutoff_check_in_offset": forms.TextInput(
                 attrs={"placeholder": "04:30:00", "class": "oh-input w-100 form-control"}
             ),
             "cutoff_check_out_offset": forms.TextInput(
                 attrs={"placeholder": "07:00:00", "class": "oh-input w-100 form-control"}
             ),
-            # Attendance window config (FINAL spec)
             "early_checkin_minutes": forms.NumberInput(
                 attrs={"class": "oh-input w-100 form-control", "min": 0}
             ),
@@ -1403,6 +1426,9 @@ class EmployeeShiftScheduleForm(ModelForm):
                 attrs={"class": "oh-input w-100 form-control", "min": 0}
             ),
             "first_half_leave_latest_check_in_time": forms.TimeInput(
+                attrs={"type": "time", "class": "oh-input w-100 form-control"}
+            ),
+            "first_half_leave_new_shift_end_time": forms.TimeInput(
                 attrs={"type": "time", "class": "oh-input w-100 form-control"}
             ),
             "second_half_leave_earliest_check_out_time": forms.TimeInput(
@@ -1413,21 +1439,16 @@ class EmployeeShiftScheduleForm(ModelForm):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        # Keep random IDs behavior you already had (optional but fine)
         self.fields["day"].widget.attrs.update({"id": str(uuid.uuid4())})
         if "shift_id" in self.fields:
             self.fields["shift_id"].widget.attrs.update({"id": str(uuid.uuid4())})
 
-        # Grace time optional
         if "grace_time_id" in self.fields:
             self.fields["grace_time_id"].required = False
             self.fields["grace_time_id"].help_text = "Leave empty to apply no grace time."
 
-        # Set initial values from instance (use self.instance)
         instance = getattr(self, "instance", None)
         if instance and getattr(instance, "pk", None):
-
-            # HTML <input type="time"> expects HH:MM
             if "start_time" in self.fields and instance.start_time:
                 self.fields["start_time"].initial = instance.start_time.strftime("%H:%M")
 
@@ -1436,6 +1457,9 @@ class EmployeeShiftScheduleForm(ModelForm):
 
             if "first_half_leave_latest_check_in_time" in self.fields and instance.first_half_leave_latest_check_in_time:
                 self.fields["first_half_leave_latest_check_in_time"].initial = instance.first_half_leave_latest_check_in_time.strftime("%H:%M")
+
+            if "first_half_leave_new_shift_end_time" in self.fields and instance.first_half_leave_new_shift_end_time:
+                self.fields["first_half_leave_new_shift_end_time"].initial = instance.first_half_leave_new_shift_end_time.strftime("%H:%M")
 
             if "second_half_leave_earliest_check_out_time" in self.fields and instance.second_half_leave_earliest_check_out_time:
                 self.fields["second_half_leave_earliest_check_out_time"].initial = instance.second_half_leave_earliest_check_out_time.strftime("%H:%M")
@@ -1446,7 +1470,6 @@ class EmployeeShiftScheduleForm(ModelForm):
                         instance.auto_punch_out_time.strftime("%H:%M")
                     )
 
-            # Cutoff offsets shown as HH:MM:SS (string)
             if "cutoff_check_in_offset" in self.fields:
                 val = getattr(instance, "cutoff_check_in_offset", "") or _seconds_to_hhmmss(
                     getattr(instance, "cutoff_check_in_offset_secs", None)
@@ -1462,7 +1485,6 @@ class EmployeeShiftScheduleForm(ModelForm):
         _set_half_day_threshold_initials(self, instance if instance and getattr(instance, "pk", None) else None)
         _configure_shift_schedule_policy_fields(self)
 
-        # Attendance app-dependent fields
         if not apps.is_installed("attendance"):
             self.fields.pop("auto_punch_out_time", None)
             self.fields.pop("is_auto_punch_out_enabled", None)
