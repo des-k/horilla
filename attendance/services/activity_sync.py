@@ -245,7 +245,12 @@ def _time_in_window(target_time, start_dt, end_dt) -> bool:
 
 
 def validate_requested_data_with_windows(attendance: Attendance) -> Tuple[bool, Optional[str]]:
-    """Return False when approved payload is invalid/outside the allowed shift window."""
+    """Validate request approval context.
+
+    Returns ``(False, error)`` only for genuinely invalid approval context, such as
+    missing shift/day information. Window mismatches return ``(True, warning)`` so
+    the request can still proceed with manual approver judgement.
+    """
 
     data = _load_requested_data(getattr(attendance, "requested_data", None))
     if not data:
@@ -308,10 +313,26 @@ def validate_requested_data_with_windows(attendance: Attendance) -> Tuple[bool, 
             except Exception:
                 continue
 
-    if in_time and not _time_in_window(in_time, rules.get("check_in_window_start_dt"), rules.get("check_in_window_end_dt")):
-        return False, "Requested check-in is outside the allowed attendance window."
+    warnings = []
 
-    if out_time and not _time_in_window(out_time, rules.get("check_out_window_start_dt"), rules.get("check_out_window_end_dt")):
-        return False, "Requested check-out is outside the allowed attendance window."
+    in_start = rules.get("check_in_window_start_dt")
+    in_end = rules.get("check_in_window_end_dt")
+    out_start = rules.get("check_out_window_start_dt")
+    out_end = rules.get("check_out_window_end_dt")
+
+    if in_time:
+        if in_start is None or in_end is None:
+            warnings.append("Requested check-in is outside the configured attendance window and requires manual approval review.")
+        elif not _time_in_window(in_time, in_start, in_end):
+            warnings.append("Requested check-in is outside the allowed attendance window and requires manual approval review.")
+
+    if out_time:
+        if out_start is None or out_end is None:
+            warnings.append("Requested check-out is outside the configured attendance window and requires manual approval review.")
+        elif not _time_in_window(out_time, out_start, out_end):
+            warnings.append("Requested check-out is outside the allowed attendance window and requires manual approval review.")
+
+    if warnings:
+        return True, " ".join(dict.fromkeys(warnings))
 
     return True, None
