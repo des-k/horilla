@@ -95,6 +95,11 @@ def default_second_half_leave_earliest_check_out_time():
     return datetime.strptime("12:00", "%H:%M").time()
 
 
+def default_first_half_leave_new_shift_end_time():
+    """Optional first-half leave shift end override."""
+    return None
+
+
 def _normalize_hh_mm_ss_to_secs(value: str) -> tuple[str, int]:
     """
     Normalizes HH:MM:SS string (zero-pad) and returns (normalized_str, total_seconds).
@@ -687,6 +692,18 @@ class EmployeeShiftSchedule(HorillaModel):
     )
     start_time = models.TimeField(null=True, verbose_name=_("Start Time"))
     end_time = models.TimeField(null=True, verbose_name=_("End Time"))
+    break_start_time = models.TimeField(
+        null=True,
+        blank=True,
+        verbose_name=_("Break Start Time"),
+        help_text=_("Optional start time for the minimum break interval on this shift day."),
+    )
+    break_end_time = models.TimeField(
+        null=True,
+        blank=True,
+        verbose_name=_("Break End Time"),
+        help_text=_("Optional end time for the minimum break interval on this shift day."),
+    )
     is_night_shift = models.BooleanField(default=False, verbose_name=_("Night Shift"))
 
     # -----------------------------------------------------------------
@@ -716,6 +733,13 @@ class EmployeeShiftSchedule(HorillaModel):
         default=default_first_half_leave_latest_check_in_time,
         verbose_name=_("First Half Leave Latest Check-In Time"),
         help_text=_("Employees who take first half leave must check in no later than this time."),
+    )
+    first_half_leave_new_shift_end_time = models.TimeField(
+        null=True,
+        blank=True,
+        default=default_first_half_leave_new_shift_end_time,
+        verbose_name=_("First Half Leave New Shift End Time"),
+        help_text=_("Optional first-half leave specific shift end time for this shift day."),
     )
     enable_second_half_leave_rule = models.BooleanField(
         default=True,
@@ -844,28 +868,91 @@ class EmployeeShiftSchedule(HorillaModel):
             return None
         return (value.hour * 3600) + (value.minute * 60) + value.second
 
-    def _validate_half_day_threshold(self, *, field_name, value):
-        if not (self.start_time and self.end_time and value):
-            return
+    def _shift_span_seconds(self):
+        if not (self.start_time and self.end_time):
+            return None, None, False
 
         start_sec = self._time_seconds(self.start_time)
         end_sec = self._time_seconds(self.end_time)
-        threshold_sec = self._time_seconds(value)
-        if start_sec is None or end_sec is None or threshold_sec is None:
-            return
-
-        night_shift = bool(self.is_night_shift or (self.start_time and self.end_time and self.start_time > self.end_time))
-        if night_shift and threshold_sec < start_sec:
-            threshold_sec += 24 * 3600
+        night_shift = bool(
+            self.is_night_shift
+            or (
+                self.start_time
+                and self.end_time
+                and self.start_time > self.end_time
+            )
+        )
+        if start_sec is None or end_sec is None:
+            return None, None, night_shift
         if night_shift and end_sec <= start_sec:
             end_sec += 24 * 3600
+        return start_sec, end_sec, night_shift
 
-        if threshold_sec < start_sec or threshold_sec > end_sec:
+    def _normalize_shift_time_seconds(self, value, *, shift_start_sec=None, night_shift=None):
+        value_sec = self._time_seconds(value)
+        if value_sec is None:
+            return None
+        if shift_start_sec is None or night_shift is None:
+            shift_start_sec, _, night_shift = self._shift_span_seconds()
+        if night_shift and shift_start_sec is not None and value_sec < shift_start_sec:
+            value_sec += 24 * 3600
+        return value_sec
+
+    def _validate_time_within_shift_span(self, *, field_name, value, message=None):
+        if not (self.start_time and self.end_time and value):
+            return
+
+        start_sec, end_sec, night_shift = self._shift_span_seconds()
+        value_sec = self._normalize_shift_time_seconds(
+            value,
+            shift_start_sec=start_sec,
+            night_shift=night_shift,
+        )
+        if start_sec is None or end_sec is None or value_sec is None:
+            return
+
+        if value_sec < start_sec or value_sec > end_sec:
             raise ValidationError(
                 {
-                    field_name: _("Half-day leave threshold must fall within the configured shift span for this day.")
+                    field_name: message
+                    or _(
+                        "Configured time must fall within the configured shift span for this day."
+                    )
                 }
             )
+
+    def _validate_time_order(self, *, start_field_name, start_value, end_field_name, end_value, message):
+        if not (start_value and end_value):
+            return
+
+        start_sec, _, night_shift = self._shift_span_seconds()
+        if start_sec is None:
+            left_sec = self._time_seconds(start_value)
+            right_sec = self._time_seconds(end_value)
+        else:
+            left_sec = self._normalize_shift_time_seconds(
+                start_value,
+                shift_start_sec=start_sec,
+                night_shift=night_shift,
+            )
+            right_sec = self._normalize_shift_time_seconds(
+                end_value,
+                shift_start_sec=start_sec,
+                night_shift=night_shift,
+            )
+
+        if left_sec is None or right_sec is None:
+            return
+
+        if left_sec >= right_sec:
+            raise ValidationError({end_field_name: message})
+
+    def _validate_half_day_threshold(self, *, field_name, value):
+        self._validate_time_within_shift_span(
+            field_name=field_name,
+            value=value,
+            message=_("Half-day leave threshold must fall within the configured shift span for this day."),
+        )
 
     def clean(self):
         super().clean()
@@ -877,12 +964,12 @@ class EmployeeShiftSchedule(HorillaModel):
     
         # Normalize + compute secs for validation purpose (before save)
         if self.cutoff_check_in_offset:
-            _, cutoff_in_secs = _normalize_hh_mm_ss_to_secs(self.cutoff_check_in_offset)
+            _normalized_in, cutoff_in_secs = _normalize_hh_mm_ss_to_secs(self.cutoff_check_in_offset)
         else:
             cutoff_in_secs = 0
     
         if self.cutoff_check_out_offset:
-            _, cutoff_out_secs = _normalize_hh_mm_ss_to_secs(self.cutoff_check_out_offset)
+            _normalized_out, cutoff_out_secs = _normalize_hh_mm_ss_to_secs(self.cutoff_check_out_offset)
         else:
             cutoff_out_secs = 0
 
@@ -895,10 +982,62 @@ class EmployeeShiftSchedule(HorillaModel):
                 }
             )
 
+        if bool(self.break_start_time) != bool(self.break_end_time):
+            raise ValidationError(
+                {
+                    "break_start_time": _(
+                        "Break start and break end time must both be set together."
+                    ),
+                    "break_end_time": _(
+                        "Break start and break end time must both be set together."
+                    ),
+                }
+            )
+
+        if self.break_start_time:
+            self._validate_time_within_shift_span(
+                field_name="break_start_time",
+                value=self.break_start_time,
+                message=_("Break start time must fall within the configured shift span for this day."),
+            )
+        if self.break_end_time:
+            self._validate_time_within_shift_span(
+                field_name="break_end_time",
+                value=self.break_end_time,
+                message=_("Break end time must fall within the configured shift span for this day."),
+            )
+        if self.break_start_time and self.break_end_time:
+            self._validate_time_order(
+                start_field_name="break_start_time",
+                start_value=self.break_start_time,
+                end_field_name="break_end_time",
+                end_value=self.break_end_time,
+                message=_("Break end time must be later than break start time."),
+            )
+
         if self.enable_first_half_leave_rule and self.first_half_leave_latest_check_in_time:
             self._validate_half_day_threshold(
                 field_name="first_half_leave_latest_check_in_time",
                 value=self.first_half_leave_latest_check_in_time,
+            )
+
+        if self.first_half_leave_new_shift_end_time:
+            self._validate_time_within_shift_span(
+                field_name="first_half_leave_new_shift_end_time",
+                value=self.first_half_leave_new_shift_end_time,
+                message=_("First half leave new shift end time must fall within the configured shift span for this day."),
+            )
+
+        if (
+            self.first_half_leave_latest_check_in_time
+            and self.first_half_leave_new_shift_end_time
+        ):
+            self._validate_time_order(
+                start_field_name="first_half_leave_latest_check_in_time",
+                start_value=self.first_half_leave_latest_check_in_time,
+                end_field_name="first_half_leave_new_shift_end_time",
+                end_value=self.first_half_leave_new_shift_end_time,
+                message=_("First half leave new shift end time must be later than the first half leave latest check-in time."),
             )
 
         if self.enable_second_half_leave_rule and not self.second_half_leave_earliest_check_out_time:
