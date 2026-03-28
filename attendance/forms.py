@@ -150,6 +150,7 @@ class AttendanceUpdateForm(BaseModelForm):
                 initial["attendance_clock_out_date"] = _fmt_dt_value(instance.attendance_clock_out_date, "%Y-%m-%d")
             kwargs["initial"] = initial
         super().__init__(*args, **kwargs)
+        self.window_warnings = []
         self.fields["employee_id"].widget.attrs.update({"id": str(uuid.uuid4())})
         self.fields["shift_id"].widget.attrs.update(
             {
@@ -349,6 +350,7 @@ class AttendanceForm(BaseModelForm):
         return table_html
 
     def clean(self) -> Dict[str, Any]:
+        self.window_warnings = []
         super().clean()
         self.instance.employee_id = Employee.objects.filter(
             id=self.data.get("employee_id")
@@ -950,11 +952,19 @@ class NewRequestForm(AttendanceRequestForm):
             return
         if start_dt is None or end_dt is None:
             kind = "check-in" if field_name == "attendance_clock_in" else "check-out"
-            raise ValidationError({field_name: _("%(label)s is not allowed because no %(kind)s window is configured for the selected date/shift") % {"label": label, "kind": kind}})
+            self.window_warnings.append(
+                _("%(label)s is outside the configured %(kind)s window and will require manual approval review.")
+                % {"label": label, "kind": kind}
+            )
+            return
         if not self._time_in_window(value, start_dt, end_dt):
-            raise ValidationError({field_name: _("%(label)s must be within %(start)s - %(end)s") % {"label": label, "start": start_dt.strftime("%H:%M"), "end": end_dt.strftime("%H:%M")}})
+            self.window_warnings.append(
+                _("%(label)s is outside %(start)s - %(end)s and will require manual approval review.")
+                % {"label": label, "start": start_dt.strftime("%H:%M"), "end": end_dt.strftime("%H:%M")}
+            )
 
     def clean(self) -> Dict[str, Any]:
+        self.window_warnings = []
         super().clean()
 
         employee = self.cleaned_data.get("employee_id")
