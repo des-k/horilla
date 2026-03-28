@@ -183,8 +183,11 @@ class CheckInOutExecutablePolicyAndLeaveMatrixTests(SimpleTestCase):
         schedule = SimpleNamespace(
             enable_first_half_leave_rule=True,
             first_half_leave_latest_check_in_time=time(13, 0),
+            first_half_leave_new_shift_end_time=time(17, 30),
             enable_second_half_leave_rule=True,
             second_half_leave_earliest_check_out_time=time(12, 0),
+            break_start_time=None,
+            break_end_time=None,
         )
         first_half = FakeLeaveRequest(
             employee_id="EMP-1",
@@ -225,9 +228,9 @@ class CheckInOutExecutablePolicyAndLeaveMatrixTests(SimpleTestCase):
                 none_ctx = reconciliation._resolve_leave_context("EMP-1", date(2026, 3, 22), self._ctx(target_date=date(2026, 3, 22), schedule=schedule))
 
         self.assertEqual(first_ctx.kind, "first_half")
-        self.assertEqual(first_ctx.minimum_hour, "04:00")
+        self.assertEqual(first_ctx.minimum_hour, "04:30")
         self.assertEqual(first_ctx.late_reference_dt, timezone.make_aware(datetime(2026, 3, 19, 13, 0)))
-        self.assertEqual(first_ctx.early_reference_dt, timezone.make_aware(datetime(2026, 3, 19, 17, 0)))
+        self.assertEqual(first_ctx.early_reference_dt, timezone.make_aware(datetime(2026, 3, 19, 17, 30)))
 
         self.assertEqual(second_ctx.kind, "second_half")
         self.assertEqual(second_ctx.minimum_hour, "04:00")
