@@ -4,6 +4,7 @@ from rest_framework.views import APIView
 
 from ...api_decorators.base.decorators import ManagerPermission
 from attendance.services.work_type_request_permissions import is_global_work_type_approver, subordinate_employee_ids
+from base.methods import get_subordinate_employee_ids
 
 
 class AttendancePermissionCheck(APIView):
@@ -20,13 +21,26 @@ class AttendancePermissionCheck(APIView):
 
 
 class AttendanceRequestApprovePermissionCheck(APIView):
-    """Permission check for approving/rejecting attendance requests (admin + supervisor)."""
+    """Permission check for approving/rejecting attendance requests.
+
+    Keep this aligned with the actual approval scope used by attendance request
+    approval/history flows so mobile does not hide approval history for valid
+    subordinate approvers.
+    """
 
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        can_approve = ManagerPermission().has_permission(request, "attendance.change_attendance")
-        return Response({"can_approve": bool(can_approve)}, status=200)
+        can_approve = False
+        try:
+            can_approve = bool(
+                getattr(request.user, "is_superuser", False)
+                or request.user.has_perm("attendance.change_attendance")
+                or get_subordinate_employee_ids(request)
+            )
+        except Exception:
+            can_approve = False
+        return Response({"can_approve": can_approve}, status=200)
 
 
 class WorkModeRequestApprovePermissionCheck(APIView):
