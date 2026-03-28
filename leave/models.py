@@ -34,6 +34,7 @@ from leave.methods import (
     calculate_requested_days,
     company_leave_dates_list,
     holiday_dates_list,
+    active_overlapping_leave_requests,
 )
 
 logger = logging.getLogger(__name__)
@@ -809,28 +810,17 @@ class LeaveRequest(HorillaModel):
 
     def leaveoverlapping(self):
         """
-        Checks for overlapping leave requests based on the current instance's dates and employee.
+        Checks for active overlapping leave requests for the same employee/date range.
+
+        Same-day half-day combinations are treated as overlaps as well, so an
+        employee cannot keep more than one active leave request for the same day.
         """
-        overlapping_requests = LeaveRequest.objects.filter(
-            employee_id=self.employee_id,
-            start_date__lte=self.end_date,
-            end_date__gte=self.start_date,
-        ).exclude(id=self.id)
-
-        if overlapping_requests.exists():
-            existing_leave = overlapping_requests.first()
-
-            # Handle specific start_date_breakdown and end_date_breakdown mismatch
-            if (
-                existing_leave.start_date == self.start_date
-                and existing_leave.start_date_breakdown != "full_day"
-                and self.start_date_breakdown != "full_day"
-                and existing_leave.start_date_breakdown != self.start_date_breakdown
-                and existing_leave.end_date_breakdown != self.end_date_breakdown
-            ):
-                return LeaveRequest.objects.none()
-
-        return overlapping_requests
+        return active_overlapping_leave_requests(
+            employee=self.employee_id,
+            start_date=self.start_date,
+            end_date=self.end_date,
+            exclude_id=self.id,
+        )
 
     def save(self, *args, **kwargs):
 
@@ -941,7 +931,7 @@ class LeaveRequest(HorillaModel):
 
         # Overlapping leave check
         if self.start_date and self.end_date:
-            overlapping_requests = self.leaveoverlapping().exclude(id=self.id)
+            overlapping_requests = self.leaveoverlapping()
             if overlapping_requests.exclude(
                 status__in=["cancelled", "rejected"]
             ).exists():
