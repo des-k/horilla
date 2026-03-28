@@ -42,6 +42,10 @@ from attendance.services.monthly_recap_note import (
     localize_on_duty_work_type,
     seconds_to_hhmm,
 )
+from attendance.services.canonical_attendance_policy import (
+    build_attendance_policy,
+    compute_attendance_metrics,
+)
 from attendance.services.work_type_request_rules import is_active_work_mode_request_status, scheduled_attendance_mode
 # NOTE: Do NOT import from attendance.views.clock_in_out at module import time.
 # That module imports attendance.views.views, which imports this service.
@@ -1632,132 +1636,31 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
         else:
             work_type_disp = f"IN: {_work_mode_label(display_in_mode)}<br>OUT: {_work_mode_label(display_out_mode)}"
 
-        late_sec = 0.0
-        early_sec = 0.0
         leave_note_suffixes: List[str] = []
-        half_day_cfg = None
-        if schedule_obj and half_day_kind in {"first_half", "second_half"}:
-            if half_day_kind == "first_half":
-                half_day_cfg = {
-                    "enabled": bool(bool(schedule_obj)),
-                    "threshold_time": getattr(schedule_obj, "first_half_leave_latest_check_in_time", None),
-                }
-            elif half_day_kind == "second_half":
-                half_day_cfg = {
-                    "enabled": bool(bool(schedule_obj)),
-                    "threshold_time": getattr(schedule_obj, "second_half_leave_earliest_check_out_time", None),
-                }
-        first_half_threshold_dt = None
-        second_half_threshold_dt = None
-        if half_day_cfg and half_day_cfg.get("enabled"):
-            threshold_time = half_day_cfg.get("threshold_time")
-            if half_day_kind == "first_half":
-                first_half_threshold_dt = _time_to_shift_instance_dt(
-                    threshold_time,
-                    shift_start_dt=shift_start_dt,
-                    shift_end_dt=shift_end_dt,
-                    tzinfo=tzinfo,
-                )
-            elif half_day_kind == "second_half":
-                second_half_threshold_dt = _time_to_shift_instance_dt(
-                    threshold_time,
-                    shift_start_dt=shift_start_dt,
-                    shift_end_dt=shift_end_dt,
-                    tzinfo=tzinfo,
-                )
+        if half_day_kind == "first_half":
+            leave_note_suffixes.append(_localize_half_day_leave_note("first_half", language))
+        elif half_day_kind == "second_half":
+            leave_note_suffixes.append(_localize_half_day_leave_note("second_half", language))
 
-        late_reference_dt = None
-        late_grace_seconds = 0
-        if shift_start_dt and cutoff_in_dt:
-            if half_day_kind == "first_half":
-                late_reference_dt = first_half_threshold_dt or shift_start_dt
-            else:
-                late_reference_dt = shift_start_dt
-                if half_day_kind not in {"first_half", "second_half"}:
-                    late_grace_seconds = int(grace_in_sec or 0)
-
-        early_reference_dt = None
-        if shift_end_dt and cutoff_in_dt:
-            if half_day_kind == "second_half":
-                early_reference_dt = second_half_threshold_dt or (shift_end_dt - timedelta(seconds=grace_out_sec))
-            else:
-                early_reference_dt = shift_end_dt - timedelta(seconds=grace_out_sec)
-
-        credit_seconds = 0.0
-        if (
-            final_in_dt
-            and late_reference_dt
-            and grace_clock_in_type == "before_after"
-            and final_in_dt < late_reference_dt
-        ):
-            credit_seconds = max(0.0, (late_reference_dt - final_in_dt).total_seconds())
-
-        adjusted_early_reference_dt = early_reference_dt
-        if adjusted_early_reference_dt and credit_seconds > 0:
-            adjusted_early_reference_dt = adjusted_early_reference_dt - timedelta(seconds=credit_seconds)
-
-        maximum_late_seconds = max(0, int((cutoff_in_dt - shift_start_dt).total_seconds())) if (shift_start_dt and cutoff_in_dt) else 0
-        minimum_work_seconds = _resolve_minimum_work_seconds(schedule_obj, shift_start_dt, shift_end_dt)
-        missing_out_early_seconds = max(0, minimum_work_seconds - maximum_late_seconds)
-        earliest_check_out_dt = _resolve_mobile_style_earliest_checkout_dt(
+        policy = build_attendance_policy(
+            schedule=schedule_obj,
             shift_start_dt=shift_start_dt,
             shift_end_dt=shift_end_dt,
-            actual_check_in_dt=final_in_dt,
-            clock_in_type=grace_clock_in_type,
-            flex_seconds=grace_in_sec,
+            minimum_hour=getattr(best_att, "minimum_hour", None) or getattr(schedule_obj, "minimum_working_hour", None) or "00:00",
+            leave_kind=half_day_kind,
+            check_in_cutoff_dt=check_in_window_end_dt or cutoff_in_dt,
         )
-
-        if shift_start_dt and cutoff_in_dt:
-            if half_day_kind == "first_half":
-                if final_in_dt:
-                    if eff_in_mode == AttendanceWorkMode.ON_DUTY:
-                        late_sec = 0.0
-                    else:
-                        late_sec = max(0.0, (final_in_dt - late_reference_dt).total_seconds() - late_grace_seconds)
-                else:
-                    late_sec = 0.0
-                leave_note_suffixes.append(_localize_half_day_leave_note("first_half", language))
-            else:
-                if final_in_dt:
-                    if eff_in_mode == AttendanceWorkMode.ON_DUTY:
-                        late_sec = 0.0
-                    else:
-                        late_sec = max(0.0, (final_in_dt - late_reference_dt).total_seconds() - late_grace_seconds)
-                else:
-                    late_sec = float(maximum_late_seconds)
-
-        if shift_end_dt and cutoff_in_dt:
-            if half_day_kind == "second_half":
-                if final_out_dt:
-                    if eff_out_mode == AttendanceWorkMode.ON_DUTY:
-                        early_sec = 0.0
-                    else:
-                        early_sec = max(0.0, (adjusted_early_reference_dt - final_out_dt).total_seconds())
-                else:
-                    early_sec = 0.0
-                leave_note_suffixes.append(_localize_half_day_leave_note("second_half", language))
-            elif half_day_kind == "first_half":
-                if final_out_dt:
-                    if eff_out_mode == AttendanceWorkMode.ON_DUTY:
-                        early_sec = 0.0
-                    else:
-                        early_sec = max(0.0, (adjusted_early_reference_dt - final_out_dt).total_seconds())
-                else:
-                    early_sec = 0.0
-            else:
-                if final_out_dt:
-                    if eff_out_mode == AttendanceWorkMode.ON_DUTY:
-                        early_sec = 0.0
-                    elif not final_in_dt:
-                        if final_out_dt >= shift_end_dt:
-                            early_sec = 0.0
-                        else:
-                            early_sec = max(0.0, (shift_end_dt - final_out_dt).total_seconds())
-                    else:
-                        reference_dt = earliest_check_out_dt or adjusted_early_reference_dt or shift_end_dt
-                        early_sec = max(0.0, (reference_dt - final_out_dt).total_seconds())
-                else:
-                    early_sec = float(missing_out_early_seconds)
+        metrics = compute_attendance_metrics(
+            policy,
+            final_in_dt=final_in_dt,
+            final_out_dt=final_out_dt,
+            grace_seconds=grace_in_sec,
+            clock_in_type=grace_clock_in_type,
+            is_presence_only=False,
+        )
+        earliest_check_out_dt = metrics.earliest_checkout_dt
+        late_sec = 0.0 if eff_in_mode == AttendanceWorkMode.ON_DUTY else float(metrics.late_seconds)
+        early_sec = 0.0 if eff_out_mode == AttendanceWorkMode.ON_DUTY else float(metrics.early_out_seconds)
 
         late_minutes = _seconds_to_minutes(late_sec)
         early_minutes = _seconds_to_minutes(early_sec)
