@@ -357,8 +357,8 @@ class MonthlyRecapIntegrationTests(SimpleTestCase):
         self.assertEqual(row.check_out, "16:40")
         self.assertEqual(row.work_type, "WFA")
         self.assertEqual(recap["summary"]["late_minutes"], 20)
-        self.assertEqual(recap["summary"]["early_out_minutes"], 20)
-        self.assertEqual(recap["summary"]["total_minutes"], 40)
+        self.assertEqual(recap["summary"]["early_out_minutes"], 0)
+        self.assertEqual(recap["summary"]["total_minutes"], 20)
 
     def test_monthly_recap_ignores_non_approved_work_type_request_and_terminal_request_effects(self):
         raw_activity = self._raw_activity(id=50, in_time=time(8, 0), out_time=time(17, 0), in_mode=None, out_mode=None)
@@ -462,7 +462,7 @@ class MonthlyRecapIntegrationTests(SimpleTestCase):
         self.assertEqual(row.late_minutes, 5)
         self.assertIn("Approved First Half Leave", row.note)
         self.assertEqual(recap["summary"]["late_minutes"], 5)
-        self.assertEqual(recap["summary"]["early_out_minutes"], 0)
+        self.assertEqual(recap["summary"]["early_out_minutes"], 5)
 
     def test_monthly_recap_reflects_second_half_leave_final_state(self):
         leave_request = SimpleNamespace(
@@ -532,22 +532,22 @@ class MonthlyRecapIntegrationTests(SimpleTestCase):
         self.assertEqual(row_one.work_type, row_two.work_type)
         self.assertEqual(row_one.note, row_two.note)
 
-    def test_alpha_uses_minimum_working_hour_split_between_maximum_late_and_early_out(self):
+    def test_missing_check_in_and_out_uses_full_policy_late_only(self):
         recap, row = self._get_recap()
 
         self.assertEqual(row.late, "04:00")
-        self.assertEqual(row.early_out, "04:00")
+        self.assertEqual(row.early_out, "00:00")
         self.assertEqual(row.late_minutes, 240)
-        self.assertEqual(row.early_out_minutes, 240)
+        self.assertEqual(row.early_out_minutes, 0)
 
-    def test_missing_check_out_uses_minimum_working_hour_minus_maximum_late(self):
+    def test_missing_check_out_uses_full_policy_early_out_duration(self):
         activity = self._raw_activity(id=41, in_time=time(8, 0))
 
         recap, row = self._get_recap(activities=[activity])
 
         self.assertEqual(row.late, "00:00")
-        self.assertEqual(row.early_out, "04:00")
-        self.assertEqual(row.early_out_minutes, 240)
+        self.assertEqual(row.early_out, "08:00")
+        self.assertEqual(row.early_out_minutes, 480)
 
     def test_missing_check_in_with_checkout_at_shift_end_has_no_early_out(self):
         activity = self._raw_activity(id=42, out_time=time(17, 0))
@@ -590,8 +590,8 @@ class MonthlyRecapIntegrationTests(SimpleTestCase):
             recap = monthly_recap.get_monthly_attendance_recap(self.employee, "2026-03")
 
         row = self._find_row(recap["rows"], self.target_date)
-        self.assertEqual(row.early_out, "01:00")
-        self.assertEqual(row.early_out_minutes, 60)
+        self.assertEqual(row.early_out, "00:00")
+        self.assertEqual(row.early_out_minutes, 0)
 
         activity2 = self._raw_activity(id=45, in_time=time(9, 0), out_time=time(18, 0))
         with patch.object(monthly_recap.AttendanceActivity, "objects", FakeManager([activity2])),              patch.object(monthly_recap.EmployeeShiftDay, "objects", FakeManager([SimpleNamespace(day=self.target_date.strftime("%A").lower())])),              patch("attendance.views.clock_in_out.get_shift_rules", flex_shift_rules),              patch("attendance.views.clock_in_out._resolve_grace_time", lambda schedule, shift: FakeGraceTime(False, 0)):
