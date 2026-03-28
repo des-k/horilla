@@ -368,7 +368,12 @@ def _calculate_early_out_seconds(
     if final_out_dt is None:
         return max(0, int(policy.required_work_seconds or 0))
 
-    reference_end_dt = policy.nominal_policy_end_dt if final_in_dt is None else (earliest_checkout_dt or policy.nominal_policy_end_dt)
+    reference_end_dt = policy.nominal_policy_end_dt
+    if policy.kind == "second_half":
+        reference_end_dt = earliest_checkout_dt or policy.nominal_policy_end_dt
+    elif policy.kind not in {"first_half", "full_day"} and policy.break_start_dt and policy.break_end_dt:
+        reference_end_dt = earliest_checkout_dt or policy.nominal_policy_end_dt
+
     return net_duration_excluding_break(
         final_out_dt,
         reference_end_dt,
