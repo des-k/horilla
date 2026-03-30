@@ -626,15 +626,15 @@ class MonthlyRecapRow:
 
 @dataclass(frozen=True)
 class MonthlyRecapSummary:
-    late_minutes: float = 0
-    early_out_minutes: float = 0
-    total_minutes: float = 0
+    late_minutes: int = 0
+    early_out_minutes: int = 0
+    total_minutes: int = 0
 
-    def as_dict(self) -> Dict[str, float | int]:
+    def as_dict(self) -> Dict[str, int]:
         return {
-            "late_minutes": _normalize_minutes_value(self.late_minutes or 0),
-            "early_out_minutes": _normalize_minutes_value(self.early_out_minutes or 0),
-            "total_minutes": _normalize_minutes_value(self.total_minutes or 0),
+            "late_minutes": int(self.late_minutes or 0),
+            "early_out_minutes": int(self.early_out_minutes or 0),
+            "total_minutes": int(self.total_minutes or 0),
         }
 
 
@@ -732,40 +732,31 @@ def _resolve_mobile_style_earliest_checkout_dt(
     return effective_start_dt + shift_duration
 
 
-def _normalize_minutes_value(value):
-    try:
-        numeric = float(value)
-    except Exception:
-        return 0
-    if numeric < 0:
-        return 0
-    rounded = round(numeric, 2)
-    if float(rounded).is_integer():
-        return int(rounded)
-    return rounded
+def _parse_duration_to_minutes(value) -> int:
+    """Safely coerce duration-like values into plain integer minutes.
 
-
-def _parse_duration_to_minutes(value):
-    """Safely coerce duration-like values into minute values while preserving .5 when present."""
+    Supported inputs:
+    - raw integers / floats / timedeltas
+    - HH:MM
+    - HH:MM:SS
+    - blank / "-" / invalid => 0
+    """
 
     if value is None:
         return 0
 
     if isinstance(value, timedelta):
-        return _normalize_minutes_value(value.total_seconds() / 60.0)
+        return _seconds_to_minutes(value.total_seconds())
 
     if isinstance(value, (int, float)):
-        return _normalize_minutes_value(value)
+        return _safe_non_negative_int(value)
 
     raw = str(value).strip()
     if not raw or raw in {"-", "—"} or raw.lower() in {"none", "null", "invalid"}:
         return 0
 
-    normalized_raw = raw.lower().replace("minutes", "").replace("minute", "").replace("menit", "").strip()
-    try:
-        return _normalize_minutes_value(float(normalized_raw))
-    except Exception:
-        pass
+    if raw.isdigit():
+        return _safe_non_negative_int(raw)
 
     parts = raw.split(":")
     if len(parts) in (2, 3):
@@ -779,30 +770,30 @@ def _parse_duration_to_minutes(value):
         if hours < 0 or minutes < 0 or seconds < 0:
             return 0
 
-        return _normalize_minutes_value(hours * 60 + minutes + (seconds / 60.0))
+        return hours * 60 + minutes + (seconds // 60)
 
     return 0
 
 
-def _row_duration_minutes(row: "MonthlyRecapRow", *, minute_attr: str, text_attr: str):
+def _row_duration_minutes(row: "MonthlyRecapRow", *, minute_attr: str, text_attr: str) -> int:
     raw_minutes = getattr(row, minute_attr, None)
     if raw_minutes not in (None, ""):
-        return _parse_duration_to_minutes(raw_minutes)
+        return _safe_non_negative_int(raw_minutes)
     return _parse_duration_to_minutes(getattr(row, text_attr, None))
 
 
 def summarize_monthly_recap_rows(rows: List["MonthlyRecapRow"]) -> MonthlyRecapSummary:
-    late_minutes = 0.0
-    early_out_minutes = 0.0
+    late_minutes = 0
+    early_out_minutes = 0
 
     for row in rows or []:
-        late_minutes += float(_row_duration_minutes(row, minute_attr="late_minutes", text_attr="late") or 0)
-        early_out_minutes += float(_row_duration_minutes(row, minute_attr="early_out_minutes", text_attr="early_out") or 0)
+        late_minutes += _row_duration_minutes(row, minute_attr="late_minutes", text_attr="late")
+        early_out_minutes += _row_duration_minutes(row, minute_attr="early_out_minutes", text_attr="early_out")
 
     return MonthlyRecapSummary(
-        late_minutes=_normalize_minutes_value(late_minutes),
-        early_out_minutes=_normalize_minutes_value(early_out_minutes),
-        total_minutes=_normalize_minutes_value(late_minutes + early_out_minutes),
+        late_minutes=late_minutes,
+        early_out_minutes=early_out_minutes,
+        total_minutes=late_minutes + early_out_minutes,
     )
 
 
