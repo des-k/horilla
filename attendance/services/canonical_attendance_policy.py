@@ -16,6 +16,9 @@ class AttendancePolicy:
     break_end_dt: Optional[datetime]
     late_reference_dt: Optional[datetime]
     nominal_policy_end_dt: Optional[datetime]
+    checkin_window_end_dt: Optional[datetime]
+    checkout_start_dt: Optional[datetime]
+    early_checkout_minutes: int
     required_work_seconds: int
     minimum_hour: str
     maximum_late_seconds: int
@@ -163,6 +166,34 @@ def _resolve_normal_required_work_seconds(
     )
 
 
+def _resolve_half_day_early_checkout_minutes(schedule, leave_kind: Optional[str]) -> int:
+    field_name = None
+    if leave_kind == "first_half":
+        field_name = "first_half_leave_early_checkout_minutes"
+    elif leave_kind == "second_half":
+        field_name = "second_half_leave_early_checkout_minutes"
+    if not field_name:
+        return 0
+    try:
+        value = getattr(schedule, field_name, 30) if schedule is not None else 30
+        return max(0, int(30 if value is None else value))
+    except Exception:
+        return 30
+
+
+def _resolve_half_day_window_bounds(
+    *,
+    leave_kind: Optional[str],
+    policy_end_dt: Optional[datetime],
+    early_checkout_minutes: int,
+) -> tuple[Optional[datetime], Optional[datetime]]:
+    if leave_kind not in {"first_half", "second_half"} or policy_end_dt is None:
+        return None, None
+    checkout_start_dt = policy_end_dt - timedelta(minutes=max(0, int(early_checkout_minutes or 0)))
+    checkin_window_end_dt = checkout_start_dt - timedelta(minutes=1)
+    return checkin_window_end_dt, checkout_start_dt
+
+
 def build_attendance_policy(
     *,
     schedule,
@@ -188,6 +219,9 @@ def build_attendance_policy(
 
     late_reference_dt = shift_start_dt
     nominal_policy_end_dt = shift_end_dt
+    checkin_window_end_dt = check_in_cutoff_dt
+    checkout_start_dt = None
+    early_checkout_minutes = 0
     required_work_seconds = normal_required_seconds
     maximum_late_seconds = net_duration_excluding_break(
         shift_start_dt,
@@ -216,6 +250,12 @@ def build_attendance_policy(
             break_end_dt=break_end_dt,
         )
         maximum_late_seconds = required_work_seconds
+        early_checkout_minutes = _resolve_half_day_early_checkout_minutes(schedule, leave_kind)
+        checkin_window_end_dt, checkout_start_dt = _resolve_half_day_window_bounds(
+            leave_kind=leave_kind,
+            policy_end_dt=nominal_policy_end_dt,
+            early_checkout_minutes=early_checkout_minutes,
+        )
     elif leave_kind == "second_half":
         nominal_policy_end_dt = time_to_shift_instance_dt(
             getattr(schedule, "second_half_leave_earliest_check_out_time", None) if schedule else None,
@@ -229,6 +269,12 @@ def build_attendance_policy(
             break_end_dt=break_end_dt,
         )
         maximum_late_seconds = required_work_seconds
+        early_checkout_minutes = _resolve_half_day_early_checkout_minutes(schedule, leave_kind)
+        checkin_window_end_dt, checkout_start_dt = _resolve_half_day_window_bounds(
+            leave_kind=leave_kind,
+            policy_end_dt=nominal_policy_end_dt,
+            early_checkout_minutes=early_checkout_minutes,
+        )
     elif leave_kind == "full_day":
         required_work_seconds = 0
         maximum_late_seconds = 0
@@ -245,6 +291,9 @@ def build_attendance_policy(
         break_end_dt=break_end_dt,
         late_reference_dt=late_reference_dt,
         nominal_policy_end_dt=nominal_policy_end_dt,
+        checkin_window_end_dt=checkin_window_end_dt,
+        checkout_start_dt=checkout_start_dt,
+        early_checkout_minutes=max(0, int(early_checkout_minutes or 0)),
         required_work_seconds=max(0, int(required_work_seconds or 0)),
         minimum_hour=minimum_hour_value or "00:00",
         maximum_late_seconds=max(0, int(maximum_late_seconds or 0)),
@@ -335,6 +384,56 @@ def compute_worked_seconds(
     )
 
 
+def resolve_policy_windows(
+    policy: AttendancePolicy,
+    *,
+    actual_check_in_dt: Optional[datetime],
+    clock_in_type: Optional[str],
+    flex_seconds: Optional[int],
+) -> tuple[Optional[datetime], Optional[datetime], Optional[datetime]]:
+    if policy.kind == "second_half":
+        _, effective_policy_end_dt, _ = resolve_effective_check_in_and_earliest_checkout(
+            policy,
+            actual_check_in_dt=actual_check_in_dt,
+            clock_in_type=clock_in_type,
+            flex_seconds=flex_seconds,
+        )
+        effective_policy_end_dt = effective_policy_end_dt or policy.nominal_policy_end_dt
+        checkin_window_end_dt, checkout_start_dt = _resolve_half_day_window_bounds(
+            leave_kind=policy.kind,
+            policy_end_dt=effective_policy_end_dt,
+            early_checkout_minutes=policy.early_checkout_minutes,
+        )
+        return effective_policy_end_dt, checkin_window_end_dt, checkout_start_dt
+    return policy.nominal_policy_end_dt, policy.checkin_window_end_dt, policy.checkout_start_dt
+
+
+def compute_mobile_status_metrics(
+    policy: AttendancePolicy,
+    *,
+    actual_check_in_dt: Optional[datetime],
+    clock_in_type: Optional[str],
+    flex_seconds: Optional[int],
+) -> tuple[Optional[datetime], Optional[datetime], bool, Optional[datetime], Optional[datetime]]:
+    effective_start_dt, dynamic_earliest_checkout_dt, valid_check_in = resolve_effective_check_in_and_earliest_checkout(
+        policy,
+        actual_check_in_dt=actual_check_in_dt,
+        clock_in_type=clock_in_type,
+        flex_seconds=flex_seconds,
+    )
+    effective_policy_end_dt, checkin_window_end_dt, checkout_start_dt = resolve_policy_windows(
+        policy,
+        actual_check_in_dt=actual_check_in_dt,
+        clock_in_type=clock_in_type,
+        flex_seconds=flex_seconds,
+    )
+    if policy.kind == "second_half":
+        display_earliest_checkout_dt = dynamic_earliest_checkout_dt or effective_policy_end_dt
+    else:
+        display_earliest_checkout_dt = effective_policy_end_dt or policy.nominal_policy_end_dt
+    return effective_start_dt, display_earliest_checkout_dt, valid_check_in, checkin_window_end_dt, checkout_start_dt
+
+
 def _calculate_late_seconds(
     policy: AttendancePolicy,
     *,
@@ -362,17 +461,25 @@ def _calculate_early_out_seconds(
     final_in_dt: Optional[datetime],
     final_out_dt: Optional[datetime],
     earliest_checkout_dt: Optional[datetime],
+    use_nominal_policy_end: bool = False,
 ) -> int:
     if final_in_dt is None and final_out_dt is None:
         return 0
     if final_out_dt is None:
+        if final_in_dt is not None and policy.kind in {"first_half", "second_half"}:
+            reference_end_dt = policy.nominal_policy_end_dt if use_nominal_policy_end else (earliest_checkout_dt or policy.nominal_policy_end_dt)
+            return net_duration_excluding_break(
+                final_in_dt,
+                reference_end_dt,
+                break_start_dt=policy.break_start_dt,
+                break_end_dt=policy.break_end_dt,
+            )
         return max(0, int(policy.required_work_seconds or 0))
 
-    reference_end_dt = policy.nominal_policy_end_dt
-    if policy.kind == "second_half":
-        reference_end_dt = earliest_checkout_dt or policy.nominal_policy_end_dt
-    elif policy.kind not in {"first_half", "full_day"} and policy.break_start_dt and policy.break_end_dt:
-        reference_end_dt = earliest_checkout_dt or policy.nominal_policy_end_dt
+    if final_in_dt is None:
+        reference_end_dt = policy.nominal_policy_end_dt
+    else:
+        reference_end_dt = policy.nominal_policy_end_dt if use_nominal_policy_end else (earliest_checkout_dt or policy.nominal_policy_end_dt)
 
     return net_duration_excluding_break(
         final_out_dt,
@@ -390,6 +497,7 @@ def compute_attendance_metrics(
     grace_seconds: int,
     clock_in_type: Optional[str],
     is_presence_only: bool = False,
+    use_nominal_policy_end_for_early_out: bool = False,
 ) -> AttendanceMetrics:
     if is_presence_only or policy.kind == "full_day":
         return AttendanceMetrics(
@@ -420,6 +528,7 @@ def compute_attendance_metrics(
             final_in_dt=final_in_dt,
             final_out_dt=final_out_dt,
             earliest_checkout_dt=earliest_checkout_dt,
+            use_nominal_policy_end=use_nominal_policy_end_for_early_out,
         )
 
     return AttendanceMetrics(
