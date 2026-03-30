@@ -22,6 +22,8 @@ class ShiftScheduleSurfaceFormTests(SimpleTestCase):
             self.assertIn("break_start_time", candidate.fields)
             self.assertIn("break_end_time", candidate.fields)
             self.assertIn("first_half_leave_new_shift_end_time", candidate.fields)
+            self.assertIn("first_half_leave_early_checkout_minutes", candidate.fields)
+            self.assertIn("second_half_leave_early_checkout_minutes", candidate.fields)
 
             field_names = list(candidate.fields.keys())
             self.assertLess(field_names.index("end_time"), field_names.index("break_start_time"))
@@ -29,6 +31,14 @@ class ShiftScheduleSurfaceFormTests(SimpleTestCase):
             self.assertLess(
                 field_names.index("first_half_leave_latest_check_in_time"),
                 field_names.index("first_half_leave_new_shift_end_time"),
+            )
+            self.assertLess(
+                field_names.index("first_half_leave_new_shift_end_time"),
+                field_names.index("first_half_leave_early_checkout_minutes"),
+            )
+            self.assertLess(
+                field_names.index("second_half_leave_earliest_check_out_time"),
+                field_names.index("second_half_leave_early_checkout_minutes"),
             )
 
     def test_update_form_initializes_new_time_fields_from_instance(self):
@@ -47,6 +57,8 @@ class ShiftScheduleSurfaceFormTests(SimpleTestCase):
             form.fields["first_half_leave_new_shift_end_time"].initial,
             "17:00",
         )
+        self.assertEqual(form.fields["first_half_leave_early_checkout_minutes"].initial, 30)
+        self.assertEqual(form.fields["second_half_leave_early_checkout_minutes"].initial, 30)
 
 
 class ShiftScheduleSurfaceModelAndApiTests(TestCase):
@@ -85,17 +97,23 @@ class ShiftScheduleSurfaceModelAndApiTests(TestCase):
             break_start_time=time(12, 0),
             break_end_time=time(13, 0),
             first_half_leave_new_shift_end_time=time(17, 0),
+            first_half_leave_early_checkout_minutes=45,
+            second_half_leave_early_checkout_minutes=20,
         )
 
         schedule.refresh_from_db()
         self.assertEqual(schedule.break_start_time, time(12, 0))
         self.assertEqual(schedule.break_end_time, time(13, 0))
         self.assertEqual(schedule.first_half_leave_new_shift_end_time, time(17, 0))
+        self.assertEqual(schedule.first_half_leave_early_checkout_minutes, 45)
+        self.assertEqual(schedule.second_half_leave_early_checkout_minutes, 20)
 
         serialized = EmployeeShiftScheduleSerializer(schedule).data
         self.assertEqual(serialized["break_start_time"], "12:00:00")
         self.assertEqual(serialized["break_end_time"], "13:00:00")
         self.assertEqual(serialized["first_half_leave_new_shift_end_time"], "17:00:00")
+        self.assertEqual(serialized["first_half_leave_early_checkout_minutes"], 45)
+        self.assertEqual(serialized["second_half_leave_early_checkout_minutes"], 20)
 
     def test_break_interval_requires_both_values(self):
         schedule = EmployeeShiftSchedule(
@@ -157,17 +175,23 @@ class ShiftScheduleSurfaceModelAndApiTests(TestCase):
         self.assertIsNone(schedule.break_start_time)
         self.assertIsNone(schedule.break_end_time)
         self.assertIsNone(schedule.first_half_leave_new_shift_end_time)
+        self.assertEqual(schedule.first_half_leave_early_checkout_minutes, 30)
+        self.assertEqual(schedule.second_half_leave_early_checkout_minutes, 30)
 
         serialized = EmployeeShiftScheduleSerializer(schedule).data
         self.assertIsNone(serialized["break_start_time"])
         self.assertIsNone(serialized["break_end_time"])
         self.assertIsNone(serialized["first_half_leave_new_shift_end_time"])
+        self.assertEqual(serialized["first_half_leave_early_checkout_minutes"], 30)
+        self.assertEqual(serialized["second_half_leave_early_checkout_minutes"], 30)
 
     def test_shift_schedule_detail_api_exposes_new_fields(self):
         schedule = self.create_schedule(
             break_start_time=time(12, 0),
             break_end_time=time(13, 0),
             first_half_leave_new_shift_end_time=time(17, 0),
+            first_half_leave_early_checkout_minutes=45,
+            second_half_leave_early_checkout_minutes=20,
         )
         user = User.objects.create_user(username="viewer", password="pass1234")
         user.user_permissions.add(
@@ -187,3 +211,5 @@ class ShiftScheduleSurfaceModelAndApiTests(TestCase):
             response.data["first_half_leave_new_shift_end_time"],
             "17:00:00",
         )
+        self.assertEqual(response.data["first_half_leave_early_checkout_minutes"], 45)
+        self.assertEqual(response.data["second_half_leave_early_checkout_minutes"], 20)
