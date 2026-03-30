@@ -106,6 +106,8 @@ from attendance.services.attendance_access import evaluate_attendance_access
 from attendance.services.canonical_attendance_policy import (
     build_attendance_policy,
     compute_attendance_metrics,
+    compute_mobile_status_metrics,
+    resolve_policy_windows,
     time_to_shift_instance_dt as canonical_time_to_shift_instance_dt,
 )
 from attendance.services.reconciliation import recompute_attendance, recompute_attendance_range
@@ -747,15 +749,13 @@ def _compute_mobile_effective_start_and_earliest_checkout(
         leave_kind=leave_kind,
         check_in_cutoff_dt=check_in_cutoff_dt,
     )
-    metrics = compute_attendance_metrics(
+    effective_start_dt, earliest_checkout_dt, valid_check_in, _checkin_window_end_dt, _checkout_start_dt = compute_mobile_status_metrics(
         policy,
-        final_in_dt=actual_check_in_dt,
-        final_out_dt=None,
-        grace_seconds=int(flex_seconds or 0),
+        actual_check_in_dt=actual_check_in_dt,
         clock_in_type=clock_in_type,
-        is_presence_only=False,
+        flex_seconds=int(flex_seconds or 0),
     )
-    return metrics.effective_start_dt, metrics.earliest_checkout_dt, metrics.valid_check_in
+    return effective_start_dt, earliest_checkout_dt, valid_check_in
 
 
 def _shift_bounds_for_note_context(attendance_date: date, start_time_sec, end_time_sec):
@@ -967,6 +967,33 @@ class ClockInAPIView(APIView):
         check_in_window_end_dt = rules.get("check_in_window_end_dt") or cutoff_in_dt
         check_in_window_start_dt = _coerce_datetime_like(check_in_window_start_dt, dt_now) if check_in_window_start_dt else None
         check_in_window_end_dt = _coerce_datetime_like(check_in_window_end_dt, dt_now) if check_in_window_end_dt else None
+
+        leave_kind_for_today = None
+        if leave_breakdown_for_attendance_date is not None:
+            try:
+                leave_kind_for_today = leave_breakdown_for_attendance_date(employee, attendance_date) or None
+            except Exception:
+                leave_kind_for_today = None
+
+        if leave_kind_for_today in {"first_half", "second_half"}:
+            try:
+                policy_for_today = build_attendance_policy(
+                    schedule=rules.get("schedule") if isinstance(rules, dict) else None,
+                    shift_start_dt=rules.get("shift_start_dt") if isinstance(rules, dict) else None,
+                    shift_end_dt=rules.get("shift_end_dt") if isinstance(rules, dict) else None,
+                    minimum_hour=minimum_hour,
+                    leave_kind=leave_kind_for_today,
+                    check_in_cutoff_dt=check_in_window_end_dt,
+                )
+                _effective_policy_end_dt, half_day_checkin_window_end_dt, _half_day_checkout_start_dt = resolve_policy_windows(
+                    policy_for_today,
+                    actual_check_in_dt=None,
+                    clock_in_type=rules.get("clock_in_type") if isinstance(rules, dict) else None,
+                    flex_seconds=grace_seconds,
+                )
+                check_in_window_end_dt = half_day_checkin_window_end_dt or check_in_window_end_dt
+            except Exception:
+                pass
 
         try:
             auto_reject_wfa_waiting_for_date(employee=employee, target_date=attendance_date, now_dt=dt_now, cutoff_in_dt=cutoff_in_dt, cutoff_out_dt=None)
@@ -3402,6 +3429,24 @@ class CheckingStatus(APIView):
             leave_kind=leave_kind_for_note,
             check_in_cutoff_dt=check_in_window_end_dt,
         )
+
+        status_actual_in_dt = None
+        if attendance and clock_in_t:
+            actual_in_date = getattr(attendance, "attendance_clock_in_date", None) or attendance_date
+            status_actual_in_dt = _coerce_datetime_like(datetime.combine(actual_in_date, clock_in_t), dt_now)
+
+        if leave_kind_for_note in {"first_half", "second_half"}:
+            try:
+                _status_policy_end_dt, half_day_checkin_window_end_dt, half_day_checkout_start_dt = resolve_policy_windows(
+                    policy_for_note,
+                    actual_check_in_dt=status_actual_in_dt,
+                    clock_in_type=clock_in_type,
+                    flex_seconds=grace_seconds,
+                )
+                check_in_window_end_dt = half_day_checkin_window_end_dt or check_in_window_end_dt
+                check_out_window_start_dt = half_day_checkout_start_dt or check_out_window_start_dt
+            except Exception:
+                pass
 
         # If this attendance is presence-only (for example, final verified On Duty),
         # force worked hours to 00:00.
