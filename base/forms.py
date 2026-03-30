@@ -1163,6 +1163,10 @@ def _configure_shift_schedule_policy_fields(form):
         form.fields["early_checkin_minutes"].label = _("Early Check In Minutes")
     if "early_checkout_grace_minutes" in form.fields:
         form.fields["early_checkout_grace_minutes"].label = _("Early Check Out Minutes")
+    if "first_half_leave_early_checkout_minutes" in form.fields and form.fields["first_half_leave_early_checkout_minutes"].initial in (None, ""):
+        form.fields["first_half_leave_early_checkout_minutes"].initial = 30
+    if "second_half_leave_early_checkout_minutes" in form.fields and form.fields["second_half_leave_early_checkout_minutes"].initial in (None, ""):
+        form.fields["second_half_leave_early_checkout_minutes"].initial = 30
 
     if "enable_first_half_leave_rule" in form.fields:
         form.fields["enable_first_half_leave_rule"].initial = True
@@ -1195,8 +1199,10 @@ def _configure_shift_schedule_policy_fields(form):
         "enable_first_half_leave_rule",
         "first_half_leave_latest_check_in_time",
         "first_half_leave_new_shift_end_time",
+        "first_half_leave_early_checkout_minutes",
         "enable_second_half_leave_rule",
         "second_half_leave_earliest_check_out_time",
+        "second_half_leave_early_checkout_minutes",
         "require_check_out_before_second_half_leave",
         "is_auto_punch_out_enabled",
         "auto_punch_out_time",
@@ -1265,8 +1271,14 @@ class EmployeeShiftScheduleUpdateForm(ModelForm):
             "first_half_leave_new_shift_end_time": forms.TimeInput(
                 attrs={"type": "time", "class": "oh-input w-100 form-control"}
             ),
+            "first_half_leave_early_checkout_minutes": forms.NumberInput(
+                attrs={"class": "oh-input w-100 form-control", "min": 0}
+            ),
             "second_half_leave_earliest_check_out_time": forms.TimeInput(
                 attrs={"type": "time", "class": "oh-input w-100 form-control"}
+            ),
+            "second_half_leave_early_checkout_minutes": forms.NumberInput(
+                attrs={"class": "oh-input w-100 form-control", "min": 0}
             ),
         }
 
@@ -1431,8 +1443,14 @@ class EmployeeShiftScheduleForm(ModelForm):
             "first_half_leave_new_shift_end_time": forms.TimeInput(
                 attrs={"type": "time", "class": "oh-input w-100 form-control"}
             ),
+            "first_half_leave_early_checkout_minutes": forms.NumberInput(
+                attrs={"class": "oh-input w-100 form-control", "min": 0}
+            ),
             "second_half_leave_earliest_check_out_time": forms.TimeInput(
                 attrs={"type": "time", "class": "oh-input w-100 form-control"}
+            ),
+            "second_half_leave_early_checkout_minutes": forms.NumberInput(
+                attrs={"class": "oh-input w-100 form-control", "min": 0}
             ),
         }
 
