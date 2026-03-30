@@ -68,6 +68,7 @@ from attendance.services.attendance_access import evaluate_attendance_access
 from attendance.services.canonical_attendance_policy import (
     build_attendance_policy,
     compute_worked_seconds,
+    resolve_policy_windows,
 )
 from attendance.services.work_type_request_rules import resolve_biometric_work_mode
 from base.context_processors import (
@@ -76,6 +77,11 @@ from base.context_processors import (
 )
 from base.models import AttendanceAllowedIP, Company, EmployeeShiftDay, EmployeeShiftSchedule
 from horilla.decorators import hx_request_required, login_required
+
+try:
+    from leave.half_day_rules import leave_breakdown_for_attendance_date
+except Exception:  # pragma: no cover
+    leave_breakdown_for_attendance_date = None  # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -998,10 +1004,44 @@ def clock_out_attendance_and_activity(
         mode=clock_out_mode,
         work_mode_request=work_mode_request,
     )
+    leave_kind = None
+    if leave_breakdown_for_attendance_date is not None:
+        try:
+            leave_kind = leave_breakdown_for_attendance_date(employee, attendance_date) or None
+        except Exception:
+            leave_kind = None
     if effective_presence_only:
         earliest_checkout_dt = (cutoff_in_dt + timedelta(minutes=1)) if cutoff_in_dt else None
     else:
         earliest_checkout_dt = rules.get("check_out_window_start_dt")
+        if leave_kind in {"first_half", "second_half"}:
+            existing_attendance = Attendance.objects.filter(
+                employee_id=employee,
+                attendance_date=attendance_date,
+            ).first()
+            existing_activity = AttendanceActivity.objects.filter(
+                employee_id=employee,
+                attendance_date=attendance_date,
+            ).first()
+            actual_check_in_dt = _get_attendance_session_dt(existing_attendance, "IN") or _get_activity_session_dt(existing_activity, "IN")
+            try:
+                policy = build_attendance_policy(
+                    schedule=rules.get("schedule"),
+                    shift_start_dt=rules.get("shift_start_dt"),
+                    shift_end_dt=rules.get("shift_end_dt"),
+                    minimum_hour=minimum_hour,
+                    leave_kind=leave_kind,
+                    check_in_cutoff_dt=rules.get("check_in_window_end_dt") or cutoff_in_dt,
+                )
+                _effective_policy_end_dt, _checkin_window_end_dt, half_day_checkout_start_dt = resolve_policy_windows(
+                    policy,
+                    actual_check_in_dt=actual_check_in_dt,
+                    clock_in_type=rules.get("clock_in_type"),
+                    flex_seconds=int(rules.get("grace_seconds") or 0),
+                )
+                earliest_checkout_dt = half_day_checkout_start_dt or earliest_checkout_dt
+            except Exception:
+                pass
 
     if earliest_checkout_dt and out_datetime < earliest_checkout_dt:
         raise ValidationError(_("Check-out window has not started yet."))
