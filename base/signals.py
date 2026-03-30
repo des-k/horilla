@@ -13,20 +13,45 @@ from django.dispatch import receiver
 from django.http import Http404
 from django.shortcuts import redirect, render
 from datetime import time as dt_time
-from django.db import connection, transaction
+from django.db import DatabaseError, connections, transaction
 
 from base.models import Announcement, PenaltyAccounts
 from horilla.methods import get_horilla_model_class
 
 
-def _table_exists(table_name):
+def _table_exists(table_name, using=None):
+    alias = using or "default"
     try:
+        connection = connections[alias]
         return table_name in connection.introspection.table_names()
     except Exception:
         return False
 
 
-def _ensure_wfo_wfa_worktypes(company=None):
+def _safe_m2m_add(manager, *objs, using=None):
+    """Safely add M2M rows during bootstrap/post_migrate.
+
+    During migrate/test bootstrap, through tables may not exist yet or may raise
+    a DatabaseError while the outer post_migrate transaction is still open.
+    Use an inner atomic block so failures roll back to a savepoint instead of
+    poisoning the outer transaction.
+    """
+    try:
+        through_table = manager.through._meta.db_table
+    except Exception:
+        return
+
+    if not _table_exists(through_table, using=using):
+        return
+
+    try:
+        with transaction.atomic(using=using):
+            manager.add(*objs)
+    except DatabaseError:
+        return
+
+
+def _ensure_wfo_wfa_worktypes(company=None, using=None):
     """Ensure WorkType codes WFO/WFA exist and are attached to companies.
 
     Fresh installs often create the first user via `createhorillauser` without
@@ -41,36 +66,47 @@ def _ensure_wfo_wfa_worktypes(company=None):
     try:
         from base.models import Company, WorkType
 
+        required_tables = {WorkType._meta.db_table}
+        try:
+            required_tables.add(WorkType.company_id.through._meta.db_table)
+        except Exception:
+            pass
+        if company is None:
+            try:
+                required_tables.add(Company._meta.db_table)
+            except Exception:
+                pass
+        if not all(_table_exists(t, using=using) for t in required_tables):
+            return
+
         # Use entire() to avoid any request/company middleware filtering.
         qs = (
             WorkType.objects.entire()
             if hasattr(WorkType.objects, "entire")
             else WorkType.objects
         )
+        if using:
+            qs = qs.using(using)
 
         wfo = qs.filter(work_type__iexact="WFO").first()
         if not wfo:
             wfo = WorkType(work_type="WFO")
-            wfo.save()
+            wfo.save(using=using)
 
         wfa = qs.filter(work_type__iexact="WFA").first()
         if not wfa:
             wfa = WorkType(work_type="WFA")
-            wfa.save()
+            wfa.save(using=using)
 
         # Attach to companies so it appears under company-filtered UI.
         if company is not None:
             companies = [company]
         else:
-            companies = list(Company.objects.all()) if Company else []
+            companies = list(Company.objects.using(using).all()) if Company else []
 
         for c in companies:
-            try:
-                wfo.company_id.add(c)
-                wfa.company_id.add(c)
-            except Exception:
-                # If M2M isn't ready yet, ignore.
-                pass
+            _safe_m2m_add(wfo.company_id, c, using=using)
+            _safe_m2m_add(wfa.company_id, c, using=using)
     except Exception:
         # DB may not be ready during early migrate phases.
         return
@@ -86,7 +122,7 @@ def seed_default_worktypes(sender, **kwargs):
     except Exception:
         return
 
-    _ensure_wfo_wfa_worktypes()
+    _ensure_wfo_wfa_worktypes(using=kwargs.get("using"))
 
 
 @receiver(post_save)
@@ -104,7 +140,7 @@ def seed_worktypes_on_company_create(sender, instance, created=False, **kwargs):
     if not created:
         return
 
-    _ensure_wfo_wfa_worktypes(company=instance)
+    _ensure_wfo_wfa_worktypes(company=instance, using=kwargs.get("using"))
 
 
 @receiver(post_save, sender=PenaltyAccounts)
@@ -361,7 +397,7 @@ def ensure_default_company_and_shift(sender, **kwargs):
     employee_table = getattr(getattr(Employee, "_meta", None), "db_table", None)
     if employee_table:
         required_tables.add(employee_table)
-    if not all(_table_exists(table_name) for table_name in required_tables):
+    if not all(_table_exists(table_name, using=using) for table_name in required_tables):
         return
 
     with transaction.atomic(using=using):
@@ -416,7 +452,7 @@ def ensure_default_company_and_shift(sender, **kwargs):
                     weekly_full_time="40:00",
                     full_time="200:00",
                 )
-                default_shift.company_id.add(default_company)
+                _safe_m2m_add(default_shift.company_id, default_company, using=using)
 
             # Set as company's default shift
             default_company.default_employee_shift_id = default_shift
@@ -424,7 +460,7 @@ def ensure_default_company_and_shift(sender, **kwargs):
 
         # Ensure shift is linked to the company (safe add)
         try:
-            default_shift.company_id.add(default_company)
+            _safe_m2m_add(default_shift.company_id, default_company, using=using)
         except Exception:
             pass
 
@@ -438,7 +474,7 @@ def ensure_default_company_and_shift(sender, **kwargs):
 
             # Ensure day is linked to the company (if day has M2M company_id)
             try:
-                shift_day.company_id.add(default_company)
+                _safe_m2m_add(shift_day.company_id, default_company, using=using)
             except Exception:
                 pass
 
@@ -461,7 +497,7 @@ def ensure_default_company_and_shift(sender, **kwargs):
 
             # Link schedule to company (schedule also has M2M company_id)
             try:
-                schedule.company_id.add(default_company)
+                _safe_m2m_add(schedule.company_id, default_company, using=using)
             except Exception:
                 pass
 
