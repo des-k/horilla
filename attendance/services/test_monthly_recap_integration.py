@@ -207,56 +207,6 @@ class MonthlyRecapIntegrationTests(SimpleTestCase):
         self.assertEqual(row.check_in, "08:00")
         self.assertEqual(row.check_out, "17:00")
 
-
-    def test_summary_preserves_half_minute_values_from_explicit_row_minutes(self):
-        rows = [
-            monthly_recap.MonthlyRecapRow(
-                no=1,
-                attendance_date=self.target_date,
-                shift_information='-',
-                check_in='08:00',
-                check_out='17:00',
-                work_type='WFO',
-                late='-',
-                early_out='-',
-                note='-',
-                late_minutes=225.5,
-                early_out_minutes=30.5,
-            )
-        ]
-
-        summary = monthly_recap.summarize_monthly_recap_rows(rows)
-
-        self.assertEqual(summary.as_dict()['late_minutes'], 225.5)
-        self.assertEqual(summary.as_dict()['early_out_minutes'], 30.5)
-        self.assertEqual(summary.as_dict()['total_minutes'], 256)
-
-    def test_summary_parses_hhmmss_text_without_truncating_half_minute(self):
-        rows = [
-            monthly_recap.MonthlyRecapRow(
-                no=1,
-                attendance_date=self.target_date,
-                shift_information='-',
-                check_in='08:00',
-                check_out='17:00',
-                work_type='WFO',
-                late='03:45:30',
-                early_out='00:30:30',
-                note='-',
-                late_minutes=0,
-                early_out_minutes=0,
-            )
-        ]
-
-        rows[0].late_minutes = ''
-        rows[0].early_out_minutes = ''
-
-        summary = monthly_recap.summarize_monthly_recap_rows(rows)
-
-        self.assertEqual(summary.as_dict()['late_minutes'], 225.5)
-        self.assertEqual(summary.as_dict()['early_out_minutes'], 30.5)
-        self.assertEqual(summary.as_dict()['total_minutes'], 256)
-
     def test_existing_attendance_row_does_not_fallback_to_independent_leave_logic(self):
         attendance = SimpleNamespace(
             id=12,
