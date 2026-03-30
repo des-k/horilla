@@ -974,7 +974,8 @@ def recompute_attendance(employee, attendance_date: date) -> ReconciliationResul
         early_minutes = 0
     else:
         use_nominal_policy_end_for_early_out = bool(
-            preserve_on_duty_out_raw_truth and not grant_on_duty_out_final
+            (preserve_on_duty_out_raw_truth and not grant_on_duty_out_final)
+            or (source in {SOURCE_NORMAL, SOURCE_RECOMPUTED_AFTER_REVOKE} and not leave_ctx.is_half_day)
         )
         metrics = compute_attendance_metrics(
             policy,
