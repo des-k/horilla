@@ -741,6 +741,13 @@ class EmployeeShiftSchedule(HorillaModel):
         verbose_name=_("First Half Leave New Shift End Time"),
         help_text=_("Optional first-half leave specific shift end time for this shift day."),
     )
+    first_half_leave_early_checkout_minutes = models.IntegerField(
+        default=30,
+        verbose_name=_("First Half Leave Early Check Out Minutes"),
+        help_text=_(
+            "First half leave check-out window starts this many minutes before the configured first-half leave policy end time."
+        ),
+    )
     enable_second_half_leave_rule = models.BooleanField(
         default=True,
         verbose_name=_("Enable Second Half Leave Attendance Rule"),
@@ -752,6 +759,13 @@ class EmployeeShiftSchedule(HorillaModel):
         default=default_second_half_leave_earliest_check_out_time,
         verbose_name=_("Second Half Leave Earliest Check-Out Time"),
         help_text=_("Employees who take second half leave must not check out before this time."),
+    )
+    second_half_leave_early_checkout_minutes = models.IntegerField(
+        default=30,
+        verbose_name=_("Second Half Leave Early Check Out Minutes"),
+        help_text=_(
+            "Second half leave check-out window starts this many minutes before the effective second-half leave policy end time."
+        ),
     )
     require_check_out_before_second_half_leave = models.BooleanField(
         default=True,
@@ -1040,6 +1054,18 @@ class EmployeeShiftSchedule(HorillaModel):
                 message=_("First half leave new shift end time must be later than the first half leave latest check-in time."),
             )
 
+        if (
+            self.first_half_leave_early_checkout_minutes is not None
+            and int(self.first_half_leave_early_checkout_minutes) < 0
+        ):
+            raise ValidationError(
+                {
+                    "first_half_leave_early_checkout_minutes": _(
+                        "First half leave early check-out minutes must be zero or greater."
+                    )
+                }
+            )
+
         if self.enable_second_half_leave_rule and not self.second_half_leave_earliest_check_out_time:
             raise ValidationError(
                 {
@@ -1053,6 +1079,18 @@ class EmployeeShiftSchedule(HorillaModel):
             self._validate_half_day_threshold(
                 field_name="second_half_leave_earliest_check_out_time",
                 value=self.second_half_leave_earliest_check_out_time,
+            )
+
+        if (
+            self.second_half_leave_early_checkout_minutes is not None
+            and int(self.second_half_leave_early_checkout_minutes) < 0
+        ):
+            raise ValidationError(
+                {
+                    "second_half_leave_early_checkout_minutes": _(
+                        "Second half leave early check-out minutes must be zero or greater."
+                    )
+                }
             )
     
         # Validate cutoff >= grace when grace applies
