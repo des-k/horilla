@@ -973,6 +973,9 @@ def recompute_attendance(employee, attendance_date: date) -> ReconciliationResul
         late_minutes = 0
         early_minutes = 0
     else:
+        use_nominal_policy_end_for_early_out = bool(
+            preserve_on_duty_out_raw_truth and not grant_on_duty_out_final
+        )
         metrics = compute_attendance_metrics(
             policy,
             final_in_dt=final_in_dt,
@@ -980,6 +983,7 @@ def recompute_attendance(employee, attendance_date: date) -> ReconciliationResul
             grace_seconds=ctx.grace_seconds,
             clock_in_type=ctx.grace_clock_in_type,
             is_presence_only=is_presence_only,
+            use_nominal_policy_end_for_early_out=use_nominal_policy_end_for_early_out,
         )
         late_minutes = max(0, int(metrics.late_seconds // 60))
         early_minutes = max(0, int(metrics.early_out_seconds // 60))
