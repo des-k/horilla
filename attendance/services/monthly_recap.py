@@ -504,6 +504,7 @@ def _canonical_row_from_attendance(
     language: str,
     is_off: bool,
     off_kind: Optional[str] = None,
+    has_activity: bool = False,
     schedule_obj=None,
     shift_start_dt: Optional[datetime] = None,
     shift_end_dt: Optional[datetime] = None,
@@ -546,8 +547,28 @@ def _canonical_row_from_attendance(
         canonical_tzinfo,
     )
 
+    approved_request_row = (
+        is_approved_request_channel(_session_channel(best_att, "IN"))
+        or is_approved_request_channel(_session_channel(best_att, "OUT"))
+    )
+    incomplete_row = (final_in_dt is None) ^ (final_out_dt is None)
+
+    if off_kind in {"holiday", "no_schedule"}:
+        return None
+
+    if off_kind == "leave" and not explicit_canonical:
+        return None
+
     if not explicit_canonical and off_kind != "leave" and final_in_dt is None and final_out_dt is None:
         return None
+
+    # Be conservative for normal recap rows. When activities exist, approved
+    # request channels are involved, or the row is incomplete, the richer recap
+    # resolver below should decide the final truth instead of short-circuiting
+    # from the persisted attendance row.
+    if not explicit_canonical:
+        if has_activity or approved_request_row or incomplete_row:
+            return None
 
     display_in_mode = _session_mode(best_att, "IN") or _attendance_level_mode(best_att) or AttendanceWorkMode.WFO
     display_out_mode = _session_mode(best_att, "OUT") or display_in_mode
@@ -1440,6 +1461,7 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
             language=language,
             is_off=is_off,
             off_kind=off_kind,
+            has_activity=bool(act_list),
             schedule_obj=rules.get("schedule"),
             shift_start_dt=shift_start_dt,
             shift_end_dt=shift_end_dt,
