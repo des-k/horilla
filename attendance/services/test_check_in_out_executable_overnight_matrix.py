@@ -199,7 +199,7 @@ class CheckInOutExecutableMonthBoundaryOvernightDbIntegrationTests(AttendanceApi
         row_march_before = self._row_for_date(march_before, self.attendance_date)
         self.assertEqual(row_march_before.check_out, '05:30 D+1')
         self.assertEqual(march_before['summary']['late_minutes'], 15)
-        self.assertEqual(march_before['summary']['early_out_minutes'], 45)
+        self.assertEqual(march_before['summary']['early_out_minutes'], 30)
         self.assertEqual(april_before['summary']['late_minutes'], 0)
         self.assertEqual(april_before['summary']['early_out_minutes'], 0)
 
@@ -264,7 +264,7 @@ class CheckInOutExecutableMonthBoundaryOvernightDbIntegrationTests(AttendanceApi
         row_march_revoked = self._row_for_date(march_revoked, self.attendance_date)
         self.assertEqual(row_march_revoked.check_out, '05:30 D+1')
         self.assertEqual(march_revoked['summary']['late_minutes'], 15)
-        self.assertEqual(march_revoked['summary']['early_out_minutes'], 45)
+        self.assertEqual(march_revoked['summary']['early_out_minutes'], 30)
         self.assertEqual(april_revoked['summary']['late_minutes'], 0)
         self.assertEqual(april_revoked['summary']['early_out_minutes'], 0)
 
@@ -333,7 +333,7 @@ class CheckInOutExecutableMonthBoundaryOvernightDbIntegrationTests(AttendanceApi
         self.assertEqual(row_march_restored.check_in, '22:15')
         self.assertEqual(row_march_restored.check_out, '05:30 D+1')
         self.assertEqual(march_restored['summary']['late_minutes'], 15)
-        self.assertEqual(march_restored['summary']['early_out_minutes'], 45)
+        self.assertEqual(march_restored['summary']['early_out_minutes'], 30)
         self.assertEqual(april_restored['summary']['late_minutes'], 0)
         self.assertEqual(april_restored['summary']['early_out_minutes'], 0)
 
@@ -367,7 +367,7 @@ class CheckInOutExecutableMonthBoundaryOvernightDbIntegrationTests(AttendanceApi
         self.assertEqual(approved_attendance.attendance_clock_out_date, date(2026, 4, 1))
         self.assertEqual(approved_attendance.attendance_clock_out, time(6, 0))
         self.assertEqual(approved_attendance.late_minutes, 15)
-        self.assertEqual(approved_attendance.early_out_minutes, 15)
+        self.assertEqual(approved_attendance.early_out_minutes, 0)
         self.assertEqual(approved_attendance.minimum_hour, "04:00")
 
         march_approved = self._get_recap_for_month("2026-03")
@@ -377,7 +377,7 @@ class CheckInOutExecutableMonthBoundaryOvernightDbIntegrationTests(AttendanceApi
         self.assertEqual(row_march_approved.check_out, "06:00 D+1")
         self.assertIn("Approved First-Half Leave", row_march_approved.note)
         self.assertEqual(march_approved["summary"]["late_minutes"], 15)
-        self.assertEqual(march_approved["summary"]["early_out_minutes"], 15)
+        self.assertEqual(march_approved["summary"]["early_out_minutes"], 0)
         self.assertEqual(april_approved["summary"]["late_minutes"], 0)
         self.assertEqual(april_approved["summary"]["early_out_minutes"], 0)
 
@@ -395,7 +395,7 @@ class CheckInOutExecutableMonthBoundaryOvernightDbIntegrationTests(AttendanceApi
         self.assertEqual(cancelled_attendance.attendance_clock_out_date, date(2026, 4, 1))
         self.assertEqual(cancelled_attendance.attendance_clock_out, time(6, 0))
         self.assertEqual(cancelled_attendance.late_minutes, 255)
-        self.assertEqual(cancelled_attendance.early_out_minutes, 255)
+        self.assertEqual(cancelled_attendance.early_out_minutes, 0)
         self.assertEqual(cancelled_attendance.minimum_hour, "08:00")
 
         in_punch.refresh_from_db()
@@ -510,19 +510,19 @@ class CheckInOutExecutableOvernightDbIntegrationTests(AttendanceApiIntegrationMi
         self.assertEqual(attendance.attendance_clock_in_channel, AttendanceChannel.BIOMETRIC)
         self.assertEqual(attendance.attendance_clock_out_channel, AttendanceChannel.BIOMETRIC)
         self.assertEqual(attendance.late_minutes, 15)
-        self.assertEqual(attendance.early_out_minutes, 45)
+        self.assertEqual(attendance.early_out_minutes, 30)
         self.assertEqual(activity.attendance_date, self.attendance_date)
         self.assertEqual(activity.clock_out_date, date(2026, 3, 15))
         self.assertEqual(activity.late_minutes, 15)
-        self.assertEqual(activity.early_out_minutes, 45)
+        self.assertEqual(activity.early_out_minutes, 30)
 
         recap, row = self._get_target_recap()
         self.assertEqual(row.check_in, '22:15')
         self.assertEqual(row.check_out, '05:30 D+1')
         self.assertEqual(row.late_minutes, 15)
-        self.assertEqual(row.early_out_minutes, 45)
+        self.assertEqual(row.early_out_minutes, 30)
         self.assertEqual(recap['summary']['late_minutes'], 15)
-        self.assertEqual(recap['summary']['early_out_minutes'], 45)
+        self.assertEqual(recap['summary']['early_out_minutes'], 30)
 
     def test_overnight_monthly_recap_changes_after_correction_approve_and_restores_after_revoke(self):
         in_punch, out_punch = self._create_raw_punches(
@@ -536,7 +536,7 @@ class CheckInOutExecutableOvernightDbIntegrationTests(AttendanceApiIntegrationMi
 
         recap_before, row_before = self._get_target_recap()
         self.assertEqual(row_before.check_out, '05:30 D+1')
-        self.assertEqual(recap_before['summary']['early_out_minutes'], 45)
+        self.assertEqual(recap_before['summary']['early_out_minutes'], 30)
 
         capture_request_restore_snapshot(attendance, include_out=True)
         attendance.request_type = 'update_request'
@@ -594,7 +594,7 @@ class CheckInOutExecutableOvernightDbIntegrationTests(AttendanceApiIntegrationMi
 
         recap_revoked, row_revoked = self._get_target_recap()
         self.assertEqual(row_revoked.check_out, '05:30 D+1')
-        self.assertEqual(recap_revoked['summary']['early_out_minutes'], 45)
+        self.assertEqual(recap_revoked['summary']['early_out_minutes'], 30)
         self.assertEqual(recap_revoked['summary']['late_minutes'], 15)
 
     def _helper_half_day_leave_on_overnight_boundary_keeps_correct_recap_bucket_if_supported(self):
@@ -627,7 +627,7 @@ class CheckInOutExecutableOvernightDbIntegrationTests(AttendanceApiIntegrationMi
         self.assertEqual(approved_attendance.attendance_clock_out_date, date(2026, 4, 1))
         self.assertEqual(approved_attendance.attendance_clock_out, time(6, 0))
         self.assertEqual(approved_attendance.late_minutes, 15)
-        self.assertEqual(approved_attendance.early_out_minutes, 15)
+        self.assertEqual(approved_attendance.early_out_minutes, 0)
         self.assertEqual(approved_attendance.minimum_hour, '04:00')
 
         march_approved = self._get_recap_for_month('2026-03')
@@ -637,7 +637,7 @@ class CheckInOutExecutableOvernightDbIntegrationTests(AttendanceApiIntegrationMi
         self.assertEqual(row_march_approved.check_out, '06:00 D+1')
         self.assertIn('Approved First Half Leave', row_march_approved.note)
         self.assertEqual(march_approved['summary']['late_minutes'], 15)
-        self.assertEqual(march_approved['summary']['early_out_minutes'], 15)
+        self.assertEqual(march_approved['summary']['early_out_minutes'], 0)
         self.assertEqual(april_approved['summary']['late_minutes'], 0)
         self.assertEqual(april_approved['summary']['early_out_minutes'], 0)
 
@@ -655,7 +655,7 @@ class CheckInOutExecutableOvernightDbIntegrationTests(AttendanceApiIntegrationMi
         self.assertEqual(cancelled_attendance.attendance_clock_out_date, date(2026, 4, 1))
         self.assertEqual(cancelled_attendance.attendance_clock_out, time(6, 0))
         self.assertEqual(cancelled_attendance.late_minutes, 255)
-        self.assertEqual(cancelled_attendance.early_out_minutes, 255)
+        self.assertEqual(cancelled_attendance.early_out_minutes, 0)
         self.assertEqual(cancelled_attendance.minimum_hour, '08:00')
 
         in_punch.refresh_from_db()
@@ -672,6 +672,6 @@ class CheckInOutExecutableOvernightDbIntegrationTests(AttendanceApiIntegrationMi
         self.assertEqual(row_march_cancelled.check_out, '06:00 D+1')
         self.assertNotIn('Approved First Half Leave', row_march_cancelled.note or '')
         self.assertEqual(march_cancelled['summary']['late_minutes'], 255)
-        self.assertEqual(march_cancelled['summary']['early_out_minutes'], 255)
+        self.assertEqual(march_cancelled['summary']['early_out_minutes'], 0)
         self.assertEqual(april_cancelled['summary']['late_minutes'], 0)
         self.assertEqual(april_cancelled['summary']['early_out_minutes'], 0)
