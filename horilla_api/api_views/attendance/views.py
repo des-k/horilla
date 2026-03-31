@@ -4311,6 +4311,8 @@ class AttendanceMonthlyRecapAPIView(APIView):
                 "work_type": r.work_type,
                 "late": r.late,
                 "early_out": r.early_out,
+                "late_minutes": format_decimal_minutes(getattr(r, "late_minutes", 0) or 0),
+                "early_out_minutes": format_decimal_minutes(getattr(r, "early_out_minutes", 0) or 0),
                 "note": r.note,
                 "is_off": bool(getattr(r, "is_off", False)),
             }
