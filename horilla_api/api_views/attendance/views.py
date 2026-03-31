@@ -1111,7 +1111,7 @@ class ClockInAPIView(APIView):
             "has_attendance": bool(attendance),
             "first_check_in": attendance.attendance_clock_in.strftime("%I:%M %p") if attendance and getattr(attendance, "attendance_clock_in", None) else None,
             "last_check_out": attendance.attendance_clock_out.strftime("%I:%M %p") if attendance and getattr(attendance, "attendance_clock_out", None) else None,
-            "missing_check_in": bool(invalid_check_in),
+            "missing_check_in": False,
             "invalid_check_in": bool(invalid_check_in),
             "late_by": late_by_hhmm,
             "work_hours_below_minimum": False,
@@ -3618,8 +3618,11 @@ class CheckingStatus(APIView):
         # Compute this only after valid_check_in_for_note has been resolved above,
         # otherwise the status endpoint can crash when an existing IN punch is present.
         invalid_check_in = bool(clock_in_t and not valid_check_in_for_note)
+        # Existing IN punches must never be surfaced as "missing check in" in mobile
+        # note/status payloads. Treat true absence of IN separately from an invalid/out-of-window
+        # punch so status remains consistent with canonical attendance/recap surfaces.
         missing_check_in = (
-            ((not clock_in_t) or invalid_check_in)
+            (not clock_in_t)
             and (
                 bool(clock_out_t)
                 or (bool(check_in_cutoff_has_passed) and not bool(check_out_cutoff_has_passed))
