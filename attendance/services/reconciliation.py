@@ -29,6 +29,7 @@ from attendance.services.canonical_attendance_policy import (
     build_attendance_policy,
     compute_attendance_metrics,
     compute_worked_seconds,
+    seconds_to_decimal_minutes,
 )
 from base.models import EmployeeShiftDay
 
@@ -589,7 +590,7 @@ def _synchronize_canonical_punch_truth(
                 update_kwargs["decision_source"] = source
             AttendancePunchingHistory._base_manager.filter(id=punch_id).update(**update_kwargs)
 
-def _set_late_early_rows(attendance: Attendance, late_minutes: int, early_minutes: int):
+def _set_late_early_rows(attendance: Attendance, late_minutes, early_minutes):
     attendance.late_come_early_out.filter(type="late_come").delete()
     attendance.late_come_early_out.filter(type="early_out").delete()
     if late_minutes > 0:
@@ -618,7 +619,7 @@ def _calculate_late_early(
         late_seconds = int((final_in_dt - late_reference_dt).total_seconds())
         if apply_grace_to_late:
             late_seconds = late_seconds - int(grace_seconds or 0)
-        late_minutes = max(0, late_seconds // 60)
+        late_minutes = seconds_to_decimal_minutes(max(0, late_seconds))
 
     adjusted_end = early_reference_dt
     if adjusted_end and credit_seconds > 0:
@@ -626,7 +627,7 @@ def _calculate_late_early(
 
     if final_out_dt and adjusted_end:
         early_seconds = int((adjusted_end - final_out_dt).total_seconds())
-        early_minutes = max(0, early_seconds // 60)
+        early_minutes = seconds_to_decimal_minutes(max(0, early_seconds))
 
     return late_minutes, early_minutes
 
@@ -985,8 +986,8 @@ def recompute_attendance(employee, attendance_date: date) -> ReconciliationResul
             is_presence_only=is_presence_only,
             use_nominal_policy_end_for_early_out=use_nominal_policy_end_for_early_out,
         )
-        late_minutes = max(0, int(metrics.late_seconds // 60))
-        early_minutes = max(0, int(metrics.early_out_seconds // 60))
+        late_minutes = seconds_to_decimal_minutes(metrics.late_seconds)
+        early_minutes = seconds_to_decimal_minutes(metrics.early_out_seconds)
         if grant_on_duty_in_final:
             late_minutes = 0
         if grant_on_duty_out_final:
