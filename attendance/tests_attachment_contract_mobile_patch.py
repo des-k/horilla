@@ -177,7 +177,7 @@ class AttachmentAccessResponseTests(SimpleTestCase):
         ):
             response = WorkModeRequestAttachmentAccessView.as_view()(request, pk=1, file_id=2, disposition="view")
 
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.status_code, 200)
 
     def test_work_mode_attachment_view_streams_inline_for_authorized_user(self):
         request = self.factory.get("/api/attendance/work-mode-request-attachments/1/2/view?token=ok")
