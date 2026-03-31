@@ -795,6 +795,10 @@ def _compute_canonical_mobile_note_metrics(
     if not attendance:
         return None, None, True, None, None
 
+    shift_start_dt = _coerce_datetime_like(shift_start_dt, dt_now) if shift_start_dt else None
+    shift_end_dt = _coerce_datetime_like(shift_end_dt, dt_now) if shift_end_dt else None
+    check_in_cutoff_dt = _coerce_datetime_like(check_in_cutoff_dt, dt_now) if check_in_cutoff_dt else None
+
     actual_in_t = getattr(attendance, "attendance_clock_in", None)
     actual_out_t = getattr(attendance, "attendance_clock_out", None)
     actual_in_date = getattr(attendance, "attendance_clock_in_date", None) or attendance_date
@@ -843,8 +847,8 @@ def _shift_bounds_for_note_context(attendance_date: date, start_time_sec, end_ti
         end_hhmm = _seconds_to_hhmm(int(end_time_sec))
         if not start_hhmm or not end_hhmm:
             return None, None
-        shift_start_dt = datetime.combine(attendance_date, datetime.strptime(start_hhmm, "%H:%M").time())
-        shift_end_dt = datetime.combine(attendance_date, datetime.strptime(end_hhmm, "%H:%M").time())
+        shift_start_dt = timezone.make_aware(datetime.combine(attendance_date, datetime.strptime(start_hhmm, "%H:%M").time()))
+        shift_end_dt = timezone.make_aware(datetime.combine(attendance_date, datetime.strptime(end_hhmm, "%H:%M").time()))
         if int(start_time_sec) > int(end_time_sec) and int(start_time_sec) != int(end_time_sec):
             shift_end_dt = shift_end_dt + timedelta(days=1)
         return shift_start_dt, shift_end_dt
