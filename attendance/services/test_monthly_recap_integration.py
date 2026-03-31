@@ -565,6 +565,22 @@ class MonthlyRecapIntegrationTests(SimpleTestCase):
         self.assertEqual(row.late, "04:00")
         self.assertEqual(row.early_out, "02:00")
 
+    def test_late_and_early_out_ignore_activity_seconds_for_minute_precision(self):
+        activity = self._raw_activity(
+            id=45,
+            in_time=time(10, 15, 18),
+            out_time=time(15, 44, 59),
+        )
+
+        recap, row = self._get_recap(activities=[activity])
+
+        self.assertEqual(row.late_minutes, 135)
+        self.assertEqual(row.early_out_minutes, 151)
+        self.assertEqual(row.late, "02:15")
+        self.assertEqual(row.early_out, "02:31")
+        self.assertEqual(recap["summary"]["late_minutes"], 135)
+        self.assertEqual(recap["summary"]["early_out_minutes"], 151)
+
     def test_flexible_after_early_out_uses_dynamic_earliest_checkout_and_clamps_negative_values(self):
         activity = self._raw_activity(id=44, in_time=time(9, 0), out_time=time(17, 0))
 
