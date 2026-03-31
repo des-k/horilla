@@ -10,6 +10,7 @@ from __future__ import annotations
 import calendar
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
+from decimal import Decimal
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 from django.conf import settings
@@ -44,7 +45,10 @@ from attendance.services.monthly_recap_note import (
 )
 from attendance.services.canonical_attendance_policy import (
     build_attendance_policy,
+    coerce_non_negative_decimal,
     compute_attendance_metrics,
+    format_decimal_minutes,
+    seconds_to_decimal_minutes,
 )
 from attendance.services.work_type_request_rules import is_active_work_mode_request_status, scheduled_attendance_mode
 # NOTE: Do NOT import from attendance.views.clock_in_out at module import time.
@@ -551,8 +555,8 @@ def _canonical_row_from_attendance(
     else:
         work_type_disp = f"IN: {_work_mode_label(display_in_mode)}<br>OUT: {_work_mode_label(display_out_mode)}"
 
-    late_minutes = int(getattr(best_att, "late_minutes", 0) or 0)
-    early_out_minutes = int(getattr(best_att, "early_out_minutes", 0) or 0)
+    late_minutes = coerce_non_negative_decimal(getattr(best_att, "late_minutes", 0) or 0)
+    early_out_minutes = coerce_non_negative_decimal(getattr(best_att, "early_out_minutes", 0) or 0)
 
     return MonthlyRecapRow(
         no=row_no,
@@ -561,8 +565,8 @@ def _canonical_row_from_attendance(
         check_in=final_in_dt is not None and _format_punch(final_in_dt, attendance_date) or "-",
         check_out=final_out_dt is not None and _format_punch(final_out_dt, attendance_date) or "-",
         work_type=_localize_work_type(work_type_disp, language),
-        late=seconds_to_hhmm(late_minutes * 60),
-        early_out=seconds_to_hhmm(early_out_minutes * 60),
+        late=seconds_to_hhmm(float(late_minutes) * 60),
+        early_out=seconds_to_hhmm(float(early_out_minutes) * 60),
         note=note or source or "-",
         is_off=is_off,
         late_minutes=late_minutes,
@@ -616,8 +620,8 @@ class MonthlyRecapRow:
     early_out: str
     note: str
     is_off: bool = False
-    late_minutes: int = 0
-    early_out_minutes: int = 0
+    late_minutes: Decimal | int = 0
+    early_out_minutes: Decimal | int = 0
     final_in_datetime: Optional[datetime] = None
     final_out_datetime: Optional[datetime] = None
     display_in_mode: str = ""
@@ -626,34 +630,24 @@ class MonthlyRecapRow:
 
 @dataclass(frozen=True)
 class MonthlyRecapSummary:
-    late_minutes: int = 0
-    early_out_minutes: int = 0
-    total_minutes: int = 0
+    late_minutes: Decimal | int = 0
+    early_out_minutes: Decimal | int = 0
+    total_minutes: Decimal | int = 0
 
-    def as_dict(self) -> Dict[str, int]:
+    def as_dict(self) -> Dict[str, Decimal]:
         return {
-            "late_minutes": int(self.late_minutes or 0),
-            "early_out_minutes": int(self.early_out_minutes or 0),
-            "total_minutes": int(self.total_minutes or 0),
+            "late_minutes": coerce_non_negative_decimal(self.late_minutes),
+            "early_out_minutes": coerce_non_negative_decimal(self.early_out_minutes),
+            "total_minutes": coerce_non_negative_decimal(self.total_minutes),
         }
 
 
-def _seconds_to_minutes(total_seconds) -> int:
-    try:
-        sec = int(total_seconds)
-    except Exception:
-        sec = 0
-    if sec < 0:
-        sec = 0
-    return sec // 60
+def _seconds_to_minutes(total_seconds):
+    return seconds_to_decimal_minutes(total_seconds)
 
 
-def _safe_non_negative_int(value) -> int:
-    try:
-        parsed = int(value)
-    except Exception:
-        parsed = 0
-    return parsed if parsed >= 0 else 0
+def _safe_non_negative_decimal(value):
+    return coerce_non_negative_decimal(value)
 
 def _duration_seconds(value) -> int:
     if value is None:
@@ -732,8 +726,8 @@ def _resolve_mobile_style_earliest_checkout_dt(
     return effective_start_dt + shift_duration
 
 
-def _parse_duration_to_minutes(value) -> int:
-    """Safely coerce duration-like values into plain integer minutes.
+def _parse_duration_to_minutes(value):
+    """Safely coerce duration-like values into plain numeric minutes.
 
     Supported inputs:
     - raw integers / floats / timedeltas
@@ -748,15 +742,15 @@ def _parse_duration_to_minutes(value) -> int:
     if isinstance(value, timedelta):
         return _seconds_to_minutes(value.total_seconds())
 
-    if isinstance(value, (int, float)):
-        return _safe_non_negative_int(value)
+    if isinstance(value, (int, float, Decimal)):
+        return _safe_non_negative_decimal(value)
 
     raw = str(value).strip()
     if not raw or raw in {"-", "—"} or raw.lower() in {"none", "null", "invalid"}:
         return 0
 
-    if raw.isdigit():
-        return _safe_non_negative_int(raw)
+    if raw.replace(".", "", 1).isdigit():
+        return _safe_non_negative_decimal(raw)
 
     parts = raw.split(":")
     if len(parts) in (2, 3):
@@ -770,21 +764,21 @@ def _parse_duration_to_minutes(value) -> int:
         if hours < 0 or minutes < 0 or seconds < 0:
             return 0
 
-        return hours * 60 + minutes + (seconds // 60)
+        return seconds_to_decimal_minutes((hours * 3600) + (minutes * 60) + seconds)
 
     return 0
 
 
-def _row_duration_minutes(row: "MonthlyRecapRow", *, minute_attr: str, text_attr: str) -> int:
+def _row_duration_minutes(row: "MonthlyRecapRow", *, minute_attr: str, text_attr: str):
     raw_minutes = getattr(row, minute_attr, None)
     if raw_minutes not in (None, ""):
-        return _safe_non_negative_int(raw_minutes)
+        return _safe_non_negative_decimal(raw_minutes)
     return _parse_duration_to_minutes(getattr(row, text_attr, None))
 
 
 def summarize_monthly_recap_rows(rows: List["MonthlyRecapRow"]) -> MonthlyRecapSummary:
-    late_minutes = 0
-    early_out_minutes = 0
+    late_minutes = Decimal("0")
+    early_out_minutes = Decimal("0")
 
     for row in rows or []:
         late_minutes += _row_duration_minutes(row, minute_attr="late_minutes", text_attr="late")
@@ -1664,8 +1658,8 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
 
         late_minutes = _seconds_to_minutes(late_sec)
         early_minutes = _seconds_to_minutes(early_sec)
-        late_txt = seconds_to_hhmm(late_sec)
-        early_txt = seconds_to_hhmm(early_sec)
+        late_txt = seconds_to_hhmm(float(late_sec))
+        early_txt = seconds_to_hhmm(float(early_sec))
 
         shift_info = "—"
         try:
