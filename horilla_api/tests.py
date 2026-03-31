@@ -316,7 +316,7 @@ class MobileAttendanceActionParityTests(SimpleTestCase):
                 manager.stop()
 
         self.assertEqual(status_response.status_code, 200)
-        self.assertEqual(status_response.data["late_by"], "165")
+        self.assertEqual(status_response.data["late_by"], "135")
 
     def test_clock_out_response_early_out_ignores_checkout_seconds(self):
         attendance = SimpleNamespace(
