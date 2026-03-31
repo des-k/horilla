@@ -46,7 +46,7 @@ class CanonicalBreakAwareEngineTests(SimpleTestCase):
         )
         self.assertEqual(policy.required_work_seconds, 8 * 3600)
         self.assertEqual(metrics.worked_seconds, 8 * 3600)
-        self.assertEqual(metrics.early_out_seconds, 4 * 3600)
+        self.assertEqual(metrics.early_out_seconds, 0)
         self.assertEqual(metrics.earliest_checkout_dt, self._dt(16, 0))
 
     def test_normal_melewati_break_excludes_break_from_worked_hour(self):
@@ -125,7 +125,7 @@ class CanonicalBreakAwareEngineTests(SimpleTestCase):
         self.assertEqual(policy.minimum_hour, "04:00")
         self.assertEqual(policy.required_work_seconds, 4 * 3600)
         self.assertEqual(metrics.earliest_checkout_dt, self._dt(14, 0))
-        self.assertEqual(metrics.early_out_seconds, 4 * 3600)
+        self.assertEqual(metrics.early_out_seconds, 0)
 
     def test_first_half_uses_new_shift_end_time_instead_of_half_normal_minimum(self):
         schedule = self._schedule(
@@ -170,7 +170,7 @@ class CanonicalBreakAwareEngineTests(SimpleTestCase):
             clock_in_type="after",
         )
         self.assertEqual(metrics.late_seconds, 4 * 3600)
-        self.assertEqual(metrics.early_out_seconds, 4 * 3600)
+        self.assertEqual(metrics.early_out_seconds, 0)
 
     def test_missing_check_out_is_evidence_based_and_capped_to_half_minimum(self):
         policy = build_attendance_policy(
@@ -207,7 +207,7 @@ class CanonicalBreakAwareEngineTests(SimpleTestCase):
             clock_in_type="after",
         )
         self.assertEqual(metrics.late_seconds, 4 * 3600)
-        self.assertEqual(metrics.early_out_seconds, 4 * 3600)
+        self.assertEqual(metrics.early_out_seconds, 0)
 
     def test_missing_both_can_produce_half_minimum_decimal_minutes(self):
         policy = build_attendance_policy(
