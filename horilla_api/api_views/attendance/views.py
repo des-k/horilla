@@ -16,7 +16,7 @@ from django.utils import timezone as dj_timezone
 from django.utils.decorators import method_decorator
 from rest_framework import status
 from rest_framework.pagination import PageNumberPagination
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
@@ -2304,7 +2304,7 @@ def _attachment_file_response(file_obj, *, disposition: str = "download"):
 
 
 class AttendanceRequestAttachmentDownloadView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
 
     def get(self, request, attendance_id, file_id, disposition="download"):
         attendance = get_object_or_404(Attendance, id=attendance_id)
@@ -2312,10 +2312,13 @@ class AttendanceRequestAttachmentDownloadView(APIView):
         if not attendance_attachment_belongs_to_request(attendance, file_obj):
             return Response({"error": "Attachment not found for this request."}, status=404)
         token = request.GET.get("token")
-        if not attendance_request_can_view_attachment(request, attendance):
+        token_valid = verify_attendance_attachment_token(attendance.id, file_obj.id, token)
+        is_authenticated = bool(getattr(request.user, "is_authenticated", False))
+        has_authenticated_access = is_authenticated and attendance_request_can_view_attachment(request, attendance)
+        if not (token_valid or has_authenticated_access):
+            if token:
+                return Response({"error": "Invalid or expired attachment token."}, status=403)
             return Response({"error": "You do not have permission to access this attachment."}, status=403)
-        if not verify_attendance_attachment_token(attendance.id, file_obj.id, token):
-            return Response({"error": "Invalid or expired attachment token."}, status=403)
         return _attachment_file_response(file_obj, disposition=disposition)
 
     def delete(self, request, attendance_id, file_id, disposition="download"):
@@ -2330,7 +2333,7 @@ class AttendanceRequestAttachmentDownloadView(APIView):
 
 
 class WorkModeRequestAttachmentAccessView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
 
     def get(self, request, pk, file_id, disposition="download"):
         req = get_object_or_404(WorkModeRequest, id=pk)
@@ -2338,15 +2341,16 @@ class WorkModeRequestAttachmentAccessView(APIView):
         if not work_mode_attachment_belongs_to_request(req, file_obj):
             return Response({"error": "Attachment not found for this request."}, status=404)
 
-        allowed = bool(getattr(request.user, "is_authenticated", False)) and (
+        token = request.GET.get("token")
+        token_valid = verify_work_mode_attachment_token(req.id, file_obj.id, token)
+        is_authenticated = bool(getattr(request.user, "is_authenticated", False))
+        has_authenticated_access = is_authenticated and (
             work_mode_request_can_view_attachment(request, req) or bool(getattr(request.user, "is_superuser", False))
         )
-        if not allowed:
+        if not (token_valid or has_authenticated_access):
+            if token:
+                return Response({"error": "Invalid or expired attachment token."}, status=403)
             return Response({"error": "You do not have permission to access this attachment."}, status=403)
-
-        token = request.GET.get("token")
-        if not verify_work_mode_attachment_token(req.id, file_obj.id, token):
-            return Response({"error": "Invalid or expired attachment token."}, status=403)
 
         return _attachment_file_response(file_obj, disposition=disposition)
 
