@@ -644,6 +644,20 @@ def compute_attendance_metrics(
         flex_seconds=grace_seconds,
         force_nominal=use_nominal_policy_end_for_early_out,
     )
+    # First-half leave has a special split behavior in the existing contract:
+    # - when both punches are present, the user may need to fulfill the reduced
+    #   minimum working hours from the actual check-in time, so early-out should
+    #   compare against the dynamic earliest checkout;
+    # - when check-out is missing, tests still expect the nominal half-day end,
+    #   not an extended dynamic target.
+    if (
+        policy.kind == "first_half"
+        and minute_final_in_dt is not None
+        and minute_final_out_dt is not None
+        and earliest_checkout_dt is not None
+        and not use_nominal_policy_end_for_early_out
+    ):
+        reference_end_dt = earliest_checkout_dt
 
     worked_seconds = compute_worked_seconds(policy, final_in_dt=final_in_dt, final_out_dt=final_out_dt)
     half_minimum_seconds = _half_minimum_seconds(policy)
@@ -710,7 +724,7 @@ def compute_attendance_metrics(
             early_out_grace_seconds=early_out_grace_seconds,
         )
         if policy.kind not in {"first_half", "second_half"}:
-            early_out_seconds = max(0, int(early_out_seconds or 0))
+            early_out_seconds = _cap_early_out_seconds(policy, early_out_seconds)
 
     return AttendanceMetrics(
         worked_seconds=max(0, int(worked_seconds or 0)),
