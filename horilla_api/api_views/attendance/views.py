@@ -3842,6 +3842,7 @@ class CheckingStatus(APIView):
             "check_out_cutoff_has_passed": bool(check_out_cutoff_has_passed),
 
             "missing_check_in": bool(missing_check_in),
+            "invalid_check_in": bool(invalid_check_in),
 
             # Option B (per punch audit status)
             "in_attendance_status": getattr(attendance, "in_attendance_status", None) if attendance else None,
