@@ -107,7 +107,9 @@ from attendance.services.canonical_attendance_policy import (
     build_attendance_policy,
     compute_attendance_metrics,
     compute_mobile_status_metrics,
+    format_decimal_minutes,
     resolve_policy_windows,
+    seconds_to_decimal_minutes,
     time_to_shift_instance_dt as canonical_time_to_shift_instance_dt,
 )
 from attendance.services.reconciliation import recompute_attendance, recompute_attendance_range
@@ -719,6 +721,14 @@ def _seconds_to_hhmm(total_seconds: int | None) -> str | None:
     return f"{hours:02d}:{minutes:02d}"
 
 
+def _seconds_to_minute_display(total_seconds: int | float | None) -> str | None:
+    try:
+        seconds = max(0, int(total_seconds or 0))
+    except Exception:
+        return None
+    return format_decimal_minutes(seconds_to_decimal_minutes(seconds))
+
+
 def _compute_mobile_effective_start_and_earliest_checkout(
     *,
     shift_start_dt: datetime | None,
@@ -1054,7 +1064,7 @@ class ClockInAPIView(APIView):
                 if actual_in_dt and grace_dt and actual_in_dt > grace_dt:
                     late_s = int((actual_in_dt - grace_dt).total_seconds())
                     if late_s > 0:
-                        late_by_hhmm = f"{late_s // 3600:02d}:{(late_s % 3600) // 60:02d}"
+                        late_by_hhmm = _seconds_to_minute_display(late_s)
         except Exception:
             late_by_hhmm = None
 
@@ -1268,7 +1278,7 @@ class ClockOutAPIView(APIView):
                 if actual_in_dt and grace_dt and actual_in_dt > grace_dt:
                     late_s = int((actual_in_dt - grace_dt).total_seconds())
                     if late_s > 0:
-                        late_by_hhmm = f"{late_s // 3600:02d}:{(late_s % 3600) // 60:02d}"
+                        late_by_hhmm = _seconds_to_minute_display(late_s)
         except Exception:
             late_by_hhmm = None
 
@@ -1317,7 +1327,7 @@ class ClockOutAPIView(APIView):
                 if checked_out_early:
                     early_s = int((earliest_check_out_dt - actual_out_dt).total_seconds())
                     if early_s > 0:
-                        checked_out_early_by = f"{early_s // 3600:02d}:{(early_s % 3600) // 60:02d}"
+                        checked_out_early_by = _seconds_to_minute_display(early_s)
         except Exception:
             checked_out_early = False
             checked_out_early_by = None
@@ -1342,7 +1352,7 @@ class ClockOutAPIView(APIView):
                 if int(worked_seconds_value) < int(note_effective_seconds):
                     note_work_hours_below_minimum = True
                     short_s = int(note_effective_seconds) - int(worked_seconds_value)
-                    note_work_hours_shortfall = f"{short_s // 3600:02d}:{(short_s % 3600) // 60:02d}"
+                    note_work_hours_shortfall = _seconds_to_minute_display(short_s)
             except Exception:
                 note_work_hours_below_minimum = False
 
@@ -3697,7 +3707,7 @@ class CheckingStatus(APIView):
                     if in_dt and grace_dt and in_dt > grace_dt:
                         late_s = int((in_dt - grace_dt).total_seconds())
                         if late_s > 0:
-                            late_by_hhmm = f"{late_s // 3600:02d}:{(late_s % 3600) // 60:02d}"
+                            late_by_hhmm = _seconds_to_minute_display(late_s)
                 except Exception:
                     late_by_hhmm = None
 
@@ -3709,7 +3719,7 @@ class CheckingStatus(APIView):
                     if min_s and int(worked_seconds) < int(min_s):
                         work_hours_below_minimum = True
                         short_s = int(min_s) - int(worked_seconds)
-                        work_hours_shortfall_hhmm = f"{short_s // 3600:02d}:{(short_s % 3600) // 60:02d}"
+                        work_hours_shortfall_hhmm = _seconds_to_minute_display(short_s)
                 except Exception:
                     pass
 
@@ -3723,7 +3733,7 @@ class CheckingStatus(APIView):
                         checked_out_early = True
                         early_s = int((earliest_check_out_dt - out_dt).total_seconds())
                         if early_s > 0:
-                            checked_out_early_by_hhmm = f"{early_s // 3600:02d}:{(early_s % 3600) // 60:02d}"
+                            checked_out_early_by_hhmm = _seconds_to_minute_display(early_s)
                 except Exception:
                     checked_out_early = False
                     checked_out_early_by_hhmm = None
@@ -3744,7 +3754,7 @@ class CheckingStatus(APIView):
                 if int(worked_seconds) < int(note_effective_seconds):
                     note_work_hours_below_minimum = True
                     short_s = int(note_effective_seconds) - int(worked_seconds)
-                    note_work_hours_shortfall_hhmm = f"{short_s // 3600:02d}:{(short_s % 3600) // 60:02d}"
+                    note_work_hours_shortfall_hhmm = _seconds_to_minute_display(short_s)
             except Exception:
                 note_work_hours_below_minimum = False
 
