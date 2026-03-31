@@ -69,6 +69,33 @@ class AttachmentAccessResponseTests(SimpleTestCase):
         self.assertIn("inline", response["Content-Disposition"].lower())
         self.assertIn("private", response["Cache-Control"].lower())
 
+
+    def test_attendance_view_endpoint_allows_valid_token_without_authentication(self):
+        request = self.factory.get("/api/attendance/attendance-request-attachments/1/2/view?token=ok")
+
+        attendance = SimpleNamespace(id=1)
+        file_obj = SimpleNamespace(
+            id=2,
+            file=SimpleNamespace(
+                name="proof.pdf",
+                open=lambda mode='rb': BytesIO(b"%PDF-1.4"),
+            ),
+        )
+
+        with patch("horilla_api.api_views.attendance.views.get_object_or_404", side_effect=[attendance, file_obj]), patch(
+            "horilla_api.api_views.attendance.views.attendance_attachment_belongs_to_request",
+            return_value=True,
+        ), patch(
+            "horilla_api.api_views.attendance.views.attendance_request_can_view_attachment",
+            return_value=False,
+        ), patch(
+            "horilla_api.api_views.attendance.views.verify_attendance_attachment_token",
+            return_value=True,
+        ):
+            response = AttendanceRequestAttachmentDownloadView.as_view()(request, attendance_id=1, file_id=2, disposition="view")
+
+        self.assertEqual(response.status_code, 200)
+
     def test_attendance_download_endpoint_forces_attachment_for_docx(self):
         request = self.factory.get("/api/attendance/attendance-request-attachments/1/2/download?token=ok")
         force_authenticate(request, user=self.user)
@@ -100,6 +127,33 @@ class AttachmentAccessResponseTests(SimpleTestCase):
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         )
         self.assertIn("attachment", response["Content-Disposition"].lower())
+
+
+    def test_work_mode_attachment_view_allows_valid_token_without_authentication(self):
+        request = self.factory.get("/api/attendance/work-mode-request-attachments/1/2/view?token=ok")
+
+        req = SimpleNamespace(id=1)
+        file_obj = SimpleNamespace(
+            id=2,
+            file=SimpleNamespace(
+                name="proof.pdf",
+                open=lambda mode='rb': BytesIO(b"%PDF-1.4"),
+            ),
+        )
+
+        with patch("horilla_api.api_views.attendance.views.get_object_or_404", side_effect=[req, file_obj]), patch(
+            "horilla_api.api_views.attendance.views.work_mode_attachment_belongs_to_request",
+            return_value=True,
+        ), patch(
+            "horilla_api.api_views.attendance.views.work_mode_request_can_view_attachment",
+            return_value=False,
+        ), patch(
+            "horilla_api.api_views.attendance.views.verify_work_mode_attachment_token",
+            return_value=True,
+        ):
+            response = WorkModeRequestAttachmentAccessView.as_view()(request, pk=1, file_id=2, disposition="view")
+
+        self.assertEqual(response.status_code, 200)
 
     def test_work_mode_attachment_requires_permission(self):
         request = self.factory.get("/api/attendance/work-mode-request-attachments/1/2/view?token=ok")
