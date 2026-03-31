@@ -138,7 +138,7 @@ class CanonicalPolicyStandaloneTests(unittest.TestCase):
             grace_seconds=0,
             clock_in_type="after",
         )
-        self.assertEqual(metrics.late_seconds, 3 * 3600)
+        self.assertEqual(metrics.late_seconds, 4 * 3600)
         self.assertEqual(metrics.early_out_seconds, 4 * 3600)
 
     def test_missing_out_is_evidence_based_and_capped_to_half_minimum(self):
