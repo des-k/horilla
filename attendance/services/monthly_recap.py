@@ -536,15 +536,19 @@ def _canonical_row_from_attendance(
     if not explicit_canonical and off_kind != "leave":
         return None
 
-    final_in_dt = _combine_dt(
-        getattr(best_att, "attendance_clock_in_date", None),
-        getattr(best_att, "attendance_clock_in", None),
-        attendance_date,
+    final_in_dt = _normalize_dt(
+        _combine_dt(
+            getattr(best_att, "attendance_clock_in_date", None),
+            getattr(best_att, "attendance_clock_in", None),
+            attendance_date,
+        )
     )
-    final_out_dt = _combine_dt(
-        getattr(best_att, "attendance_clock_out_date", None),
-        getattr(best_att, "attendance_clock_out", None),
-        attendance_date,
+    final_out_dt = _normalize_dt(
+        _combine_dt(
+            getattr(best_att, "attendance_clock_out_date", None),
+            getattr(best_att, "attendance_clock_out", None),
+            attendance_date,
+        )
     )
 
     if (final_in_dt is None) != (final_out_dt is None):
@@ -1413,6 +1417,48 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
                 canonical_shift_info = "—"
 
 
+        shift_start_dt = _normalize_dt(rules.get("shift_start_dt"), tzinfo)
+        shift_end_dt = _normalize_dt(rules.get("shift_end_dt"), tzinfo)
+        cutoff_in_dt = _normalize_dt(
+            rules.get("cutoff_in_dt") or rules.get("check_in_window_end_dt"),
+            tzinfo,
+        )
+        grace_in_sec = int(rules.get("grace_seconds") or 0)
+        grace_out_sec = 0
+        grace_clock_in_type = str(rules.get("clock_in_type") or "after")
+        try:
+            grace_time = _resolve_grace_time(rules.get("schedule"), shift)
+            if grace_time and getattr(grace_time, "allowed_clock_out", False):
+                grace_out_sec = int(getattr(grace_time, "allowed_time_in_secs", 0) or 0)
+            if grace_time and (getattr(grace_time, "allowed_clock_in", True) or grace_in_sec > 0):
+                grace_clock_in_type = getattr(grace_time, "clock_in_type", "after") or "after"
+        except Exception:
+            grace_out_sec = 0
+            grace_clock_in_type = str(rules.get("clock_in_type") or "after")
+
+        canonical_row = _canonical_row_from_attendance(
+            best_att=best_att,
+            attendance_date=d,
+            row_no=i,
+            shift_information=canonical_shift_info,
+            language=language,
+            is_off=is_off,
+            off_kind=off_kind,
+            schedule_obj=rules.get("schedule"),
+            shift_start_dt=shift_start_dt,
+            shift_end_dt=shift_end_dt,
+            minimum_hour=((getattr(best_att, "minimum_hour", None) if best_att else None) or getattr(rules.get("schedule"), "minimum_working_hour", None) or "00:00"),
+            half_day_kind=half_day_kind,
+            check_in_cutoff_dt=rules.get("check_in_window_end_dt") and _normalize_dt(rules.get("check_in_window_end_dt"), tzinfo) or cutoff_in_dt,
+            grace_in_sec=grace_in_sec,
+            grace_out_sec=grace_out_sec,
+            grace_clock_in_type=grace_clock_in_type,
+        )
+        if canonical_row is not None:
+            rows.append(canonical_row)
+            i += 1
+            continue
+
         if is_off:
             if is_leave:
                 shift_info = _localize_shift_information(_localize_leave_session_label("full", language), language)
@@ -1578,50 +1624,8 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
         final_in_dt = final_in_resolution.final_dt
         final_out_dt = final_out_resolution.final_dt
 
-        shift_start_dt = _normalize_dt(rules.get("shift_start_dt"), tzinfo)
-        shift_end_dt = _normalize_dt(rules.get("shift_end_dt"), tzinfo)
-        cutoff_in_dt = _normalize_dt(
-            rules.get("cutoff_in_dt") or rules.get("check_in_window_end_dt"),
-            tzinfo,
-        )
         final_in_dt = _normalize_dt(final_in_dt, tzinfo)
         final_out_dt = _normalize_dt(final_out_dt, tzinfo)
-
-        grace_in_sec = int(rules.get("grace_seconds") or 0)
-        grace_out_sec = 0
-        grace_clock_in_type = str(rules.get("clock_in_type") or "after")
-        try:
-            grace_time = _resolve_grace_time(rules.get("schedule"), shift)
-            if grace_time and getattr(grace_time, "allowed_clock_out", False):
-                grace_out_sec = int(getattr(grace_time, "allowed_time_in_secs", 0) or 0)
-            if grace_time and (getattr(grace_time, "allowed_clock_in", True) or grace_in_sec > 0):
-                grace_clock_in_type = getattr(grace_time, "clock_in_type", "after") or "after"
-        except Exception:
-            grace_out_sec = 0
-            grace_clock_in_type = str(rules.get("clock_in_type") or "after")
-
-        canonical_row = _canonical_row_from_attendance(
-            best_att=best_att,
-            attendance_date=d,
-            row_no=i,
-            shift_information=canonical_shift_info,
-            language=language,
-            is_off=is_off,
-            off_kind=off_kind,
-            schedule_obj=rules.get("schedule"),
-            shift_start_dt=shift_start_dt,
-            shift_end_dt=shift_end_dt,
-            minimum_hour=getattr(best_att, "minimum_hour", None) or getattr(rules.get("schedule"), "minimum_working_hour", None) or "00:00",
-            half_day_kind=half_day_kind,
-            check_in_cutoff_dt=check_in_window_end_dt or cutoff_in_dt,
-            grace_in_sec=grace_in_sec,
-            grace_out_sec=grace_out_sec,
-            grace_clock_in_type=grace_clock_in_type,
-        )
-        if canonical_row is not None:
-            rows.append(canonical_row)
-            i += 1
-            continue
 
         baseline_mode = _attendance_level_mode(best_att) or scheduled_attendance_mode(employee, d)
 
