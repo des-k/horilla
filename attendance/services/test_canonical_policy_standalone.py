@@ -139,7 +139,7 @@ class CanonicalPolicyStandaloneTests(unittest.TestCase):
             clock_in_type="after",
         )
         self.assertEqual(metrics.late_seconds, 3 * 3600)
-        self.assertEqual(metrics.early_out_seconds, 6 * 3600)
+        self.assertEqual(metrics.early_out_seconds, 4 * 3600)
 
     def test_missing_out_is_evidence_based_and_capped_to_half_minimum(self):
         policy = policy_module.build_attendance_policy(
@@ -257,6 +257,120 @@ class CanonicalPolicyStandaloneTests(unittest.TestCase):
         self.assertTrue(valid)
         self.assertEqual(effective_start_dt, self._dt(7, 30))
         self.assertEqual(earliest_checkout_dt, self._dt(11, 30))
+
+    def test_non_flex_full_day_uses_nominal_shift_end_for_early_out(self):
+        policy = policy_module.build_attendance_policy(
+            schedule=self._schedule(break_start_time=time(12, 0), break_end_time=time(13, 0)),
+            shift_start_dt=self._dt(7, 30),
+            shift_end_dt=self._dt(16, 0),
+            minimum_hour="07:30",
+            leave_kind=None,
+            check_in_cutoff_dt=self._dt(9, 0),
+        )
+        metrics = policy_module.compute_attendance_metrics(
+            policy,
+            final_in_dt=self._dt(10, 15),
+            final_out_dt=self._dt(13, 6),
+            grace_seconds=0,
+            clock_in_type="after",
+        )
+        self.assertEqual(metrics.earliest_checkout_dt, self._dt(16, 0))
+        self.assertEqual(metrics.early_out_seconds, 174 * 60)
+        self.assertEqual(metrics.worked_seconds, 111 * 60)
+
+    def test_flex_after_within_window_uses_actual_flex_shift(self):
+        policy = policy_module.build_attendance_policy(
+            schedule=self._schedule(break_start_time=time(12, 0), break_end_time=time(13, 0)),
+            shift_start_dt=self._dt(7, 30),
+            shift_end_dt=self._dt(16, 0),
+            minimum_hour="07:30",
+            leave_kind=None,
+            check_in_cutoff_dt=self._dt(9, 0),
+        )
+        metrics = policy_module.compute_attendance_metrics(
+            policy,
+            final_in_dt=self._dt(8, 10),
+            final_out_dt=self._dt(13, 6),
+            grace_seconds=90 * 60,
+            clock_in_type="after",
+        )
+        self.assertEqual(metrics.earliest_checkout_dt, self._dt(16, 40))
+        self.assertEqual(metrics.early_out_seconds, 214 * 60)
+
+    def test_flex_after_beyond_window_clamps_to_max_flex_and_caps_early_out(self):
+        policy = policy_module.build_attendance_policy(
+            schedule=self._schedule(break_start_time=time(12, 0), break_end_time=time(13, 0)),
+            shift_start_dt=self._dt(7, 30),
+            shift_end_dt=self._dt(16, 0),
+            minimum_hour="07:30",
+            leave_kind=None,
+            check_in_cutoff_dt=self._dt(9, 0),
+        )
+        metrics = policy_module.compute_attendance_metrics(
+            policy,
+            final_in_dt=self._dt(10, 15),
+            final_out_dt=self._dt(13, 6),
+            grace_seconds=90 * 60,
+            clock_in_type="after",
+        )
+        self.assertEqual(metrics.earliest_checkout_dt, self._dt(17, 30))
+        self.assertEqual(metrics.early_out_seconds, 225 * 60)
+
+    def test_before_after_early_checkin_pulls_reference_end_forward(self):
+        policy = policy_module.build_attendance_policy(
+            schedule=self._schedule(break_start_time=time(12, 0), break_end_time=time(13, 0)),
+            shift_start_dt=self._dt(7, 30),
+            shift_end_dt=self._dt(16, 0),
+            minimum_hour="07:30",
+            leave_kind=None,
+            check_in_cutoff_dt=self._dt(9, 0),
+        )
+        metrics = policy_module.compute_attendance_metrics(
+            policy,
+            final_in_dt=self._dt(6, 50),
+            final_out_dt=self._dt(13, 6),
+            grace_seconds=90 * 60,
+            clock_in_type="before_after",
+        )
+        self.assertEqual(metrics.earliest_checkout_dt, self._dt(15, 20))
+        self.assertEqual(metrics.early_out_seconds, 134 * 60)
+
+    def test_grace_checkout_reduces_early_out(self):
+        policy = policy_module.build_attendance_policy(
+            schedule=self._schedule(),
+            shift_start_dt=self._dt(7, 30),
+            shift_end_dt=self._dt(16, 0),
+            minimum_hour="07:30",
+            leave_kind=None,
+            check_in_cutoff_dt=self._dt(9, 0),
+        )
+        metrics = policy_module.compute_attendance_metrics(
+            policy,
+            final_in_dt=self._dt(7, 30),
+            final_out_dt=self._dt(15, 50),
+            grace_seconds=0,
+            clock_in_type="after",
+            early_out_grace_seconds=15 * 60,
+        )
+        self.assertEqual(metrics.early_out_seconds, 0)
+
+    def test_worked_seconds_truncates_timestamps_to_minute_before_break_deduction(self):
+        policy = policy_module.build_attendance_policy(
+            schedule=self._schedule(break_start_time=time(12, 0), break_end_time=time(13, 0)),
+            shift_start_dt=self._dt(7, 30),
+            shift_end_dt=self._dt(16, 0),
+            minimum_hour="07:30",
+            leave_kind=None,
+            check_in_cutoff_dt=self._dt(9, 0),
+        )
+        metrics = policy_module.compute_attendance_metrics(
+            policy,
+            final_in_dt=datetime(2026, 3, 19, 10, 15, 59),
+            final_out_dt=datetime(2026, 3, 19, 13, 6, 0),
+            grace_seconds=0,
+            clock_in_type="after",
+        )
+        self.assertEqual(metrics.worked_seconds, 111 * 60)
 
 
 if __name__ == "__main__":
