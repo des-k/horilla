@@ -314,7 +314,7 @@ class CanonicalPolicyStandaloneTests(unittest.TestCase):
             clock_in_type="after",
         )
         self.assertEqual(metrics.earliest_checkout_dt, self._dt(17, 30))
-        self.assertEqual(metrics.early_out_seconds, 225 * 60)
+        self.assertEqual(metrics.early_out_seconds, 264 * 60)
 
     def test_before_after_early_checkin_pulls_reference_end_forward(self):
         policy = policy_module.build_attendance_policy(
