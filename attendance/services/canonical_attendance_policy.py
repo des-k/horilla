@@ -116,8 +116,10 @@ def _cap_early_out_seconds(policy: AttendancePolicy, early_out_seconds: int) -> 
 
 
 def _uses_dynamic_policy_end(policy: AttendancePolicy, *, clock_in_type: Optional[str], flex_seconds: Optional[int]) -> bool:
-    if policy.kind in {"first_half", "second_half"}:
+    if policy.kind == "second_half":
         return True
+    if policy.kind == "first_half":
+        return False
     mode = str(clock_in_type or "after").strip().lower()
     return max(0, int(flex_seconds or 0)) > 0 and mode in {"after", "before_after"}
 
