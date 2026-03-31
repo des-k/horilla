@@ -62,16 +62,18 @@ class MobileAttendanceHeaderStateTests(unittest.TestCase):
         self.assertEqual(header["header_state_message"], "Missing Check In")
         self.assertEqual(header["header_detail_message"], "Check Out available")
 
-    def test_invalid_check_in_is_treated_as_missing_check_in(self):
+    def test_invalid_check_in_with_existing_first_check_in_is_not_treated_as_missing(self):
         payload = {
             "has_attendance": True,
-            "first_check_in": "05:00 AM",
+            "first_check_in": "10:15 AM",
             "invalid_check_in": True,
+            "late_by": "165",
             "can_clock_out": True,
         }
         header = build_mobile_header_state(payload)
-        self.assertEqual(header["header_state_code"], MISSING_CHECK_IN)
-        self.assertEqual(header["header_state_message"], "Missing Check In")
+        self.assertEqual(header["header_state_code"], CHECKED_IN)
+        self.assertEqual(header["header_state_message"], "Checked In")
+        self.assertEqual(header["header_detail_message"], "Late by 165")
 
     def test_missing_check_in_and_early_checkout_are_combined_consistently(self):
         payload = {
