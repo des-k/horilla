@@ -72,6 +72,89 @@ class WorkModeRequestBackendSelfBindingTests(SimpleTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(captured["data"]["employee_id"], 77)
 
+    def test_view_accepts_multipart_create_with_uploaded_file_without_deepcopy_crash(self):
+        captured = {}
+
+        class FakeSerializer:
+            def __init__(self, *args, **kwargs):
+                candidate = kwargs.get("data") if kwargs.get("data") is not None else (args[0] if args else None)
+                if isinstance(candidate, dict):
+                    captured["data"] = candidate
+                self.validated_data = {
+                    "mode": AttendanceWorkMode.WFA,
+                    "scope": WorkModeRequestScope.IN,
+                    "start_date": date(2026, 3, 26),
+                    "end_date": date(2026, 3, 26),
+                    "reason": "Need WFA",
+                    "duty_destination_location": "HQ",
+                }
+
+            def is_valid(self):
+                return True
+
+            @property
+            def errors(self):
+                return {}
+
+            @property
+            def data(self):
+                return {"id": 1}
+
+        factory = APIRequestFactory()
+        user = SimpleNamespace(is_authenticated=True, employee_get=SimpleNamespace(id=77))
+        upload = SimpleUploadedFile("proof.jpg", b"jpg", content_type="image/jpeg")
+        request = factory.post(
+            "/api/attendance/work-type-request/",
+            {
+                "mode": "wfa",
+                "scope": "in",
+                "start_date": "2026-03-26",
+                "end_date": "2026-03-26",
+                "reason": "Need WFA",
+                "file": upload,
+            },
+            format="multipart",
+        )
+        force_authenticate(request, user=user)
+
+        with patch.object(WorkModeRequestView, "serializer_class", FakeSerializer), \
+             patch("horilla_api.api_views.attendance.views.WorkModeRequestActions.create_request", return_value=SimpleNamespace(id=1)) as create_request:
+            response = WorkModeRequestView.as_view()(request)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(captured["data"]["employee_id"], 77)
+        self.assertEqual(captured["data"]["mode"], "wfa")
+        self.assertNotIn("file", captured["data"])
+        self.assertEqual(len(create_request.call_args.kwargs["uploaded_files"]), 1)
+
+    def test_view_accepts_multipart_update_with_uploaded_file_without_deepcopy_crash(self):
+        factory = APIRequestFactory()
+        user = SimpleNamespace(is_authenticated=True, employee_get=SimpleNamespace(id=77))
+        upload = SimpleUploadedFile("proof.jpg", b"jpg", content_type="image/jpeg")
+        request = factory.put(
+            "/api/attendance/work-type-request/5",
+            {
+                "reason": "Updated note",
+                "remark": "Need review",
+                "duty_destination_location": "Client Site",
+                "file": upload,
+            },
+            format="multipart",
+        )
+        force_authenticate(request, user=user)
+
+        target = SimpleNamespace(id=5)
+        with patch("horilla_api.api_views.attendance.views.get_object_or_404", return_value=target), \
+             patch("horilla_api.api_views.attendance.views.WorkModeRequestActions.update_request") as update_request, \
+             patch.object(WorkModeRequestView, "serializer_class", lambda *args, **kwargs: SimpleNamespace(data={"id": 5})):
+            response = WorkModeRequestView.as_view()(request, pk=5)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(update_request.call_args.kwargs["reason"], "Updated note")
+        self.assertEqual(update_request.call_args.kwargs["remark"], "Need review")
+        self.assertEqual(update_request.call_args.kwargs["duty_destination_location"], "Client Site")
+        self.assertEqual(len(update_request.call_args.kwargs["uploaded_files"]), 1)
+
 
 class AttachmentValidationRegressionTests(SimpleTestCase):
     def test_accepts_jpg_with_image_jpg_mime(self):
