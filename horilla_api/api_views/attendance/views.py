@@ -729,6 +729,15 @@ def _seconds_to_minute_display(total_seconds: int | float | None) -> str | None:
     return format_decimal_minutes(seconds_to_decimal_minutes(seconds))
 
 
+def _truncate_dt_to_minute(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        return value.replace(second=0, microsecond=0)
+    except Exception:
+        return value
+
+
 def _compute_mobile_effective_start_and_earliest_checkout(
     *,
     shift_start_dt: datetime | None,
@@ -1059,7 +1068,7 @@ class ClockInAPIView(APIView):
                 planned_in_time = datetime.strptime(planned_in_hhmm, "%H:%M").time()
                 planned_in_dt = _coerce_datetime_like(datetime.combine(attendance_date, planned_in_time), dt_now)
                 actual_in_date = getattr(attendance, "attendance_clock_in_date", None) or attendance_date
-                actual_in_dt = _coerce_datetime_like(datetime.combine(actual_in_date, attendance.attendance_clock_in), dt_now)
+                actual_in_dt = _truncate_dt_to_minute(_coerce_datetime_like(datetime.combine(actual_in_date, attendance.attendance_clock_in), dt_now))
                 grace_dt = planned_in_dt + timedelta(seconds=int(grace_seconds or 0)) if planned_in_dt else None
                 if actual_in_dt and grace_dt and actual_in_dt > grace_dt:
                     late_s = int((actual_in_dt - grace_dt).total_seconds())
@@ -1076,7 +1085,7 @@ class ClockInAPIView(APIView):
                 except Exception:
                     leave_kind_for_note = None
             actual_in_date = getattr(attendance, "attendance_clock_in_date", None) or attendance_date
-            actual_in_dt = _coerce_datetime_like(datetime.combine(actual_in_date, attendance.attendance_clock_in), dt_now) if attendance and getattr(attendance, "attendance_clock_in", None) else None
+            actual_in_dt = _truncate_dt_to_minute(_coerce_datetime_like(datetime.combine(actual_in_date, attendance.attendance_clock_in), dt_now)) if attendance and getattr(attendance, "attendance_clock_in", None) else None
             shift_start_dt, shift_end_dt = _shift_bounds_for_note_context(attendance_date, start_time_sec, end_time_sec)
             _, earliest_check_out_dt, valid_check_in_for_note = _compute_mobile_effective_start_and_earliest_checkout(
                 shift_start_dt=shift_start_dt,
@@ -1273,7 +1282,7 @@ class ClockOutAPIView(APIView):
                 planned_in_time = datetime.strptime(planned_in_hhmm, "%H:%M").time()
                 planned_in_dt = _coerce_datetime_like(datetime.combine(attendance_date, planned_in_time), dt_now)
                 actual_in_date = getattr(attendance, "attendance_clock_in_date", None) or attendance_date
-                actual_in_dt = _coerce_datetime_like(datetime.combine(actual_in_date, attendance.attendance_clock_in), dt_now)
+                actual_in_dt = _truncate_dt_to_minute(_coerce_datetime_like(datetime.combine(actual_in_date, attendance.attendance_clock_in), dt_now))
                 grace_dt = planned_in_dt + timedelta(seconds=int(grace_seconds or 0)) if planned_in_dt else None
                 if actual_in_dt and grace_dt and actual_in_dt > grace_dt:
                     late_s = int((actual_in_dt - grace_dt).total_seconds())
@@ -1290,7 +1299,7 @@ class ClockOutAPIView(APIView):
                 except Exception:
                     leave_kind_for_note = None
             actual_in_date = getattr(attendance, "attendance_clock_in_date", None) or attendance_date
-            actual_in_dt = _coerce_datetime_like(datetime.combine(actual_in_date, attendance.attendance_clock_in), dt_now) if attendance and getattr(attendance, "attendance_clock_in", None) else None
+            actual_in_dt = _truncate_dt_to_minute(_coerce_datetime_like(datetime.combine(actual_in_date, attendance.attendance_clock_in), dt_now)) if attendance and getattr(attendance, "attendance_clock_in", None) else None
             shift_start_dt, shift_end_dt = _shift_bounds_for_note_context(attendance_date, start_time_sec, end_time_sec)
             _, earliest_check_out_dt, valid_check_in_for_note = _compute_mobile_effective_start_and_earliest_checkout(
                 shift_start_dt=shift_start_dt,
@@ -1322,7 +1331,7 @@ class ClockOutAPIView(APIView):
         try:
             if attendance and getattr(attendance, "attendance_clock_out", None) and earliest_check_out_dt is not None:
                 actual_out_date = getattr(attendance, "attendance_clock_out_date", None) or attendance_date
-                actual_out_dt = _coerce_datetime_like(datetime.combine(actual_out_date, attendance.attendance_clock_out), dt_now)
+                actual_out_dt = _truncate_dt_to_minute(_coerce_datetime_like(datetime.combine(actual_out_date, attendance.attendance_clock_out), dt_now))
                 checked_out_early = bool(actual_out_dt and actual_out_dt < earliest_check_out_dt)
                 if checked_out_early:
                     early_s = int((earliest_check_out_dt - actual_out_dt).total_seconds())
@@ -3493,7 +3502,7 @@ class CheckingStatus(APIView):
                         worked_seconds = 0
                 else:
                     out_date = getattr(attendance, "attendance_clock_out_date", None) or attendance_date
-                    out_dt = _coerce_datetime_like(datetime.combine(out_date, clock_out_t), dt_now)
+                    out_dt = _truncate_dt_to_minute(_coerce_datetime_like(datetime.combine(out_date, clock_out_t), dt_now))
                     try:
                         worked_seconds = compute_attendance_metrics(
                             policy_for_note,
@@ -3695,7 +3704,7 @@ class CheckingStatus(APIView):
             if clock_in_t and start_time_sec:
                 try:
                     in_date = getattr(attendance, "attendance_clock_in_date", None) or attendance_date
-                    in_dt = _coerce_datetime_like(datetime.combine(in_date, clock_in_t), dt_now)
+                    in_dt = _truncate_dt_to_minute(_coerce_datetime_like(datetime.combine(in_date, clock_in_t), dt_now))
 
                     planned_in_hhmm = _sec_to_hhmm(start_time_sec)
                     planned_in_time = datetime.strptime(planned_in_hhmm, "%H:%M").time()
