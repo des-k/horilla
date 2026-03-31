@@ -90,9 +90,9 @@ class ShiftContext:
     check_out_window_start_dt: datetime | None
     check_out_window_end_dt: datetime | None
     minimum_hour: str
-    grace_seconds: int
-    grace_out_seconds: int
-    grace_clock_in_type: str
+    grace_seconds: int = 0
+    grace_out_seconds: int = 0
+    grace_clock_in_type: str = "after"
 
 
 @dataclass
