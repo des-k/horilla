@@ -504,6 +504,15 @@ def _canonical_row_from_attendance(
     language: str,
     is_off: bool,
     off_kind: Optional[str] = None,
+    schedule_obj=None,
+    shift_start_dt: Optional[datetime] = None,
+    shift_end_dt: Optional[datetime] = None,
+    minimum_hour: str = "00:00",
+    half_day_kind: Optional[str] = None,
+    check_in_cutoff_dt: Optional[datetime] = None,
+    grace_in_sec: int = 0,
+    grace_out_sec: int = 0,
+    grace_clock_in_type: str = "after",
 ) -> Optional[MonthlyRecapRow]:
     if not best_att:
         return None
@@ -557,6 +566,35 @@ def _canonical_row_from_attendance(
 
     late_minutes = coerce_non_negative_decimal(getattr(best_att, "late_minutes", 0) or 0)
     early_out_minutes = coerce_non_negative_decimal(getattr(best_att, "early_out_minutes", 0) or 0)
+    if schedule_obj is not None or shift_start_dt is not None or shift_end_dt is not None:
+        try:
+            policy = build_attendance_policy(
+                schedule=schedule_obj,
+                shift_start_dt=shift_start_dt,
+                shift_end_dt=shift_end_dt,
+                minimum_hour=minimum_hour or getattr(best_att, "minimum_hour", None) or "00:00",
+                leave_kind=half_day_kind,
+                check_in_cutoff_dt=check_in_cutoff_dt,
+            )
+            metrics = compute_attendance_metrics(
+                policy,
+                final_in_dt=final_in_dt,
+                final_out_dt=final_out_dt,
+                grace_seconds=grace_in_sec,
+                clock_in_type=grace_clock_in_type,
+                is_presence_only=(display_in_mode == AttendanceWorkMode.ON_DUTY and display_out_mode == AttendanceWorkMode.ON_DUTY),
+                early_out_grace_seconds=grace_out_sec,
+            )
+            if display_in_mode != AttendanceWorkMode.ON_DUTY:
+                late_minutes = seconds_to_decimal_minutes(metrics.late_seconds)
+            else:
+                late_minutes = coerce_non_negative_decimal(0)
+            if display_out_mode != AttendanceWorkMode.ON_DUTY:
+                early_out_minutes = seconds_to_decimal_minutes(metrics.early_out_seconds)
+            else:
+                early_out_minutes = coerce_non_negative_decimal(0)
+        except Exception:
+            pass
 
     return MonthlyRecapRow(
         no=row_no,
@@ -1382,6 +1420,15 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
             language=language,
             is_off=is_off,
             off_kind=off_kind,
+            schedule_obj=rules.get("schedule"),
+            shift_start_dt=shift_start_dt,
+            shift_end_dt=shift_end_dt,
+            minimum_hour=getattr(best_att, "minimum_hour", None) or getattr(rules.get("schedule"), "minimum_working_hour", None) or "00:00",
+            half_day_kind=half_day_kind,
+            check_in_cutoff_dt=check_in_window_end_dt or cutoff_in_dt,
+            grace_in_sec=grace_in_sec,
+            grace_out_sec=grace_out_sec,
+            grace_clock_in_type=grace_clock_in_type,
         )
         if canonical_row is not None:
             rows.append(canonical_row)
