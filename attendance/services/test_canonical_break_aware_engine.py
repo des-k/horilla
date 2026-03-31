@@ -228,6 +228,42 @@ class CanonicalBreakAwareEngineTests(SimpleTestCase):
         self.assertEqual(metrics.late_seconds, (225 * 60) + 30)
         self.assertEqual(metrics.early_out_seconds, (225 * 60) + 30)
 
+    def test_late_ignores_check_in_seconds_for_minute_precision(self):
+        policy = build_attendance_policy(
+            schedule=self._schedule(),
+            shift_start_dt=self._dt(7, 30),
+            shift_end_dt=self._dt(16, 0),
+            minimum_hour="08:30",
+            leave_kind=None,
+            check_in_cutoff_dt=self._dt(12, 0),
+        )
+        metrics = compute_attendance_metrics(
+            policy,
+            final_in_dt=timezone.make_aware(datetime(2026, 3, 19, 10, 15, 18)),
+            final_out_dt=self._dt(18, 45),
+            grace_seconds=0,
+            clock_in_type="after",
+        )
+        self.assertEqual(metrics.late_seconds, 165 * 60)
+
+    def test_early_out_ignores_check_out_seconds_for_minute_precision(self):
+        policy = build_attendance_policy(
+            schedule=self._schedule(),
+            shift_start_dt=self._dt(7, 30),
+            shift_end_dt=self._dt(16, 0),
+            minimum_hour="08:30",
+            leave_kind=None,
+            check_in_cutoff_dt=self._dt(12, 0),
+        )
+        metrics = compute_attendance_metrics(
+            policy,
+            final_in_dt=self._dt(7, 30),
+            final_out_dt=timezone.make_aware(datetime(2026, 3, 19, 15, 44, 59)),
+            grace_seconds=0,
+            clock_in_type="after",
+        )
+        self.assertEqual(metrics.early_out_seconds, 16 * 60)
+
     def test_mobile_helper_uses_same_canonical_second_half_threshold(self):
         schedule = self._schedule(break_start_time=time(12, 0), break_end_time=time(13, 0))
         effective_start_dt, earliest_checkout_dt, valid = _compute_mobile_effective_start_and_earliest_checkout(
