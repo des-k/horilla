@@ -95,8 +95,8 @@
             <th class="nowrap col-center">Check In</th>
             <th class="nowrap col-center">Check Out</th>
             <th class="col-center">Work Type</th>
-            <th class="nowrap col-center">Late</th>
-            <th class="nowrap col-center">Early Out</th>
+            <th class="nowrap col-center">Late (Minutes)</th>
+            <th class="nowrap col-center">Early Out (Minutes)</th>
             <th>Note</th>
           {% endif %}
         </tr>
@@ -110,8 +110,8 @@
             <td class="nowrap col-center">{{ r.check_in }}</td>
             <td class="nowrap col-center">{{ r.check_out }}</td>
             <td class="col-center">{{ r.work_type|safe }}</td>
-            <td class="nowrap col-center">{{ r.late }}</td>
-            <td class="nowrap col-center">{{ r.early_out }}</td>
+            <td class="nowrap col-center">{{ r.late_minutes|default:0 }}</td>
+            <td class="nowrap col-center">{{ r.early_out_minutes|default:0 }}</td>
             <td>{{ r.note }}</td>
           </tr>
         {% empty %}
