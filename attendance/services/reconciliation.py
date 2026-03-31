@@ -91,6 +91,7 @@ class ShiftContext:
     check_out_window_end_dt: datetime | None
     minimum_hour: str
     grace_seconds: int
+    grace_out_seconds: int
     grace_clock_in_type: str
 
 
@@ -228,6 +229,7 @@ def _resolve_shift_context(employee, attendance_date: date) -> ShiftContext:
     check_out_window_end_dt = None
     minimum_hour = "00:00"
     grace_seconds = 0
+    grace_out_seconds = 0
     grace_clock_in_type = "after"
 
     if shift and day:
@@ -253,8 +255,11 @@ def _resolve_shift_context(employee, attendance_date: date) -> ShiftContext:
         grace_seconds = int(rules.get("grace_seconds") or 0)
         try:
             grace_obj = _resolve_grace_time(schedule, shift)
+            if grace_obj and getattr(grace_obj, "allowed_clock_out", False):
+                grace_out_seconds = int(getattr(grace_obj, "allowed_time_in_secs", 0) or 0)
             grace_clock_in_type = getattr(grace_obj, "clock_in_type", "after") or "after"
         except Exception:
+            grace_out_seconds = 0
             grace_clock_in_type = "after"
 
     return ShiftContext(
@@ -271,6 +276,7 @@ def _resolve_shift_context(employee, attendance_date: date) -> ShiftContext:
         check_out_window_end_dt=check_out_window_end_dt,
         minimum_hour=minimum_hour or "00:00",
         grace_seconds=grace_seconds,
+        grace_out_seconds=grace_out_seconds,
         grace_clock_in_type=grace_clock_in_type,
     )
 
@@ -988,6 +994,7 @@ def recompute_attendance(employee, attendance_date: date) -> ReconciliationResul
             grace_seconds=ctx.grace_seconds,
             clock_in_type=ctx.grace_clock_in_type,
             is_presence_only=is_presence_only,
+            early_out_grace_seconds=ctx.grace_out_seconds,
             use_nominal_policy_end_for_early_out=use_nominal_policy_end_for_early_out,
         )
         late_minutes = seconds_to_decimal_minutes(metrics.late_seconds)
