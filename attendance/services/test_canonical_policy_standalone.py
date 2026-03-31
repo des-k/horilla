@@ -3,9 +3,14 @@ from __future__ import annotations
 import importlib
 import sys
 import types
+from typing import Any
 import unittest
 from datetime import datetime, time
 from types import SimpleNamespace
+
+
+_ORIGINAL_ATTENDANCE_METHODS: Any = sys.modules.get("attendance.methods")
+_ORIGINAL_ATTENDANCE_METHODS_UTILS: Any = sys.modules.get("attendance.methods.utils")
 
 
 def _install_stub_utils():
@@ -35,8 +40,24 @@ def _install_stub_utils():
     sys.modules["attendance.methods.utils"] = utils
 
 
+def _restore_original_utils_modules():
+    if _ORIGINAL_ATTENDANCE_METHODS is None:
+        sys.modules.pop("attendance.methods", None)
+    else:
+        sys.modules["attendance.methods"] = _ORIGINAL_ATTENDANCE_METHODS
+
+    if _ORIGINAL_ATTENDANCE_METHODS_UTILS is None:
+        sys.modules.pop("attendance.methods.utils", None)
+    else:
+        sys.modules["attendance.methods.utils"] = _ORIGINAL_ATTENDANCE_METHODS_UTILS
+
+
 _install_stub_utils()
 policy_module = importlib.import_module("attendance.services.canonical_attendance_policy")
+
+
+def tearDownModule():
+    _restore_original_utils_modules()
 
 
 class CanonicalPolicyStandaloneTests(unittest.TestCase):
