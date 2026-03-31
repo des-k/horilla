@@ -670,37 +670,16 @@ def compute_attendance_metrics(
             late_seconds = half_minimum_seconds
             early_out_seconds = half_minimum_seconds
     elif final_in_dt is None and final_out_dt is not None:
-        if policy.kind in {"first_half", "second_half"}:
-            late_seconds = _calculate_late_seconds(policy, final_in_dt=minute_final_in_dt, grace_seconds=grace_seconds)
-            early_out_seconds = _calculate_early_out_seconds(
-                policy,
-                final_in_dt=minute_final_in_dt,
-                final_out_dt=minute_final_out_dt,
-                reference_end_dt=reference_end_dt,
-                early_out_grace_seconds=early_out_grace_seconds,
-            )
-        else:
-            late_seconds = _cap_early_out_seconds(
-                policy,
-                net_duration_excluding_break(
-                    policy.late_reference_dt,
-                    minute_final_out_dt,
-                    break_start_dt=policy.break_start_dt,
-                    break_end_dt=policy.break_end_dt,
-                ),
-            )
-            early_out_seconds = _cap_early_out_seconds(
-                policy,
-                max(
-                    0,
-                    net_duration_excluding_break(
-                        minute_final_out_dt,
-                        reference_end_dt,
-                        break_start_dt=policy.break_start_dt,
-                        break_end_dt=policy.break_end_dt,
-                    ) - max(0, int(early_out_grace_seconds or 0)),
-                ),
-            )
+        late_seconds = max(0, int(policy.maximum_late_seconds or half_minimum_seconds))
+        early_out_seconds = _calculate_early_out_seconds(
+            policy,
+            final_in_dt=None,
+            final_out_dt=minute_final_out_dt,
+            reference_end_dt=reference_end_dt,
+            early_out_grace_seconds=early_out_grace_seconds,
+        )
+        if policy.kind not in {"first_half", "second_half"}:
+            early_out_seconds = _cap_early_out_seconds(policy, early_out_seconds)
     elif final_in_dt is not None and final_out_dt is None:
         if policy.kind in {"first_half", "second_half"}:
             late_seconds = _calculate_late_seconds(policy, final_in_dt=minute_final_in_dt, grace_seconds=grace_seconds)
