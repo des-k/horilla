@@ -556,7 +556,7 @@ def _canonical_row_from_attendance(
     if off_kind in {"holiday", "no_schedule"}:
         return None
 
-    if off_kind == "leave" and not explicit_canonical:
+    if off_kind == "leave":
         return None
 
     if not explicit_canonical and off_kind != "leave" and final_in_dt is None and final_out_dt is None:
@@ -1481,9 +1481,12 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
             if is_leave:
                 shift_info = _localize_shift_information(_localize_leave_session_label("full", language), language)
                 note = derive_note(NoteInputs(is_off=True, off_kind="leave"), language=language)
-            else:
+            elif holiday_obj:
                 shift_info = _localize_shift_information("Holiday", language)
                 note = derive_note(NoteInputs(is_off=True, off_kind="holiday"), language=language)
+            else:
+                shift_info = _localize_shift_information("—", language)
+                note = "-"
 
             rows.append(
                 MonthlyRecapRow(
