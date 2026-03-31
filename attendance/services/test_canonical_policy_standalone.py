@@ -31,8 +31,13 @@ def _install_stub_utils():
             hours, minutes, seconds = (parts + [0, 0, 0])[:3]
         return (hours * 3600) + (minutes * 60) + seconds
 
+    class Request:
+        def __init__(self, *args, **kwargs):
+            pass
+
     utils.format_time = format_time
     utils.strtime_seconds = strtime_seconds
+    utils.Request = Request
 
     methods_pkg = types.ModuleType("attendance.methods")
     methods_pkg.utils = utils
@@ -53,7 +58,10 @@ def _restore_original_utils_modules():
 
 
 _install_stub_utils()
-policy_module = importlib.import_module("attendance.services.canonical_attendance_policy")
+try:
+    policy_module = importlib.import_module("attendance.services.canonical_attendance_policy")
+finally:
+    _restore_original_utils_modules()
 
 
 def tearDownModule():
