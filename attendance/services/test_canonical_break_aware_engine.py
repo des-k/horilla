@@ -207,7 +207,7 @@ class CanonicalBreakAwareEngineTests(SimpleTestCase):
             clock_in_type="after",
         )
         self.assertEqual(metrics.late_seconds, 4 * 3600)
-        self.assertEqual(metrics.early_out_seconds, 0)
+        self.assertEqual(metrics.early_out_seconds, 4 * 3600)
 
     def test_missing_both_can_produce_half_minimum_decimal_minutes(self):
         policy = build_attendance_policy(
