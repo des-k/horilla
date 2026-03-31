@@ -1412,28 +1412,6 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
             except Exception:
                 canonical_shift_info = "—"
 
-        canonical_row = _canonical_row_from_attendance(
-            best_att=best_att,
-            attendance_date=d,
-            row_no=i,
-            shift_information=canonical_shift_info,
-            language=language,
-            is_off=is_off,
-            off_kind=off_kind,
-            schedule_obj=rules.get("schedule"),
-            shift_start_dt=shift_start_dt,
-            shift_end_dt=shift_end_dt,
-            minimum_hour=getattr(best_att, "minimum_hour", None) or getattr(rules.get("schedule"), "minimum_working_hour", None) or "00:00",
-            half_day_kind=half_day_kind,
-            check_in_cutoff_dt=check_in_window_end_dt or cutoff_in_dt,
-            grace_in_sec=grace_in_sec,
-            grace_out_sec=grace_out_sec,
-            grace_clock_in_type=grace_clock_in_type,
-        )
-        if canonical_row is not None:
-            rows.append(canonical_row)
-            i += 1
-            continue
 
         if is_off:
             if is_leave:
@@ -1621,6 +1599,29 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
         except Exception:
             grace_out_sec = 0
             grace_clock_in_type = str(rules.get("clock_in_type") or "after")
+
+        canonical_row = _canonical_row_from_attendance(
+            best_att=best_att,
+            attendance_date=d,
+            row_no=i,
+            shift_information=canonical_shift_info,
+            language=language,
+            is_off=is_off,
+            off_kind=off_kind,
+            schedule_obj=rules.get("schedule"),
+            shift_start_dt=shift_start_dt,
+            shift_end_dt=shift_end_dt,
+            minimum_hour=getattr(best_att, "minimum_hour", None) or getattr(rules.get("schedule"), "minimum_working_hour", None) or "00:00",
+            half_day_kind=half_day_kind,
+            check_in_cutoff_dt=check_in_window_end_dt or cutoff_in_dt,
+            grace_in_sec=grace_in_sec,
+            grace_out_sec=grace_out_sec,
+            grace_clock_in_type=grace_clock_in_type,
+        )
+        if canonical_row is not None:
+            rows.append(canonical_row)
+            i += 1
+            continue
 
         baseline_mode = _attendance_level_mode(best_att) or scheduled_attendance_mode(employee, d)
 
