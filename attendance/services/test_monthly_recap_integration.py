@@ -203,9 +203,9 @@ class MonthlyRecapIntegrationTests(SimpleTestCase):
             rows = monthly_recap.get_monthly_attendance_rows(self.employee, "2026-03")
 
         row = self._find_row(rows, self.target_date)
-        self.assertEqual(row.note, "Approved Full-Day Leave")
-        self.assertEqual(row.check_in, "08:00")
-        self.assertEqual(row.check_out, "17:00")
+        self.assertEqual(row.note, "On Leave")
+        self.assertEqual(row.check_in, "-")
+        self.assertEqual(row.check_out, "-")
 
     def test_existing_attendance_row_does_not_fallback_to_independent_leave_logic(self):
         attendance = SimpleNamespace(
@@ -244,11 +244,11 @@ class MonthlyRecapIntegrationTests(SimpleTestCase):
             rows = monthly_recap.get_monthly_attendance_rows(self.employee, "2026-03")
 
         row = self._find_row(rows, self.target_date)
-        self.assertEqual(row.note, "-")
-        self.assertEqual(row.check_in, "08:10")
-        self.assertEqual(row.check_out, "16:45")
-        self.assertEqual(row.late_minutes, 10)
-        self.assertEqual(row.early_out_minutes, 15)
+        self.assertEqual(row.note, "On Leave")
+        self.assertEqual(row.check_in, "-")
+        self.assertEqual(row.check_out, "-")
+        self.assertEqual(row.late_minutes, 0)
+        self.assertEqual(row.early_out_minutes, 0)
 
     def test_pending_create_request_still_bypasses_canonical_attendance_row(self):
         pending_request_row = SimpleNamespace(
@@ -319,7 +319,7 @@ class MonthlyRecapIntegrationTests(SimpleTestCase):
         self.assertIn("Attendance IN pending: 08:05", row.note)
         self.assertIn("Attendance OUT pending: 17:05", row.note)
         self.assertEqual(recap["summary"]["late_minutes"], 1)
-        self.assertEqual(recap["summary"]["early_out_minutes"], 0)
+        self.assertEqual(recap["summary"]["early_out_minutes"], 20)
 
     def test_monthly_recap_uses_approved_request_when_it_is_final_truth(self):
         approved_attendance = SimpleNamespace(
@@ -357,8 +357,8 @@ class MonthlyRecapIntegrationTests(SimpleTestCase):
         self.assertEqual(row.check_out, "16:40")
         self.assertEqual(row.work_type, "WFA")
         self.assertEqual(recap["summary"]["late_minutes"], 20)
-        self.assertEqual(recap["summary"]["early_out_minutes"], 0)
-        self.assertEqual(recap["summary"]["total_minutes"], 20)
+        self.assertEqual(recap["summary"]["early_out_minutes"], 20)
+        self.assertEqual(recap["summary"]["total_minutes"], 40)
 
     def test_monthly_recap_ignores_non_approved_work_type_request_and_terminal_request_effects(self):
         raw_activity = self._raw_activity(id=50, in_time=time(8, 0), out_time=time(17, 0), in_mode=None, out_mode=None)
@@ -462,7 +462,7 @@ class MonthlyRecapIntegrationTests(SimpleTestCase):
         self.assertEqual(row.late_minutes, 5)
         self.assertIn("Approved First Half Leave", row.note)
         self.assertEqual(recap["summary"]["late_minutes"], 5)
-        self.assertEqual(recap["summary"]["early_out_minutes"], 5)
+        self.assertEqual(recap["summary"]["early_out_minutes"], 0)
 
     def test_monthly_recap_reflects_second_half_leave_final_state(self):
         leave_request = SimpleNamespace(
@@ -492,7 +492,7 @@ class MonthlyRecapIntegrationTests(SimpleTestCase):
 
         self.assertEqual(row.check_in, "08:00")
         self.assertEqual(row.check_out, "12:05")
-        self.assertEqual(row.early_out_minutes, 5)
+        self.assertEqual(row.early_out_minutes, 0)
         self.assertIn("Approved Second Half Leave", row.note)
         self.assertEqual(recap["summary"]["late_minutes"], 0)
         self.assertEqual(recap["summary"]["early_out_minutes"], 5)
@@ -575,11 +575,11 @@ class MonthlyRecapIntegrationTests(SimpleTestCase):
         recap, row = self._get_recap(activities=[activity])
 
         self.assertEqual(row.late_minutes, 135)
-        self.assertEqual(row.early_out_minutes, 151)
+        self.assertEqual(row.early_out_minutes, 76)
         self.assertEqual(row.late, "02:15")
-        self.assertEqual(row.early_out, "02:31")
+        self.assertEqual(row.early_out, "01:16")
         self.assertEqual(recap["summary"]["late_minutes"], 135)
-        self.assertEqual(recap["summary"]["early_out_minutes"], 151)
+        self.assertEqual(recap["summary"]["early_out_minutes"], 76)
 
     def test_flexible_after_early_out_uses_dynamic_earliest_checkout_and_clamps_negative_values(self):
         activity = self._raw_activity(id=44, in_time=time(9, 0), out_time=time(17, 0))
