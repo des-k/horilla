@@ -532,13 +532,13 @@ class MonthlyRecapIntegrationTests(SimpleTestCase):
         self.assertEqual(row_one.work_type, row_two.work_type)
         self.assertEqual(row_one.note, row_two.note)
 
-    def test_missing_check_in_and_out_uses_full_policy_late_only(self):
+    def test_missing_check_in_and_out_uses_half_minimum_for_late_and_early_out(self):
         recap, row = self._get_recap()
 
         self.assertEqual(row.late, "04:00")
-        self.assertEqual(row.early_out, "00:00")
+        self.assertEqual(row.early_out, "04:00")
         self.assertEqual(row.late_minutes, 240)
-        self.assertEqual(row.early_out_minutes, 0)
+        self.assertEqual(row.early_out_minutes, 240)
 
     def test_missing_check_out_uses_full_policy_early_out_duration(self):
         activity = self._raw_activity(id=41, in_time=time(8, 0))
@@ -546,8 +546,8 @@ class MonthlyRecapIntegrationTests(SimpleTestCase):
         recap, row = self._get_recap(activities=[activity])
 
         self.assertEqual(row.late, "00:00")
-        self.assertEqual(row.early_out, "08:00")
-        self.assertEqual(row.early_out_minutes, 480)
+        self.assertEqual(row.early_out, "04:00")
+        self.assertEqual(row.early_out_minutes, 240)
 
     def test_missing_check_in_with_checkout_at_shift_end_has_no_early_out(self):
         activity = self._raw_activity(id=42, out_time=time(17, 0))
