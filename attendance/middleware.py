@@ -8,8 +8,6 @@ from datetime import datetime, timedelta
 from django.utils import timezone
 from django.utils.deprecation import MiddlewareMixin
 
-from attendance.methods.utils import Request, strtime_seconds
-
 logger = logging.getLogger(__name__)
 
 
