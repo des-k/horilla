@@ -180,6 +180,42 @@ class CanonicalPolicyStandaloneTests(unittest.TestCase):
         self.assertEqual(metrics.early_out_seconds, (225 * 60) + 30)
         self.assertEqual(str(policy_module.seconds_to_decimal_minutes(metrics.late_seconds)), "225.5")
 
+    def test_late_ignores_check_in_seconds_for_minute_precision(self):
+        policy = policy_module.build_attendance_policy(
+            schedule=self._schedule(),
+            shift_start_dt=self._dt(7, 30),
+            shift_end_dt=self._dt(16, 0),
+            minimum_hour="08:30",
+            leave_kind=None,
+            check_in_cutoff_dt=self._dt(12, 0),
+        )
+        metrics = policy_module.compute_attendance_metrics(
+            policy,
+            final_in_dt=datetime(2026, 3, 19, 10, 15, 18),
+            final_out_dt=self._dt(18, 45),
+            grace_seconds=0,
+            clock_in_type="after",
+        )
+        self.assertEqual(metrics.late_seconds, 165 * 60)
+
+    def test_early_out_ignores_check_out_seconds_for_minute_precision(self):
+        policy = policy_module.build_attendance_policy(
+            schedule=self._schedule(),
+            shift_start_dt=self._dt(7, 30),
+            shift_end_dt=self._dt(16, 0),
+            minimum_hour="08:30",
+            leave_kind=None,
+            check_in_cutoff_dt=self._dt(12, 0),
+        )
+        metrics = policy_module.compute_attendance_metrics(
+            policy,
+            final_in_dt=self._dt(7, 30),
+            final_out_dt=datetime(2026, 3, 19, 15, 44, 59),
+            grace_seconds=0,
+            clock_in_type="after",
+        )
+        self.assertEqual(metrics.early_out_seconds, 16 * 60)
+
     def test_first_half_missing_out_uses_policy_end_not_extended_target(self):
         policy = policy_module.build_attendance_policy(
             schedule=self._schedule(
