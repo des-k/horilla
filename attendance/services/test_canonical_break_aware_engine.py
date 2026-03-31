@@ -84,8 +84,8 @@ class CanonicalBreakAwareEngineTests(SimpleTestCase):
             grace_seconds=0,
             clock_in_type="after",
         )
-        self.assertEqual(metrics.earliest_checkout_dt, self._dt(18, 0))
-        self.assertEqual(metrics.early_out_seconds, 1 * 3600)
+        self.assertEqual(metrics.earliest_checkout_dt, self._dt(17, 0))
+        self.assertEqual(metrics.early_out_seconds, 0)
 
     def test_normal_late_excludes_break_interval(self):
         policy = build_attendance_policy(
@@ -263,6 +263,38 @@ class CanonicalBreakAwareEngineTests(SimpleTestCase):
             clock_in_type="after",
         )
         self.assertEqual(metrics.early_out_seconds, 16 * 60)
+
+    def test_non_flex_late_arrival_keeps_nominal_policy_end_in_mobile_helper(self):
+        effective_start_dt, earliest_checkout_dt, valid = _compute_mobile_effective_start_and_earliest_checkout(
+            shift_start_dt=self._dt(7, 30),
+            shift_end_dt=self._dt(16, 0),
+            actual_check_in_dt=self._dt(10, 15),
+            clock_in_type="after",
+            flex_seconds=0,
+            schedule=self._schedule(break_start_time=time(12, 0), break_end_time=time(13, 0)),
+            minimum_hour="07:30",
+            leave_kind=None,
+            check_in_cutoff_dt=self._dt(9, 0),
+        )
+        self.assertEqual(effective_start_dt, self._dt(7, 30))
+        self.assertEqual(earliest_checkout_dt, self._dt(16, 0))
+        self.assertFalse(valid)
+
+    def test_flex_after_beyond_window_caps_effective_start_to_window_end(self):
+        effective_start_dt, earliest_checkout_dt, valid = _compute_mobile_effective_start_and_earliest_checkout(
+            shift_start_dt=self._dt(7, 30),
+            shift_end_dt=self._dt(16, 0),
+            actual_check_in_dt=self._dt(10, 15),
+            clock_in_type="after",
+            flex_seconds=90 * 60,
+            schedule=self._schedule(break_start_time=time(12, 0), break_end_time=time(13, 0)),
+            minimum_hour="07:30",
+            leave_kind=None,
+            check_in_cutoff_dt=self._dt(9, 0),
+        )
+        self.assertEqual(effective_start_dt, self._dt(9, 0))
+        self.assertEqual(earliest_checkout_dt, self._dt(17, 30))
+        self.assertFalse(valid)
 
     def test_mobile_helper_uses_same_canonical_second_half_threshold(self):
         schedule = self._schedule(break_start_time=time(12, 0), break_end_time=time(13, 0))
