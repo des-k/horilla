@@ -2440,9 +2440,28 @@ class WorkModeRequestView(APIView):
         validate_uploaded_files(uploaded)
         return uploaded
 
+    def _materialize_request_data(self, request):
+        raw = request.data
+        if hasattr(raw, "lists"):
+            data = {}
+            file_values = set()
+            if hasattr(request, "FILES"):
+                for values in request.FILES.lists():
+                    for value in values[1]:
+                        file_values.add(id(value))
+            for key, values in raw.lists():
+                filtered = [value for value in values if id(value) not in file_values]
+                if not filtered:
+                    continue
+                data[key] = filtered if len(filtered) > 1 else filtered[0]
+            return data
+        if hasattr(raw, "items"):
+            return {key: value for key, value in raw.items()}
+        return dict(raw)
+
     @transaction.atomic
     def post(self, request):
-        data = request.data.copy() if hasattr(request.data, "copy") else dict(request.data)
+        data = self._materialize_request_data(request)
 
         if not data.get("mode") and data.get("work_mode"):
             data["mode"] = data.get("work_mode")
@@ -2505,7 +2524,7 @@ class WorkModeRequestView(APIView):
     def _patch_or_put(self, request, pk):
         obj = get_object_or_404(WorkModeRequest.objects.select_for_update(), pk=pk)
 
-        data = request.data.copy() if hasattr(request.data, "copy") else dict(request.data)
+        data = self._materialize_request_data(request)
         forbidden = {
             "mode", "work_type", "work_mode", "scope", "start_date", "end_date", "employee_id",
             "status", "approved_by", "approved_at", "action_type", "action_by", "action_at", "document_status",
