@@ -3517,6 +3517,13 @@ class CheckingStatus(APIView):
             leave_kind=leave_kind_for_note,
             check_in_cutoff_dt=check_in_window_end_dt,
         )
+        grace_out_sec = 0
+        try:
+            resolved_grace = cio._resolve_grace_time(schedule, shift)
+            if resolved_grace and getattr(resolved_grace, "allowed_clock_out", False):
+                grace_out_sec = int(getattr(resolved_grace, "allowed_time_in_secs", 0) or 0)
+        except Exception:
+            grace_out_sec = 0
 
         status_actual_in_dt = None
         if attendance and clock_in_t:
