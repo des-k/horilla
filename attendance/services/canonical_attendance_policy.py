@@ -304,7 +304,7 @@ def build_attendance_policy(
     maximum_late_seconds = max(0, int(Decimal(int(normal_required_seconds or 0)) / Decimal("2")))
     maximum_early_out_seconds = maximum_late_seconds
     apply_grace_to_late = leave_kind not in {"first_half", "second_half"}
-    cap_actual_late_to_max = True
+    cap_actual_late_to_max = leave_kind in {"first_half", "second_half"}
 
     if leave_kind == "first_half":
         late_reference_dt = time_to_shift_instance_dt(
@@ -413,8 +413,21 @@ def resolve_effective_check_in_and_earliest_checkout(
         return effective_start_dt, earliest_checkout_dt, True
 
     if policy.kind == "second_half":
-        effective_start_dt = actual_check_in_dt if actual_check_in_dt >= base_dt else base_dt
+        flex_delta = timedelta(seconds=max(0, int(flex_seconds or 0)))
+        mode = str(clock_in_type or "after").strip().lower()
         valid_check_in = actual_check_in_dt <= base_dt
+        effective_start_dt = actual_check_in_dt if actual_check_in_dt >= base_dt else base_dt
+        if mode == "before_after":
+            window_start_dt = base_dt - flex_delta
+            if actual_check_in_dt < window_start_dt:
+                effective_start_dt = window_start_dt
+                valid_check_in = False
+            elif actual_check_in_dt < base_dt:
+                effective_start_dt = actual_check_in_dt
+                valid_check_in = True
+            else:
+                effective_start_dt = actual_check_in_dt
+                valid_check_in = True
         earliest_checkout_dt = add_net_work_duration(
             effective_start_dt,
             policy.required_work_seconds,
@@ -452,12 +465,16 @@ def resolve_effective_check_in_and_earliest_checkout(
         effective_start_dt = base_dt
         valid_check_in = True
 
-    earliest_checkout_dt = add_net_work_duration(
+    dynamic_earliest_checkout_dt = add_net_work_duration(
         effective_start_dt,
         policy.required_work_seconds,
         break_start_dt=policy.break_start_dt,
         break_end_dt=policy.break_end_dt,
     )
+    if _uses_dynamic_policy_end(policy, clock_in_type=clock_in_type, flex_seconds=flex_seconds):
+        earliest_checkout_dt = dynamic_earliest_checkout_dt
+    else:
+        earliest_checkout_dt = policy.nominal_policy_end_dt or dynamic_earliest_checkout_dt
     return effective_start_dt, earliest_checkout_dt, valid_check_in
 
 
@@ -564,8 +581,8 @@ def _calculate_early_out_seconds(
         return 0
     if final_out_dt is None:
         if final_in_dt is not None and reference_end_dt is not None:
-            return _cap_early_out_seconds(
-                policy,
+            return max(
+                0,
                 net_duration_excluding_break(
                     final_in_dt,
                     reference_end_dt,
@@ -573,7 +590,7 @@ def _calculate_early_out_seconds(
                     break_end_dt=policy.break_end_dt,
                 ),
             )
-        return _cap_early_out_seconds(policy, max(0, int(policy.maximum_early_out_seconds or policy.required_work_seconds or 0)))
+        return max(0, int(policy.maximum_early_out_seconds or policy.required_work_seconds or 0))
 
     if final_in_dt is None:
         reference_end_dt = policy.nominal_policy_end_dt
@@ -585,7 +602,7 @@ def _calculate_early_out_seconds(
         break_end_dt=policy.break_end_dt,
     )
     early_out_seconds = max(0, int(early_out_seconds or 0) - max(0, int(early_out_grace_seconds or 0)))
-    return _cap_early_out_seconds(policy, early_out_seconds)
+    return max(0, int(early_out_seconds))
 
 
 def compute_attendance_metrics(
@@ -647,7 +664,15 @@ def compute_attendance_metrics(
                 early_out_grace_seconds=early_out_grace_seconds,
             )
         else:
-            late_seconds = max(0, int(policy.maximum_late_seconds or half_minimum_seconds))
+            late_seconds = _cap_early_out_seconds(
+                policy,
+                net_duration_excluding_break(
+                    policy.late_reference_dt,
+                    minute_final_out_dt,
+                    break_start_dt=policy.break_start_dt,
+                    break_end_dt=policy.break_end_dt,
+                ),
+            )
             early_out_seconds = _cap_early_out_seconds(
                 policy,
                 max(
@@ -682,6 +707,8 @@ def compute_attendance_metrics(
             reference_end_dt=reference_end_dt,
             early_out_grace_seconds=early_out_grace_seconds,
         )
+        if policy.kind not in {"first_half", "second_half"}:
+            early_out_seconds = max(0, int(early_out_seconds or 0))
 
     return AttendanceMetrics(
         worked_seconds=max(0, int(worked_seconds or 0)),
