@@ -285,6 +285,104 @@ class MobileAttendanceActionParityTests(SimpleTestCase):
         self.assertEqual(update_punch_history.call_args.kwargs["work_mode"], AttendanceWorkMode.WFA)
         self.assertIs(update_punch_history.call_args.kwargs["related_work_mode_request"], approved_req)
 
+    def test_checking_status_late_by_ignores_check_in_seconds(self):
+        attendance = SimpleNamespace(
+            attendance_clock_in=time(10, 15, 18),
+            attendance_clock_out=None,
+            attendance_clock_in_date=self.attendance_date,
+            attendance_clock_out_date=None,
+            in_attendance_status="VALID",
+            out_attendance_status=None,
+            in_attendance_reject_reason_code=None,
+            out_attendance_reject_reason_code=None,
+            in_related_work_type_request_id=None,
+            out_related_work_type_request_id=None,
+            reconciliation_source="mobile",
+            attendance_worked_hour="00:00",
+        )
+        status_request = self._status_request()
+        status_patches = self._status_patches(
+            modes=[(AttendanceWorkMode.WFO, "schedule", None), (AttendanceWorkMode.WFO, "schedule", None)],
+            allowed=[True, True],
+            attendance=attendance,
+        )
+
+        for manager in status_patches:
+            manager.start()
+        try:
+            status_response = CheckingStatus.as_view()(status_request)
+        finally:
+            for manager in reversed(status_patches):
+                manager.stop()
+
+        self.assertEqual(status_response.status_code, 200)
+        self.assertEqual(status_response.data["late_by"], "165")
+
+    def test_clock_out_response_early_out_ignores_checkout_seconds(self):
+        attendance = SimpleNamespace(
+            attendance_clock_in=time(8, 0),
+            attendance_clock_out=time(16, 44, 59),
+            attendance_clock_in_date=self.attendance_date,
+            attendance_clock_out_date=self.attendance_date,
+            in_attendance_status="VALID",
+            out_attendance_status="VALID",
+            in_attendance_reject_reason_code=None,
+            out_attendance_reject_reason_code=None,
+            in_related_work_type_request_id=None,
+            out_related_work_type_request_id=None,
+            reconciliation_source="mobile",
+            attendance_worked_hour="08:44",
+        )
+        request = self._clock_request("/api/attendance/clock-out/", image=False, location=False)
+        update_punch_history = MagicMock()
+        clock_out_attendance = MagicMock()
+        patches = [
+            patch("horilla_api.api_views.attendance.views._api_now", return_value=self.dt_now.replace(hour=16, minute=44, second=59)),
+            patch("horilla_api.api_views.attendance.views._parse_location_payload", return_value=None),
+            patch(
+                "horilla_api.api_views.attendance.views.employee_exists",
+                return_value=(self.employee, SimpleNamespace(shift_id="SHIFT-A")),
+            ),
+            patch(
+                "horilla_api.api_views.attendance.views.create_mobile_punch_history",
+                return_value=SimpleNamespace(id=301),
+            ),
+            patch("horilla_api.api_views.attendance.views.evaluate_attendance_access", return_value=self.access),
+            patch("horilla_api.api_views.attendance.views._api_today", return_value=self.attendance_date),
+            patch(
+                "horilla_api.api_views.attendance.views._api_resolve_attendance_date_and_day",
+                return_value=(self.attendance_date, self.day, "16:44", 8 * 3600, 17 * 3600, "16:44", 16 * 3600 + 44 * 60 + 59),
+            ),
+            patch("horilla_api.api_views.attendance.views.cio.get_shift_rules", return_value=self.shift_rules),
+            patch("horilla_api.api_views.attendance.views.auto_reject_wfa_waiting_for_date"),
+            patch(
+                "horilla_api.api_views.attendance.views._resolve_effective_work_type",
+                side_effect=[(AttendanceWorkMode.WFO, "schedule", None), (AttendanceWorkMode.WFO, "schedule", None)],
+            ),
+            patch("horilla_api.api_views.attendance.views._is_punch_allowed", return_value=True),
+            patch("horilla_api.api_views.attendance.views._requires_proof", return_value=False),
+            patch("horilla_api.api_views.attendance.views.Attendance.objects.filter", return_value=_FirstSequence(attendance, attendance)),
+            patch("horilla_api.api_views.attendance.views.AttendanceActivity.objects.filter", return_value=_FirstSequence(None)),
+            patch("horilla_api.api_views.attendance.views.clock_out_attendance_and_activity", clock_out_attendance),
+            patch("horilla_api.api_views.attendance.views.reconcile_attendance_punches"),
+            patch("horilla_api.api_views.attendance.views.update_punch_history", update_punch_history),
+            patch(
+                "horilla_api.api_views.attendance.views._build_mobile_header_note_context",
+                return_value={"header_note_effective_duration_seconds": None},
+            ),
+        ]
+        for manager in patches:
+            manager.start()
+        try:
+            response = ClockOutAPIView().post(request)
+        finally:
+            for manager in reversed(patches):
+                manager.stop()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data["checked_out_early"])
+        self.assertEqual(response.data["checked_out_early_by"], "15")
+
     def test_checking_status_with_existing_check_in_does_not_crash(self):
         attendance = SimpleNamespace(
             attendance_clock_in=time(8, 0),
