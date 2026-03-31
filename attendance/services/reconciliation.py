@@ -30,6 +30,7 @@ from attendance.services.canonical_attendance_policy import (
     compute_attendance_metrics,
     compute_worked_seconds,
     seconds_to_decimal_minutes,
+    truncate_datetime_to_minute,
 )
 from base.models import EmployeeShiftDay
 
@@ -612,6 +613,9 @@ def _calculate_late_early(
     late_minutes = 0
     early_minutes = 0
     credit_seconds = 0
+
+    final_in_dt = truncate_datetime_to_minute(final_in_dt)
+    final_out_dt = truncate_datetime_to_minute(final_out_dt)
 
     if final_in_dt and late_reference_dt:
         if final_in_dt < late_reference_dt and grace_clock_in_type == "before_after":
