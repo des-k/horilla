@@ -146,7 +146,7 @@ def build_mobile_header_state(payload: Mapping[str, Any]) -> dict[str, str | Non
             detail_message=unavailable_detail,
         ).as_payload()
 
-    if missing_check_in or invalid_check_in:
+    if missing_check_in:
         return MobileAttendanceHeaderState(
             code=MISSING_CHECK_IN,
             message=_missing_check_in_early_header(has_check_out, checked_out_early),
