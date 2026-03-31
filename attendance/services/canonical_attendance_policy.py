@@ -485,9 +485,20 @@ def compute_worked_seconds(
     *,
     final_in_dt: Optional[datetime],
     final_out_dt: Optional[datetime],
+    window_start_dt: Optional[datetime] = None,
+    window_end_dt: Optional[datetime] = None,
 ) -> int:
     minute_final_in_dt = truncate_datetime_to_minute(final_in_dt)
     minute_final_out_dt = truncate_datetime_to_minute(final_out_dt)
+
+    if minute_final_in_dt is None or minute_final_out_dt is None:
+        return 0
+
+    if window_start_dt is not None:
+        minute_final_in_dt = max(minute_final_in_dt, truncate_datetime_to_minute(window_start_dt))
+    if window_end_dt is not None:
+        minute_final_out_dt = min(minute_final_out_dt, truncate_datetime_to_minute(window_end_dt))
+
     return net_duration_excluding_break(
         minute_final_in_dt,
         minute_final_out_dt,
@@ -644,22 +655,16 @@ def compute_attendance_metrics(
         flex_seconds=grace_seconds,
         force_nominal=use_nominal_policy_end_for_early_out,
     )
-    # First-half leave has a special split behavior in the existing contract:
-    # - when both punches are present, the user may need to fulfill the reduced
-    #   minimum working hours from the actual check-in time, so early-out should
-    #   compare against the dynamic earliest checkout;
-    # - when check-out is missing, tests still expect the nominal half-day end,
-    #   not an extended dynamic target.
-    if (
-        policy.kind == "first_half"
-        and minute_final_in_dt is not None
-        and minute_final_out_dt is not None
-        and earliest_checkout_dt is not None
-        and not use_nominal_policy_end_for_early_out
-    ):
-        reference_end_dt = earliest_checkout_dt
 
-    worked_seconds = compute_worked_seconds(policy, final_in_dt=final_in_dt, final_out_dt=final_out_dt)
+    worked_window_start_dt = effective_start_dt or policy.late_reference_dt or policy.shift_start_dt
+    worked_window_end_dt = reference_end_dt or policy.nominal_policy_end_dt or policy.shift_end_dt
+    worked_seconds = compute_worked_seconds(
+        policy,
+        final_in_dt=final_in_dt,
+        final_out_dt=final_out_dt,
+        window_start_dt=worked_window_start_dt,
+        window_end_dt=worked_window_end_dt,
+    )
     half_minimum_seconds = _half_minimum_seconds(policy)
 
     if final_in_dt is None and final_out_dt is None:
@@ -695,15 +700,8 @@ def compute_attendance_metrics(
             early_out_seconds = _cap_early_out_seconds(policy, max(0, int(policy.maximum_early_out_seconds or half_minimum_seconds)))
     else:
         late_seconds = _calculate_late_seconds(policy, final_in_dt=minute_final_in_dt, grace_seconds=grace_seconds)
-        early_out_seconds = _calculate_early_out_seconds(
-            policy,
-            final_in_dt=final_in_dt,
-            final_out_dt=final_out_dt,
-            reference_end_dt=reference_end_dt,
-            early_out_grace_seconds=early_out_grace_seconds,
-        )
-        if policy.kind not in {"first_half", "second_half"}:
-            early_out_seconds = _cap_early_out_seconds(policy, early_out_seconds)
+        early_out_seconds = max(0, int(policy.required_work_seconds or 0) - max(0, int(late_seconds or 0)) - max(0, int(worked_seconds or 0)))
+        early_out_seconds = max(0, early_out_seconds - max(0, int(early_out_grace_seconds or 0)))
 
     return AttendanceMetrics(
         worked_seconds=max(0, int(worked_seconds or 0)),
