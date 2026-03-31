@@ -523,35 +523,30 @@ def _canonical_row_from_attendance(
     note = (getattr(best_att, "reconciliation_note", None) or "").strip()
     source = (getattr(best_att, "reconciliation_source", None) or "").strip()
     explicit_canonical = bool(note or source)
-
-    # Trust the persisted Attendance row immediately when it carries an explicit
-    # canonical outcome (note/source), or when a full-day leave attendance row is
-    # intentionally kept even though the date is also covered by leave.
-    #
-    # Otherwise fall back to the shared monthly-recap session resolver so recap /
-    # export / PDF stay resilient against older rows whose Attendance shell exists
-    # but whose final session details still need to be derived from activity/raw
-    # state for the day. This also avoids showing punches on holiday / no-schedule
-    # days when those rows should be treated as OFF in the recap output.
-    if not explicit_canonical and off_kind != "leave":
-        return None
+    canonical_tzinfo = (
+        getattr(shift_start_dt, "tzinfo", None)
+        or getattr(shift_end_dt, "tzinfo", None)
+        or timezone.get_current_timezone()
+    )
 
     final_in_dt = _normalize_dt(
         _combine_dt(
             getattr(best_att, "attendance_clock_in_date", None),
             getattr(best_att, "attendance_clock_in", None),
             attendance_date,
-        )
+        ),
+        canonical_tzinfo,
     )
     final_out_dt = _normalize_dt(
         _combine_dt(
             getattr(best_att, "attendance_clock_out_date", None),
             getattr(best_att, "attendance_clock_out", None),
             attendance_date,
-        )
+        ),
+        canonical_tzinfo,
     )
 
-    if (final_in_dt is None) != (final_out_dt is None):
+    if not explicit_canonical and off_kind != "leave" and final_in_dt is None and final_out_dt is None:
         return None
 
     display_in_mode = _session_mode(best_att, "IN") or _attendance_level_mode(best_att) or AttendanceWorkMode.WFO
@@ -1353,6 +1348,7 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
 
     rows: List[MonthlyRecapRow] = []
     i = 1
+    tzinfo = timezone.get_current_timezone()
     for d in _iter_month_dates(first_day, last_day):
         holiday_obj = is_holiday(d)
         leave_info = leave_coverage.get(
