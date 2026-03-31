@@ -241,8 +241,8 @@ class AttendanceActivity(HorillaModel):
     )
     reconciliation_source = models.CharField(max_length=64, null=True, blank=True, verbose_name=_("Final Source"))
     reconciliation_note = models.CharField(max_length=255, null=True, blank=True, verbose_name=_("Final Note"))
-    late_minutes = models.PositiveIntegerField(default=0, verbose_name=_("Late Minutes"))
-    early_out_minutes = models.PositiveIntegerField(default=0, verbose_name=_("Early Out Minutes"))
+    late_minutes = models.DecimalField(max_digits=8, decimal_places=2, default=0, verbose_name=_("Late Minutes"))
+    early_out_minutes = models.DecimalField(max_digits=8, decimal_places=2, default=0, verbose_name=_("Early Out Minutes"))
 
     class Meta:
         """
@@ -1090,8 +1090,8 @@ class Attendance(HorillaModel):
     )
     reconciliation_source = models.CharField(max_length=64, null=True, blank=True, verbose_name=_("Final Source"))
     reconciliation_note = models.CharField(max_length=255, null=True, blank=True, verbose_name=_("Final Note"))
-    late_minutes = models.PositiveIntegerField(default=0, verbose_name=_("Late Minutes"))
-    early_out_minutes = models.PositiveIntegerField(default=0, verbose_name=_("Early Out Minutes"))
+    late_minutes = models.DecimalField(max_digits=8, decimal_places=2, default=0, verbose_name=_("Late Minutes"))
+    early_out_minutes = models.DecimalField(max_digits=8, decimal_places=2, default=0, verbose_name=_("Early Out Minutes"))
 
     class Meta:
         """
