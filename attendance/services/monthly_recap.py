@@ -1651,6 +1651,7 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
             grace_seconds=grace_in_sec,
             clock_in_type=grace_clock_in_type,
             is_presence_only=False,
+            early_out_grace_seconds=grace_out_sec,
         )
         earliest_check_out_dt = metrics.earliest_checkout_dt
         late_sec = 0.0 if eff_in_mode == AttendanceWorkMode.ON_DUTY else float(metrics.late_seconds)
