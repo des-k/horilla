@@ -264,8 +264,8 @@
               <div class="oh-sticky-table__th">Check In</div>
               <div class="oh-sticky-table__th">Check Out</div>
               <div class="oh-sticky-table__th">Work Type</div>
-              <div class="oh-sticky-table__th">Late</div>
-              <div class="oh-sticky-table__th">Early Out</div>
+              <div class="oh-sticky-table__th">Late (Minutes)</div>
+              <div class="oh-sticky-table__th">Early Out (Minutes)</div>
               <div class="oh-sticky-table__th">Note</div>
             </div>
           </div>
@@ -279,8 +279,8 @@
                 <div class="oh-sticky-table__td timeformat_changer">{{ r.check_in }}</div>
                 <div class="oh-sticky-table__td timeformat_changer">{{ r.check_out }}</div>
                 <div class="oh-sticky-table__td">{{ r.work_type|safe }}</div>
-                <div class="oh-sticky-table__td">{{ r.late }}</div>
-                <div class="oh-sticky-table__td">{{ r.early_out }}</div>
+                <div class="oh-sticky-table__td">{{ r.late_minutes|default:0 }}</div>
+                <div class="oh-sticky-table__td">{{ r.early_out_minutes|default:0 }}</div>
                 <div class="oh-sticky-table__td">{{ r.note }}</div>
               </div>
             {% empty %}
