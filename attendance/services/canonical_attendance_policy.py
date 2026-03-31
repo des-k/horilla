@@ -68,6 +68,12 @@ def coerce_non_negative_decimal(value) -> Decimal:
     return parsed if parsed >= 0 else Decimal("0")
 
 
+def truncate_datetime_to_minute(value: Optional[datetime]) -> Optional[datetime]:
+    if value is None:
+        return None
+    return value.replace(second=0, microsecond=0)
+
+
 def seconds_to_decimal_minutes(total_seconds) -> Decimal:
     seconds = coerce_non_negative_decimal(total_seconds)
     if seconds == 0:
@@ -354,6 +360,8 @@ def resolve_effective_check_in_and_earliest_checkout(
     if base_dt is None:
         return None, None, True
 
+    actual_check_in_dt = truncate_datetime_to_minute(actual_check_in_dt)
+
     if actual_check_in_dt is None:
         earliest_checkout_dt = add_net_work_duration(
             base_dt,
@@ -456,6 +464,7 @@ def compute_mobile_status_metrics(
     clock_in_type: Optional[str],
     flex_seconds: Optional[int],
 ) -> tuple[Optional[datetime], Optional[datetime], bool, Optional[datetime], Optional[datetime]]:
+    actual_check_in_dt = truncate_datetime_to_minute(actual_check_in_dt)
     effective_start_dt, dynamic_earliest_checkout_dt, valid_check_in = resolve_effective_check_in_and_earliest_checkout(
         policy,
         actual_check_in_dt=actual_check_in_dt,
@@ -481,6 +490,7 @@ def _calculate_late_seconds(
     final_in_dt: Optional[datetime],
     grace_seconds: int,
 ) -> int:
+    final_in_dt = truncate_datetime_to_minute(final_in_dt)
     if final_in_dt is None:
         return max(0, int(policy.maximum_late_seconds or 0))
     late_seconds = net_duration_excluding_break(
@@ -504,6 +514,8 @@ def _calculate_early_out_seconds(
     earliest_checkout_dt: Optional[datetime],
     use_nominal_policy_end: bool = False,
 ) -> int:
+    final_in_dt = truncate_datetime_to_minute(final_in_dt)
+    final_out_dt = truncate_datetime_to_minute(final_out_dt)
     if final_in_dt is None and final_out_dt is None:
         return 0
     if final_out_dt is None:
@@ -553,9 +565,12 @@ def compute_attendance_metrics(
             valid_check_in=True,
         )
 
+    minute_final_in_dt = truncate_datetime_to_minute(final_in_dt)
+    minute_final_out_dt = truncate_datetime_to_minute(final_out_dt)
+
     effective_start_dt, earliest_checkout_dt, valid_check_in = resolve_effective_check_in_and_earliest_checkout(
         policy,
-        actual_check_in_dt=final_in_dt,
+        actual_check_in_dt=minute_final_in_dt,
         clock_in_type=clock_in_type,
         flex_seconds=grace_seconds,
     )
@@ -572,49 +587,49 @@ def compute_attendance_metrics(
             early_out_seconds = half_minimum_seconds
     elif final_in_dt is None and final_out_dt is not None:
         if policy.kind in {"first_half", "second_half"}:
-            late_seconds = _calculate_late_seconds(policy, final_in_dt=final_in_dt, grace_seconds=grace_seconds)
+            late_seconds = _calculate_late_seconds(policy, final_in_dt=minute_final_in_dt, grace_seconds=grace_seconds)
             early_out_seconds = _calculate_early_out_seconds(
                 policy,
-                final_in_dt=final_in_dt,
-                final_out_dt=final_out_dt,
+                final_in_dt=minute_final_in_dt,
+                final_out_dt=minute_final_out_dt,
                 earliest_checkout_dt=earliest_checkout_dt,
                 use_nominal_policy_end=use_nominal_policy_end_for_early_out,
             )
         else:
             evidence_before_out = net_duration_excluding_break(
                 policy.shift_start_dt,
-                final_out_dt,
+                minute_final_out_dt,
                 break_start_dt=policy.break_start_dt,
                 break_end_dt=policy.break_end_dt,
             )
             late_seconds = min(half_minimum_seconds, evidence_before_out)
             early_out_seconds = net_duration_excluding_break(
-                final_out_dt,
+                minute_final_out_dt,
                 policy.nominal_policy_end_dt,
                 break_start_dt=policy.break_start_dt,
                 break_end_dt=policy.break_end_dt,
             )
     elif final_in_dt is not None and final_out_dt is None:
         if policy.kind in {"first_half", "second_half"}:
-            late_seconds = _calculate_late_seconds(policy, final_in_dt=final_in_dt, grace_seconds=grace_seconds)
+            late_seconds = _calculate_late_seconds(policy, final_in_dt=minute_final_in_dt, grace_seconds=grace_seconds)
             early_out_seconds = _calculate_early_out_seconds(
                 policy,
-                final_in_dt=final_in_dt,
-                final_out_dt=final_out_dt,
+                final_in_dt=minute_final_in_dt,
+                final_out_dt=minute_final_out_dt,
                 earliest_checkout_dt=earliest_checkout_dt,
                 use_nominal_policy_end=use_nominal_policy_end_for_early_out,
             )
         else:
-            late_seconds = _calculate_late_seconds(policy, final_in_dt=final_in_dt, grace_seconds=grace_seconds)
+            late_seconds = _calculate_late_seconds(policy, final_in_dt=minute_final_in_dt, grace_seconds=grace_seconds)
             evidence_after_in = net_duration_excluding_break(
-                final_in_dt,
+                minute_final_in_dt,
                 policy.nominal_policy_end_dt,
                 break_start_dt=policy.break_start_dt,
                 break_end_dt=policy.break_end_dt,
             )
             early_out_seconds = min(half_minimum_seconds, evidence_after_in)
     else:
-        late_seconds = _calculate_late_seconds(policy, final_in_dt=final_in_dt, grace_seconds=grace_seconds)
+        late_seconds = _calculate_late_seconds(policy, final_in_dt=minute_final_in_dt, grace_seconds=grace_seconds)
         early_out_seconds = _calculate_early_out_seconds(
             policy,
             final_in_dt=final_in_dt,
