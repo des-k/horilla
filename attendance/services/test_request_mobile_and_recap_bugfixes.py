@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from datetime import date, time
+from datetime import date, datetime, time
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import SimpleTestCase
+from django.utils import timezone
 from rest_framework.test import APIRequestFactory, force_authenticate
 
 from attendance.services.attachment_validation import validate_uploaded_files
@@ -167,7 +168,10 @@ class AttachmentValidationRegressionTests(SimpleTestCase):
 
 
 class MonthlyRecapIncompleteAttendanceRegressionTests(SimpleTestCase):
-    def test_incomplete_missing_checkout_does_not_trust_persisted_zero_minutes(self):
+    def _dt(self, hour: int, minute: int) -> datetime:
+        return timezone.make_aware(datetime(2026, 3, 26, hour, minute), timezone.get_current_timezone())
+
+    def test_incomplete_missing_checkout_uses_canonical_missing_metrics(self):
         best_att = SimpleNamespace(
             reconciliation_note="Missing Check Out",
             reconciliation_source="Normal",
@@ -186,10 +190,20 @@ class MonthlyRecapIncompleteAttendanceRegressionTests(SimpleTestCase):
             shift_information="09:00 - 18:00",
             language="en",
             is_off=False,
+            shift_start_dt=self._dt(9, 0),
+            shift_end_dt=self._dt(18, 0),
+            minimum_hour="08:00",
         )
-        self.assertIsNone(row)
+        self.assertIsNotNone(row)
+        self.assertEqual(row.check_in, "08:00")
+        self.assertEqual(row.check_out, "-")
+        self.assertIn("Missing Check Out", row.note)
+        self.assertEqual(row.late_minutes, 0)
+        self.assertEqual(row.early_out_minutes, 240)
+        self.assertEqual(row.late, "00:00")
+        self.assertEqual(row.early_out, "04:00")
 
-    def test_incomplete_missing_checkin_does_not_trust_persisted_zero_minutes(self):
+    def test_incomplete_missing_checkin_uses_canonical_missing_metrics(self):
         best_att = SimpleNamespace(
             reconciliation_note="Missing Check In",
             reconciliation_source="Normal",
@@ -208,5 +222,15 @@ class MonthlyRecapIncompleteAttendanceRegressionTests(SimpleTestCase):
             shift_information="09:00 - 18:00",
             language="en",
             is_off=False,
+            shift_start_dt=self._dt(9, 0),
+            shift_end_dt=self._dt(18, 0),
+            minimum_hour="08:00",
         )
-        self.assertIsNone(row)
+        self.assertIsNotNone(row)
+        self.assertEqual(row.check_in, "-")
+        self.assertEqual(row.check_out, "18:00")
+        self.assertIn("Missing Check In", row.note)
+        self.assertEqual(row.late_minutes, 240)
+        self.assertEqual(row.early_out_minutes, 0)
+        self.assertEqual(row.late, "04:00")
+        self.assertEqual(row.early_out, "00:00")
