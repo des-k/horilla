@@ -3560,6 +3560,30 @@ class CheckingStatus(APIView):
         worked_minutes = max(0, int(worked_seconds // 60))
         worked_hours = f"{worked_minutes//60:02d}:{worked_minutes%60:02d}"
 
+        metrics_for_note = None
+        note_in_dt = None
+        note_out_dt = None
+        if attendance and not is_presensi_only:
+            try:
+                note_in_dt = in_dt
+                if note_in_dt is None and clock_in_t:
+                    in_date = getattr(attendance, "attendance_clock_in_date", None) or attendance_date
+                    note_in_dt = _coerce_datetime_like(datetime.combine(in_date, clock_in_t), dt_now)
+                if clock_out_t and not out_rejected:
+                    out_date = getattr(attendance, "attendance_clock_out_date", None) or attendance_date
+                    note_out_dt = _coerce_datetime_like(datetime.combine(out_date, clock_out_t), dt_now)
+                metrics_for_note = compute_attendance_metrics(
+                    policy_for_note,
+                    final_in_dt=note_in_dt,
+                    final_out_dt=note_out_dt,
+                    grace_seconds=grace_seconds,
+                    clock_in_type=clock_in_type,
+                    is_presence_only=False,
+                    early_out_grace_seconds=grace_out_sec,
+                )
+            except Exception:
+                metrics_for_note = None
+
         # Action permissions
         in_allowed = _is_punch_allowed(in_mode, in_req, in_source)
         out_allowed = _is_punch_allowed(out_mode, out_req, out_source)
@@ -3726,23 +3750,11 @@ class CheckingStatus(APIView):
             except Exception:
                 is_night_shift = False
 
-            # Late-by is calculated from scheduled start + grace time
-            if clock_in_t and start_time_sec:
+            if metrics_for_note is not None and clock_in_t:
                 try:
-                    in_date = getattr(attendance, "attendance_clock_in_date", None) or attendance_date
-                    in_dt = _truncate_dt_to_minute(_coerce_datetime_like(datetime.combine(in_date, clock_in_t), dt_now))
-
-                    planned_in_hhmm = _sec_to_hhmm(start_time_sec)
-                    planned_in_time = datetime.strptime(planned_in_hhmm, "%H:%M").time()
-                    planned_in_dt = _coerce_datetime_like(
-                        datetime.combine(attendance_date, planned_in_time), dt_now
-                    )
-
-                    grace_dt = planned_in_dt + timedelta(seconds=int(grace_seconds or 0))
-                    if in_dt and grace_dt and in_dt > grace_dt:
-                        late_s = int((in_dt - grace_dt).total_seconds())
-                        if late_s > 0:
-                            late_by_hhmm = _seconds_to_minute_display(late_s)
+                    late_s = int(getattr(metrics_for_note, "late_seconds", 0) or 0)
+                    if late_s > 0:
+                        late_by_hhmm = _seconds_to_minute_display(late_s)
                 except Exception:
                     late_by_hhmm = None
 
@@ -3758,17 +3770,12 @@ class CheckingStatus(APIView):
                 except Exception:
                     pass
 
-            # Early check-out is based on the mobile earliest check-out truth.
-            if clock_in_t and clock_out_t and earliest_check_out_dt:
+            if metrics_for_note is not None and clock_out_t and not out_rejected:
                 try:
-                    out_date = getattr(attendance, "attendance_clock_out_date", None) or attendance_date
-                    out_dt = _coerce_datetime_like(datetime.combine(out_date, clock_out_t), dt_now)
-
-                    if out_dt and earliest_check_out_dt and out_dt < earliest_check_out_dt:
+                    early_s = int(getattr(metrics_for_note, "early_out_seconds", 0) or 0)
+                    if early_s > 0:
                         checked_out_early = True
-                        early_s = int((earliest_check_out_dt - out_dt).total_seconds())
-                        if early_s > 0:
-                            checked_out_early_by_hhmm = _seconds_to_minute_display(early_s)
+                        checked_out_early_by_hhmm = _seconds_to_minute_display(early_s)
                 except Exception:
                     checked_out_early = False
                     checked_out_early_by_hhmm = None
