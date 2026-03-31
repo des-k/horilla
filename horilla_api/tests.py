@@ -419,6 +419,47 @@ class MobileAttendanceActionParityTests(SimpleTestCase):
         self.assertFalse(status_response.data["can_clock_in"])
         self.assertFalse(status_response.data["can_clock_out"])
 
+    def test_checking_status_with_late_existing_check_in_is_not_marked_missing(self):
+        attendance = SimpleNamespace(
+            attendance_clock_in=time(10, 15),
+            attendance_clock_out=None,
+            attendance_clock_in_date=self.attendance_date,
+            attendance_clock_out_date=None,
+            in_attendance_status="VALID",
+            out_attendance_status=None,
+            in_attendance_reject_reason_code=None,
+            out_attendance_reject_reason_code=None,
+            in_related_work_type_request_id=None,
+            out_related_work_type_request_id=None,
+            reconciliation_source="mobile",
+            attendance_worked_hour="00:05",
+        )
+        status_request = self._status_request()
+        status_patches = self._status_patches(
+            modes=[(AttendanceWorkMode.WFO, "schedule", None), (AttendanceWorkMode.WFO, "schedule", None)],
+            allowed=[True, True],
+            attendance=attendance,
+        )
+        status_patches.append(
+            patch(
+                "horilla_api.api_views.attendance.views._compute_mobile_effective_start_and_earliest_checkout",
+                return_value=(self.dt_now.replace(hour=10, minute=15), self.dt_now.replace(hour=17, minute=0), False),
+            )
+        )
+
+        for manager in status_patches:
+            manager.start()
+        try:
+            status_response = CheckingStatus.as_view()(status_request)
+        finally:
+            for manager in reversed(status_patches):
+                manager.stop()
+
+        self.assertEqual(status_response.status_code, 200)
+        self.assertFalse(status_response.data["missing_check_in"])
+        self.assertTrue(status_response.data["invalid_check_in"])
+        self.assertEqual(status_response.data["first_check_in"], "10:15 AM")
+
     def test_checking_status_matches_clock_in_rejection_for_blocked_mobile_mode(self):
         status_request = self._status_request()
         status_patches = self._status_patches(
