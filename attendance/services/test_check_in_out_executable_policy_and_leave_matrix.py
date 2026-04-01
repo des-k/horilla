@@ -229,7 +229,7 @@ class CheckInOutExecutablePolicyAndLeaveMatrixTests(SimpleTestCase):
         self.assertEqual(first_ctx.kind, "first_half")
         self.assertEqual(first_ctx.minimum_hour, "04:00")
         self.assertEqual(first_ctx.late_reference_dt, timezone.make_aware(datetime(2026, 3, 19, 13, 0)))
-        self.assertEqual(first_ctx.early_reference_dt, timezone.make_aware(datetime(2026, 3, 19, 17, 0)))
+        self.assertEqual(first_ctx.early_reference_dt, timezone.make_aware(datetime(2026, 3, 19, 17, 30)))
 
         self.assertEqual(second_ctx.kind, "second_half")
         self.assertEqual(second_ctx.minimum_hour, "04:00")
