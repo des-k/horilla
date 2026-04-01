@@ -50,7 +50,6 @@ class ShiftSchedulePolicyFormTests(SimpleTestCase):
             enable_first_half_leave_rule=False,
             first_half_leave_latest_check_in_time=time(13, 0),
             enable_second_half_leave_rule=False,
-            second_half_leave_earliest_check_out_time=time(12, 0),
             is_auto_punch_out_enabled=True,
             auto_punch_out_time=time(18, 0),
         )
