@@ -46,7 +46,6 @@ class LeaveLifecycleFullChainEndpointTests(AttendanceApiIntegrationMixin, APITes
             minimum_working_hour="08:00",
             is_night_shift=False,
             first_half_latest_check_in_time=time(13, 0),
-            second_half_earliest_check_out_time=time(12, 0),
         )
         self.shift_ctx = self.patch_reconciliation_shift_rules(
             target_date=self.target_date,
