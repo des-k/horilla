@@ -319,12 +319,7 @@ def build_attendance_policy(
             shift_start_dt=shift_start_dt,
             shift_end_dt=shift_end_dt,
         ) or shift_end_dt
-        required_work_seconds = net_duration_excluding_break(
-            late_reference_dt,
-            nominal_policy_end_dt,
-            break_start_dt=break_start_dt,
-            break_end_dt=break_end_dt,
-        )
+        required_work_seconds = max(0, int(Decimal(int(normal_required_seconds or 0)) / Decimal("2")))
         maximum_late_seconds = required_work_seconds
         maximum_early_out_seconds = required_work_seconds
         early_checkout_minutes = _resolve_half_day_early_checkout_minutes(schedule, leave_kind)
@@ -339,12 +334,7 @@ def build_attendance_policy(
             shift_start_dt=shift_start_dt,
             shift_end_dt=shift_end_dt,
         ) or shift_end_dt
-        required_work_seconds = net_duration_excluding_break(
-            shift_start_dt,
-            nominal_policy_end_dt,
-            break_start_dt=break_start_dt,
-            break_end_dt=break_end_dt,
-        )
+        required_work_seconds = max(0, int(Decimal(int(normal_required_seconds or 0)) / Decimal("2")))
         maximum_late_seconds = required_work_seconds
         maximum_early_out_seconds = required_work_seconds
         early_checkout_minutes = _resolve_half_day_early_checkout_minutes(schedule, leave_kind)
