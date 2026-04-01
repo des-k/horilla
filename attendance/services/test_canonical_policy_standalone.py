@@ -77,7 +77,6 @@ class CanonicalPolicyStandaloneTests(unittest.TestCase):
             "break_start_time": None,
             "break_end_time": None,
             "first_half_leave_latest_check_in_time": time(13, 0),
-            "first_half_leave_new_shift_end_time": time(17, 0),
             "first_half_leave_early_checkout_minutes": 30,
             "second_half_leave_earliest_check_out_time": time(12, 0),
             "second_half_leave_early_checkout_minutes": 30,
@@ -222,7 +221,6 @@ class CanonicalPolicyStandaloneTests(unittest.TestCase):
                 break_start_time=time(12, 0),
                 break_end_time=time(13, 0),
                 first_half_leave_latest_check_in_time=time(13, 0),
-                first_half_leave_new_shift_end_time=time(18, 0),
             ),
             shift_start_dt=self._dt(8, 0),
             shift_end_dt=self._dt(17, 0),
@@ -237,7 +235,7 @@ class CanonicalPolicyStandaloneTests(unittest.TestCase):
             grace_seconds=0,
             clock_in_type="after",
         )
-        self.assertEqual(metrics.early_out_seconds, (4 * 3600) + (30 * 60))
+        self.assertEqual(metrics.early_out_seconds, 3 * 3600)
 
     def test_second_half_before_after_can_pull_policy_end_forward(self):
         policy = policy_module.build_attendance_policy(
