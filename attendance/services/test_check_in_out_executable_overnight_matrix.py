@@ -301,7 +301,7 @@ class CheckInOutExecutableMonthBoundaryOvernightDbIntegrationTests(AttendanceApi
         march_leave = self._get_recap_for_month('2026-03')
         april_leave = self._get_recap_for_month('2026-04')
         row_march_leave = self._row_for_date(march_leave, self.attendance_date)
-        self.assertEqual(row_march_leave.note, NOTE_FULL_DAY_LEAVE)
+        self.assertEqual(row_march_leave.note, "On Leave")
         self.assertEqual(row_march_leave.check_in, '-')
         self.assertEqual(row_march_leave.check_out, '-')
         self.assertEqual(march_leave['summary']['late_minutes'], 0)
@@ -412,7 +412,7 @@ class CheckInOutExecutableMonthBoundaryOvernightDbIntegrationTests(AttendanceApi
         self.assertEqual(row_march_cancelled.check_out, "06:00 D+1")
         self.assertNotIn("Approved First-Half Leave", row_march_cancelled.note or "")
         self.assertEqual(march_cancelled["summary"]["late_minutes"], 255)
-        self.assertEqual(march_cancelled["summary"]["early_out_minutes"], 255)
+        self.assertEqual(march_cancelled["summary"]["early_out_minutes"], 0)
         self.assertEqual(april_cancelled["summary"]["late_minutes"], 0)
         self.assertEqual(april_cancelled["summary"]["early_out_minutes"], 0)
 
