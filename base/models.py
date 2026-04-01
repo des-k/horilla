@@ -95,10 +95,6 @@ def default_second_half_leave_earliest_check_out_time():
     return datetime.strptime("12:00", "%H:%M").time()
 
 
-def default_first_half_leave_new_shift_end_time():
-    """Optional first-half leave shift end override."""
-    return None
-
 
 def _normalize_hh_mm_ss_to_secs(value: str) -> tuple[str, int]:
     """
@@ -734,13 +730,6 @@ class EmployeeShiftSchedule(HorillaModel):
         verbose_name=_("First Half Leave Latest Check-In Time"),
         help_text=_("Employees who take first half leave must check in no later than this time."),
     )
-    first_half_leave_new_shift_end_time = models.TimeField(
-        null=True,
-        blank=True,
-        default=default_first_half_leave_new_shift_end_time,
-        verbose_name=_("First Half Leave New Shift End Time"),
-        help_text=_("Optional first-half leave specific shift end time for this shift day."),
-    )
     first_half_leave_early_checkout_minutes = models.IntegerField(
         default=30,
         verbose_name=_("First Half Leave Early Check Out Minutes"),
@@ -1035,24 +1024,6 @@ class EmployeeShiftSchedule(HorillaModel):
                 value=self.first_half_leave_latest_check_in_time,
             )
 
-        if self.first_half_leave_new_shift_end_time:
-            self._validate_time_within_shift_span(
-                field_name="first_half_leave_new_shift_end_time",
-                value=self.first_half_leave_new_shift_end_time,
-                message=_("First half leave new shift end time must fall within the configured shift span for this day."),
-            )
-
-        if (
-            self.first_half_leave_latest_check_in_time
-            and self.first_half_leave_new_shift_end_time
-        ):
-            self._validate_time_order(
-                start_field_name="first_half_leave_latest_check_in_time",
-                start_value=self.first_half_leave_latest_check_in_time,
-                end_field_name="first_half_leave_new_shift_end_time",
-                end_value=self.first_half_leave_new_shift_end_time,
-                message=_("First half leave new shift end time must be later than the first half leave latest check-in time."),
-            )
 
         if (
             self.first_half_leave_early_checkout_minutes is not None
