@@ -177,10 +177,6 @@
                                 {% if schedule.first_half_leave_latest_check_in_time %}{{ schedule.first_half_leave_latest_check_in_time|time:"H:i" }}{% else %}-{% endif %}
                               </span>
 
-                              <span>
-                                <b>{% trans "1st Half New End" %}:</b>
-                                {% if schedule.first_half_leave_new_shift_end_time %}{{ schedule.first_half_leave_new_shift_end_time|time:"H:i" }}{% else %}-{% endif %}
-                              </span>
 
                               <span>
                                 <b>{% trans "1st Half Early OUT Minutes" %}:</b>
