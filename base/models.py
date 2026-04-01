@@ -90,11 +90,6 @@ def default_first_half_leave_latest_check_in_time():
     return datetime.strptime("13:00", "%H:%M").time()
 
 
-def default_second_half_leave_earliest_check_out_time():
-    """Default earliest check-out cutoff for second-half leave."""
-    return datetime.strptime("12:00", "%H:%M").time()
-
-
 
 def _normalize_hh_mm_ss_to_secs(value: str) -> tuple[str, int]:
     """
@@ -740,14 +735,7 @@ class EmployeeShiftSchedule(HorillaModel):
     enable_second_half_leave_rule = models.BooleanField(
         default=True,
         verbose_name=_("Enable Second Half Leave Attendance Rule"),
-        help_text=_("Apply a dedicated earliest check-out threshold when second half leave is approved for this shift day."),
-    )
-    second_half_leave_earliest_check_out_time = models.TimeField(
-        null=True,
-        blank=True,
-        default=default_second_half_leave_earliest_check_out_time,
-        verbose_name=_("Second Half Leave Earliest Check-Out Time"),
-        help_text=_("Employees who take second half leave must not check out before this time."),
+        help_text=_("Apply a dynamic second-half leave attendance policy based on shift time, flexibility, breaks, and minimum working hour."),
     )
     second_half_leave_early_checkout_minutes = models.IntegerField(
         default=30,
@@ -1035,21 +1023,6 @@ class EmployeeShiftSchedule(HorillaModel):
                         "First half leave early check-out minutes must be zero or greater."
                     )
                 }
-            )
-
-        if self.enable_second_half_leave_rule and not self.second_half_leave_earliest_check_out_time:
-            raise ValidationError(
-                {
-                    "second_half_leave_earliest_check_out_time": _(
-                        "Second Half Leave Earliest Check-Out Time is required when second half leave attendance rule is enabled."
-                    )
-                }
-            )
-
-        if self.enable_second_half_leave_rule and self.second_half_leave_earliest_check_out_time:
-            self._validate_half_day_threshold(
-                field_name="second_half_leave_earliest_check_out_time",
-                value=self.second_half_leave_earliest_check_out_time,
             )
 
         if (
