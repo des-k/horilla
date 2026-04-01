@@ -149,8 +149,8 @@ class CanonicalBreakAwareEngineTests(SimpleTestCase):
             grace_seconds=0,
             clock_in_type="after",
         )
-        self.assertEqual(policy.minimum_hour, "05:00")
-        self.assertEqual(policy.required_work_seconds, 5 * 3600)
+        self.assertEqual(policy.minimum_hour, "04:00")
+        self.assertEqual(policy.required_work_seconds, 4 * 3600)
         self.assertEqual(metrics.earliest_checkout_dt, self._dt(18, 0))
 
     def test_missing_check_in_is_evidence_based_and_capped_to_half_minimum(self):
