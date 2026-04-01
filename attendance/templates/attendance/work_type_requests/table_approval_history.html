@@ -43,6 +43,7 @@
             <div class="oh-sticky-table__th">{% trans "Date" %}</div>
             <div class="oh-sticky-table__th">{% trans "Status" %}</div>
             <div class="oh-sticky-table__th">{% trans "Document Status" %}</div>
+            <div class="oh-sticky-table__th">{% trans "Attachments" %}</div>
             <div class="oh-sticky-table__th">{% trans "Action" %}</div>
             <div class="oh-sticky-table__th">{% trans "Reason / Note" %}</div>
           </div>
@@ -58,6 +59,28 @@
                 <div class="oh-sticky-table__td"><span class="oh-badge oh-badge--secondary oh-badge--small oh-badge--round">{{ r.status|upper }}</span></div>
                 <div class="oh-sticky-table__td">{% if r.mode == 'on_duty' %}{{ r.get_document_status_display }}{% else %}-{% endif %}</div>
                 <div class="oh-sticky-table__td">{% if r.action_by %}{{ r.action_by.get_full_name|default:r.action_by }}{% else %}-{% endif %}{% if r.action_at %}<div class="text-muted" style="font-size:11px; margin-top:4px;">{{ r.action_at }}</div>{% endif %}</div>
+                <div class="oh-sticky-table__td">
+                  {% if r.current_document_file_count %}
+                    <div class="d-flex align-items-center gap-2">
+                      <span class="oh-badge oh-badge--secondary oh-badge--small oh-badge--round">
+                        {{ r.current_document_file_count }}
+                      </span>
+                      <button
+                        class="oh-btn oh-btn--light-bkg"
+                        title="{% trans 'View attachments' %}"
+                        data-toggle="oh-modal-toggle"
+                        data-target="#objectDetailsModal"
+                        hx-get="{% url 'attendance-work-type-request-attachments' r.id %}"
+                        hx-target="#objectDetailsModalTarget"
+                        onclick="event.preventDefault()"
+                      >
+                      <ion-icon name="document-attach-outline"></ion-icon>
+                      </button>
+                    </div>
+                  {% else %}
+                    <span class="text-muted">-</span>
+                  {% endif %}
+                </div>
                 <div class="oh-sticky-table__td">{{ r.reason|default:r.action_reason|default:r.document_remark|default:'-' }}</div>
               </div>
             {% endfor %}
