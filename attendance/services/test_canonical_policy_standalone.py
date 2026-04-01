@@ -235,7 +235,7 @@ class CanonicalPolicyStandaloneTests(unittest.TestCase):
             grace_seconds=0,
             clock_in_type="after",
         )
-        self.assertEqual(metrics.early_out_seconds, 3 * 3600)
+        self.assertEqual(metrics.early_out_seconds, (3 * 3600) + (30 * 60))
 
     def test_second_half_before_after_can_pull_policy_end_forward(self):
         policy = policy_module.build_attendance_policy(
