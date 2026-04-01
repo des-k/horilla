@@ -194,7 +194,7 @@ def get_half_day_schedule_config(employee, target_date: date, breakdown: str) ->
             "schedule": schedule,
             "attendance_date": context.get("attendance_date") or target_date,
             "enabled": bool(bool(schedule)),
-            "threshold_time": getattr(schedule, "second_half_leave_earliest_check_out_time", None),
+            "threshold_time": None,
             "require_check_out_before_submit": bool(
                 getattr(schedule, "require_check_out_before_second_half_leave", False)
             ),
