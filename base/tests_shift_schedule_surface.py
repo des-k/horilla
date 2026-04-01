@@ -33,7 +33,7 @@ class ShiftScheduleSurfaceFormTests(SimpleTestCase):
                 field_names.index("first_half_leave_early_checkout_minutes"),
             )
             self.assertLess(
-                field_names.index("second_half_leave_earliest_check_out_time"),
+                field_names.index("enable_second_half_leave_rule"),
                 field_names.index("second_half_leave_early_checkout_minutes"),
             )
 
@@ -76,7 +76,6 @@ class ShiftScheduleSurfaceModelAndApiTests(TestCase):
             "start_time": time(8, 0),
             "end_time": time(17, 0),
             "first_half_leave_latest_check_in_time": time(13, 0),
-            "second_half_leave_earliest_check_out_time": time(12, 0),
         }
         payload.update(overrides)
         schedule = EmployeeShiftSchedule.objects.create(**payload)
@@ -112,7 +111,6 @@ class ShiftScheduleSurfaceModelAndApiTests(TestCase):
             start_time=time(8, 0),
             end_time=time(17, 0),
             first_half_leave_latest_check_in_time=time(13, 0),
-            second_half_leave_earliest_check_out_time=time(12, 0),
             break_start_time=time(12, 0),
         )
 
@@ -130,7 +128,6 @@ class ShiftScheduleSurfaceModelAndApiTests(TestCase):
             start_time=time(8, 0),
             end_time=time(17, 0),
             first_half_leave_latest_check_in_time=time(13, 0),
-            second_half_leave_earliest_check_out_time=time(12, 0),
             break_start_time=time(13, 0),
             break_end_time=time(12, 0),
         )
