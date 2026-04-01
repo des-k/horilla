@@ -6,6 +6,7 @@ from django.urls import reverse
 from django.utils.translation import gettext_lazy as _
 
 from base.context_processors import enable_late_come_early_out_tracking
+from attendance.services.attendance_access import can_access_attendance_scope_views
 from base.templatetags.basefilters import is_reportingmanager
 
 MENU = _("Attendance")
@@ -45,12 +46,10 @@ SUBMENUS = [
 
 def attendances_accessibility(request, submenu, user_perms, *args, **kwargs):
     """
-    Check if the user has permission to view attendance or is a reporting manager.
+    Keep sidebar visibility aligned with the Attendances monthly recap view.
+    Any authenticated employee can open the page; subject scoping is handled in the view.
     """
-    return request.user.has_perm("attendance.view_attendance") or is_reportingmanager(
-        request.user
-    )
-
+    return can_access_attendance_scope_views(user=request.user)
 
 def tracking_accessibility(request, submenu, user_perms, *args, **kwargs):
     """
