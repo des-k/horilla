@@ -873,7 +873,7 @@ class CrossModuleAuditViewsConsistencyDbIntegrationTests(AttendanceApiIntegratio
         self.assertEqual(attendance.attendance_clock_in_mode, AttendanceWorkMode.ON_DUTY)
         self.assertEqual(activity.clock_in_mode, AttendanceWorkMode.ON_DUTY)
         self.assertEqual(attendance.late_minutes, 20)
-        self.assertEqual(attendance.early_out_minutes, 20)
+        self.assertEqual(attendance.early_out_minutes, 0)
         self.assertEqual(attendance.reconciliation_source, SOURCE_NORMAL)
         self.assertEqual(attendance.reconciliation_note, NOTE_ON_DUTY_NOT_GRANTED)
         self.assertEqual(AttendancePunchingHistory.objects.filter(employee_id=self.employee, id__in=[in_punch.id, out_punch.id]).count(), 2)
@@ -892,7 +892,7 @@ class CrossModuleAuditViewsConsistencyDbIntegrationTests(AttendanceApiIntegratio
         self.assertEqual(attendance.attendance_clock_in_mode, AttendanceWorkMode.ON_DUTY)
         self.assertEqual(activity.clock_in_mode, AttendanceWorkMode.ON_DUTY)
         self.assertEqual(attendance.late_minutes, 20)
-        self.assertEqual(attendance.early_out_minutes, 20)
+        self.assertEqual(attendance.early_out_minutes, 0)
         self.assertEqual(attendance.reconciliation_note, NOTE_ON_DUTY_PROVISIONAL)
         self.assertEqual(attendance.reconciliation_source, SOURCE_PROVISIONAL_ON_DUTY)
         self.assertEqual(AttendancePunchingHistory.objects.filter(employee_id=self.employee, id__in=[in_punch.id, out_punch.id]).count(), 2)
@@ -1051,7 +1051,7 @@ class CrossModuleAuditViewsConsistencyDbIntegrationTests(AttendanceApiIntegratio
             in_punch_id=in_punch.id,
             out_punch_id=out_punch.id,
             late_minutes=20,
-            early_minutes=20,
+            early_minutes=0,
             in_mode=AttendanceWorkMode.ON_DUTY,
             out_mode=AttendanceWorkMode.ON_DUTY,
         )
@@ -1098,7 +1098,7 @@ class CrossModuleAuditViewsConsistencyDbIntegrationTests(AttendanceApiIntegratio
             in_punch_id=in_punch.id,
             out_punch_id=out_punch.id,
             late_minutes=20,
-            early_minutes=20,
+            early_minutes=0,
             in_mode=AttendanceWorkMode.ON_DUTY,
             out_mode=AttendanceWorkMode.ON_DUTY,
         )
