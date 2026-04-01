@@ -314,12 +314,13 @@ def build_attendance_policy(
             shift_start_dt=shift_start_dt,
             shift_end_dt=shift_end_dt,
         ) or shift_start_dt
-        nominal_policy_end_dt = time_to_shift_instance_dt(
-            getattr(schedule, "first_half_leave_new_shift_end_time", None) if schedule else None,
-            shift_start_dt=shift_start_dt,
-            shift_end_dt=shift_end_dt,
-        ) or shift_end_dt
         required_work_seconds = max(0, int(Decimal(int(normal_required_seconds or 0)) / Decimal("2")))
+        nominal_policy_end_dt = add_net_work_duration(
+            late_reference_dt,
+            required_work_seconds,
+            break_start_dt=break_start_dt,
+            break_end_dt=break_end_dt,
+        ) or shift_end_dt
         maximum_late_seconds = required_work_seconds
         maximum_early_out_seconds = required_work_seconds
         early_checkout_minutes = _resolve_half_day_early_checkout_minutes(schedule, leave_kind)
@@ -329,12 +330,13 @@ def build_attendance_policy(
             early_checkout_minutes=early_checkout_minutes,
         )
     elif leave_kind == "second_half":
-        nominal_policy_end_dt = time_to_shift_instance_dt(
-            getattr(schedule, "second_half_leave_earliest_check_out_time", None) if schedule else None,
-            shift_start_dt=shift_start_dt,
-            shift_end_dt=shift_end_dt,
-        ) or shift_end_dt
         required_work_seconds = max(0, int(Decimal(int(normal_required_seconds or 0)) / Decimal("2")))
+        nominal_policy_end_dt = add_net_work_duration(
+            shift_start_dt,
+            required_work_seconds,
+            break_start_dt=break_start_dt,
+            break_end_dt=break_end_dt,
+        ) or shift_end_dt
         maximum_late_seconds = required_work_seconds
         maximum_early_out_seconds = required_work_seconds
         early_checkout_minutes = _resolve_half_day_early_checkout_minutes(schedule, leave_kind)
