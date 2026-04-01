@@ -184,7 +184,7 @@ class CheckInOutExecutablePolicyAndLeaveMatrixTests(SimpleTestCase):
             enable_first_half_leave_rule=True,
             first_half_leave_latest_check_in_time=time(13, 0),
             enable_second_half_leave_rule=True,
-            second_half_leave_earliest_check_out_time=time(12, 0),
+            minimum_working_hour="08:00",
             break_start_time=None,
             break_end_time=None,
         )
