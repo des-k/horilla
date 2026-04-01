@@ -9,6 +9,7 @@ from django.dispatch import receiver
 from django.utils.translation import gettext_lazy as _
 
 from attendance.methods.utils import format_time, overtime_calculation, strtime_seconds
+from attendance.services.canonical_attendance_policy import build_attendance_policy
 from attendance.models import AttendanceValidationCondition
 from horilla.methods import get_horilla_model_class
 from leave.half_day_rules import (
@@ -375,7 +376,15 @@ if apps.is_installed("attendance"):
 
         if out_dt:
             if breakdown == HALF_DAY_SECOND and bool(schedule):
-                ref_out = _threshold_dt(getattr(schedule, "second_half_leave_earliest_check_out_time", None), shift_start, shift_end)
+                policy = build_attendance_policy(
+                    schedule=schedule,
+                    shift_start_dt=shift_start,
+                    shift_end_dt=shift_end,
+                    minimum_hour=getattr(attendance, "minimum_hour", None) or getattr(schedule, "minimum_working_hour", None) or "00:00",
+                    leave_kind=HALF_DAY_SECOND,
+                    check_in_cutoff_dt=None,
+                )
+                ref_out = policy.nominal_policy_end_dt
             else:
                 ref_out = shift_end - timedelta(seconds=grace_out_sec)
             if ref_out and out_dt < ref_out:
