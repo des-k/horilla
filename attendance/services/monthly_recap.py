@@ -1415,11 +1415,11 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
         elif holiday_obj:
             off_kind = "holiday"
         elif no_schedule_off:
-            off_kind = "no_schedule"
+            off_kind = "holiday"
 
         if is_leave:
             canonical_shift_info = _localize_leave_session_label("full", language)
-        elif holiday_obj:
+        elif holiday_obj or no_schedule_off:
             canonical_shift_info = "Holiday"
         else:
             canonical_shift_info = "—"
@@ -1485,8 +1485,8 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
                 shift_info = _localize_shift_information("Holiday", language)
                 note = derive_note(NoteInputs(is_off=True, off_kind="holiday"), language=language)
             else:
-                shift_info = _localize_shift_information("—", language)
-                note = "-"
+                shift_info = _localize_shift_information("Holiday", language)
+                note = derive_note(NoteInputs(is_off=True, off_kind="holiday"), language=language)
 
             rows.append(
                 MonthlyRecapRow(
