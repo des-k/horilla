@@ -126,7 +126,7 @@ class CanonicalBreakAwareEngineTests(SimpleTestCase):
         self.assertEqual(metrics.earliest_checkout_dt, self._dt(14, 0))
         self.assertEqual(metrics.early_out_seconds, 0)
 
-    def test_first_half_uses_new_shift_end_time_instead_of_half_normal_minimum(self):
+    def test_first_half_uses_effective_minimum_hours_from_latest_check_in(self):
         schedule = self._schedule(
             break_start_time=time(12, 0),
             break_end_time=time(13, 0),
