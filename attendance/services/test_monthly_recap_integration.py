@@ -450,7 +450,6 @@ class MonthlyRecapIntegrationTests(SimpleTestCase):
                 enable_first_half_leave_rule=True,
                 first_half_leave_latest_check_in_time=time(11, 50),
                 enable_second_half_leave_rule=False,
-                second_half_leave_earliest_check_out_time=None,
             )
             return rules
 
@@ -484,7 +483,10 @@ class MonthlyRecapIntegrationTests(SimpleTestCase):
                 enable_first_half_leave_rule=False,
                 first_half_leave_latest_check_in_time=None,
                 enable_second_half_leave_rule=True,
-                second_half_leave_earliest_check_out_time=time(12, 10),
+                start_time=time(8, 0),
+                end_time=time(17, 0),
+                break_start_time=None,
+                break_end_time=None,
             )
             return rules
 
