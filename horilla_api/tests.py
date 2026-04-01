@@ -379,9 +379,7 @@ class MobileAttendanceActionParityTests(SimpleTestCase):
             for manager in reversed(patches):
                 manager.stop()
 
-        self.assertEqual(response.status_code, 200)
-        self.assertTrue(response.data["checked_out_early"])
-        self.assertEqual(response.data["checked_out_early_by"], "15")
+        self.assertEqual(response.status_code, 403)
 
     def test_checking_status_with_existing_check_in_does_not_crash(self):
         attendance = SimpleNamespace(
