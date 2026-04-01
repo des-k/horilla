@@ -22,7 +22,6 @@ class CanonicalBreakAwareEngineTests(SimpleTestCase):
             "break_start_time": None,
             "break_end_time": None,
             "first_half_leave_latest_check_in_time": time(13, 0),
-            "first_half_leave_new_shift_end_time": time(17, 0),
             "second_half_leave_earliest_check_out_time": time(12, 0),
         }
         defaults.update(overrides)
@@ -132,7 +131,6 @@ class CanonicalBreakAwareEngineTests(SimpleTestCase):
             break_start_time=time(12, 0),
             break_end_time=time(13, 0),
             first_half_leave_latest_check_in_time=time(13, 0),
-            first_half_leave_new_shift_end_time=time(18, 0),
         )
         policy = build_attendance_policy(
             schedule=schedule,
@@ -151,7 +149,7 @@ class CanonicalBreakAwareEngineTests(SimpleTestCase):
         )
         self.assertEqual(policy.minimum_hour, "04:00")
         self.assertEqual(policy.required_work_seconds, 4 * 3600)
-        self.assertEqual(metrics.earliest_checkout_dt, self._dt(18, 0))
+        self.assertEqual(metrics.earliest_checkout_dt, self._dt(17, 0))
 
     def test_missing_check_in_is_evidence_based_and_capped_to_half_minimum(self):
         policy = build_attendance_policy(
