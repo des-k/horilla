@@ -112,7 +112,6 @@ class AttendanceApiIntegrationMixin:
         minimum_working_hour: str = '08:00',
         is_night_shift: bool = False,
         first_half_latest_check_in_time: time | None = None,
-        second_half_earliest_check_out_time: time | None = None,
     ):
         seq = self.__class__._next_shift_seq()
         day_obj, _ = EmployeeShiftDay.objects.get_or_create(day=day_key)
@@ -133,7 +132,6 @@ class AttendanceApiIntegrationMixin:
         midpoint_time = time(midpoint // 3600, (midpoint % 3600) // 60, midpoint % 60)
 
         first_half_latest_check_in_time = first_half_latest_check_in_time or midpoint_time
-        second_half_earliest_check_out_time = second_half_earliest_check_out_time or midpoint_time
 
         schedule = EmployeeShiftSchedule.objects.create(
             day=day_obj,
@@ -143,7 +141,6 @@ class AttendanceApiIntegrationMixin:
             end_time=end_time,
             is_night_shift=is_night_shift,
             first_half_leave_latest_check_in_time=first_half_latest_check_in_time,
-            second_half_leave_earliest_check_out_time=second_half_earliest_check_out_time,
         )
 
         work_info = employee.employee_work_info
