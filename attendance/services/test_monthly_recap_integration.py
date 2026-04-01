@@ -480,6 +480,7 @@ class MonthlyRecapIntegrationTests(SimpleTestCase):
             rules = self._default_shift_rules(day, shift, day_obj, **kwargs)
             rules["schedule"] = SimpleNamespace(
                 id=3,
+                minimum_working_hour="08:00",
                 enable_first_half_leave_rule=False,
                 first_half_leave_latest_check_in_time=None,
                 enable_second_half_leave_rule=True,
