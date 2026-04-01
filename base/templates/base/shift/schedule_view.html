@@ -184,11 +184,6 @@
                               </span>
 
                               <span>
-                                <b>{% trans "2nd Half Earliest OUT" %}:</b>
-                                {% if schedule.second_half_leave_earliest_check_out_time %}{{ schedule.second_half_leave_earliest_check_out_time|time:"H:i" }}{% else %}-{% endif %}
-                              </span>
-
-                              <span>
                                 <b>{% trans "2nd Half Early OUT Minutes" %}:</b>
                                 {{ schedule.second_half_leave_early_checkout_minutes|default_if_none:"30" }}
                               </span>
