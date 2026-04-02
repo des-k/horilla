@@ -1164,6 +1164,15 @@ class Attendance(HorillaModel):
         ).order_by("id")
         return activities.last()
 
+    def get_schedule_minimum_hour(self):
+        """Return minimum working hour from the active shift schedule when available."""
+        day = self.attendance_day
+        if day is not None and self.shift_id_id:
+            schedule = day.day_schedule.filter(shift_id=self.shift_id).first()
+            if schedule and getattr(schedule, "minimum_working_hour", None):
+                return schedule.minimum_working_hour
+        return self.minimum_hour or "00:00"
+
     def get_at_work_from_activities(self):
         """
         This method is used to retun the at work calculated from the activities
@@ -1214,7 +1223,7 @@ class Attendance(HorillaModel):
         """
         This method will returns difference between minimum_hour and attendance_worked_hour
         """
-        minimum_hours = strtime_seconds(self.minimum_hour)
+        minimum_hours = strtime_seconds(self.get_schedule_minimum_hour())
         worked_hour = strtime_seconds(self.attendance_worked_hour)
         pending_seconds = minimum_hours - worked_hour
         if pending_seconds < 0:
@@ -1239,7 +1248,7 @@ class Attendance(HorillaModel):
                 0,
                 (
                     strtime_seconds(self.attendance_worked_hour)
-                    - strtime_seconds(self.minimum_hour)
+                    - strtime_seconds(self.get_schedule_minimum_hour())
                 ),
             )
         )
