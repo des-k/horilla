@@ -1,36 +1,114 @@
 {% load i18n %}
 
-{# Reuse standard objectCreateModal from base layout #}
-<section class="oh-wrapper oh-main__topbar" x-data="{searchShow: false}">
+<style>
+  .oh-attendance-request-filter-grid {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 10px;
+    width: 100%;
+  }
+
+  .oh-attendance-request-filter-grid .oh-input-group {
+    margin: 0;
+  }
+
+  .oh-attendance-request-filter-grid .oh-attendance-request-filter-month {
+    flex: 0 0 170px;
+    min-width: 170px;
+  }
+
+  .oh-attendance-request-filter-grid .oh-attendance-request-filter-status {
+    flex: 0 0 165px;
+    min-width: 165px;
+  }
+
+  .oh-attendance-request-filter-grid .oh-input,
+  .oh-attendance-request-filter-grid .oh-select,
+  .oh-attendance-request-filter-grid .oh-btn {
+    min-height: 34px;
+    height: 34px;
+    box-sizing: border-box;
+  }
+
+  .oh-attendance-request-filter-grid .oh-input,
+  .oh-attendance-request-filter-grid .oh-select {
+    width: 100%;
+    padding-top: 0;
+    padding-bottom: 0;
+  }
+
+  .oh-attendance-request-filter-grid .oh-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    white-space: nowrap;
+    padding: 0 12px;
+    line-height: 1;
+  }
+
+  .oh-attendance-request-filter-grid .oh-attendance-request-filter-actions {
+    display: flex;
+    flex-wrap: nowrap;
+    align-items: center;
+    gap: 8px;
+    margin-left: auto;
+    flex: 0 0 auto;
+  }
+
+  @media (max-width: 991.98px) {
+    .oh-attendance-request-filter-grid {
+      justify-content: flex-start;
+    }
+
+    .oh-attendance-request-filter-grid .oh-attendance-request-filter-month,
+    .oh-attendance-request-filter-grid .oh-attendance-request-filter-status {
+      flex: 1 1 180px;
+      min-width: 180px;
+    }
+
+    .oh-attendance-request-filter-grid .oh-attendance-request-filter-actions {
+      margin-left: 0;
+      width: 100%;
+      justify-content: flex-start;
+    }
+  }
+</style>
+
+<section class="oh-wrapper oh-main__topbar">
   <div class="oh-main__titlebar oh-main__titlebar--left">
     <h1 class="oh-main__titlebar-title fw-bold">{% trans "Attendance Requests" %}</h1>
-    <a class="oh-main__titlebar-search-toggle" role="button" aria-label="Toggle Search" @click="searchShow = !searchShow">
-      <ion-icon name="search-outline" class="oh-main__titlebar-serach-icon"></ion-icon>
-    </a>
   </div>
 
   <div class="oh-main__titlebar oh-main__titlebar--right">
-    <form method="get" action="{% url 'request-attendance-view' %}" class="d-flex flex-wrap align-items-center" style="gap: 8px;" onsubmit="event.preventDefault(); this.submit();">
-      <div class="oh-input-group oh-input__search-group" :class="searchShow ? 'oh-input__search-group--show' : ''">
-        <ion-icon name="search-outline" class="oh-input-group__icon oh-input-group__icon--left"></ion-icon>
-        <input type="text" class="oh-input oh-input__icon" aria-label="Search Input" placeholder="{% trans 'Search' %}" name="search" value="{{ search|default:'' }}" />
+    <form method="get" action="{% url 'request-attendance-view' %}" class="oh-attendance-request-filter-grid" onsubmit="event.preventDefault(); this.submit();">
+      <div class="oh-input-group oh-attendance-request-filter-month">
+        <input
+          type="month"
+          class="oh-input"
+          name="my_month"
+          aria-label="{% trans 'Month' %}"
+          value="{{ my_month }}"
+          onchange="this.form.submit()"
+        />
       </div>
 
-      <div class="oh-input-group" style="min-width: 170px;">
-        <select class="oh-select w-100" name="status_my" aria-label="{% trans 'Status' %}" onchange="this.form.submit()">
+      <div class="oh-input-group oh-attendance-request-filter-status">
+        <select class="oh-select" name="status_my" aria-label="{% trans 'Status' %}" onchange="this.form.submit()">
           {% for v, label in status_my_options %}
             <option value="{{ v }}" {% if status_my == v %}selected{% endif %}>{{ label }}</option>
           {% endfor %}
         </select>
       </div>
 
-      <div class="oh-main__titlebar-button-container d-flex" style="gap: 8px;">
+      <div class="oh-main__titlebar-button-container oh-attendance-request-filter-actions">
         <button class="oh-btn oh-btn--secondary" data-toggle="oh-modal-toggle" data-target="#objectCreateModal"
           hx-get="{% url 'request-new-attendance' %}" hx-target="#objectCreateModalTarget" onclick="event.preventDefault()">
           <ion-icon name="add-sharp" class="mr-1"></ion-icon>{% trans "Create" %}
         </button>
 
-        <a class="oh-btn oh-btn--light-bkg" href="{% url 'request-attendance-view' %}" title="{% trans 'Reset filters' %}">
+        <a class="oh-btn oh-btn--light-bkg" href="{% url 'request-attendance-view' %}?my_month={{ my_month }}" title="{% trans 'Reset filters' %}">
           <ion-icon name="refresh-outline" class="mr-1"></ion-icon>{% trans "Reset" %}
         </a>
       </div>
