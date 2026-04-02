@@ -30,8 +30,6 @@ from geofencing.policy import geofencing_is_effectively_enabled
 
 logger = logging.getLogger(__name__)
 
-from attendance.filters import AttendanceActivityFilter
-from attendance.forms import NewRequestForm, AttendanceRequestForm
 from attendance.models import (
     Attendance,
     AttendanceActivity,
@@ -40,7 +38,6 @@ from attendance.models import (
     AttendanceCorrectionRequestAttachment,
     AttendanceLateComeEarlyOut,
     AttendanceRequestFile,
-    AttendanceRequestActionType,
     AttendancePunchSource,
     AttendancePunchingHistory,
     EmployeeShiftDay,
@@ -72,7 +69,6 @@ from attendance.services.activity_sync import (
     get_requested_sessions,
     mark_approved_request_channels,
     sync_single_session_activity,
-    validate_requested_data_with_windows,
 )
 from attendance.services.punching_history import (
     capture_request_restore_snapshot,
@@ -104,7 +100,6 @@ from attendance.services.attendance_request_access import (
     user_can_delete_attachment,
     user_can_manage_request,
 )
-from attendance.services.attendance_correction_scope_rules import load_requested_data
 from attendance.services.request_audit import log_request_action
 from attendance.services.work_type_request_exceptions import WorkModeRequestConsistencyError
 from attendance.services.attendance_access import evaluate_attendance_access
@@ -274,63 +269,24 @@ def _parse_filter_month_range(value):
     return month_start, month_end, month_start.strftime("%Y-%m")
 
 
-def _attendance_request_history_scope(request):
-    request_history_filter = (
-        Q(is_validate_request=True)
-        | Q(is_validate_request_approved=True)
-        | Q(action_type__in=[
-            AttendanceRequestActionType.APPROVED,
-            AttendanceRequestActionType.REJECTED,
-            AttendanceRequestActionType.CANCELED,
-            AttendanceRequestActionType.REVOKED,
-        ])
-        | Q(request_type__in=["create_request", "cancel_request", "reject_request", "revoke_request"])
-    )
-    qs = Attendance.objects.filter(request_history_filter).exclude(employee_id__employee_user_id=request.user).distinct()
-    is_super = bool(getattr(request.user, "is_superuser", False))
-    has_global_perm = bool(getattr(request.user, "has_perm", lambda _p: False)("attendance.change_attendance"))
-    if is_super or has_global_perm:
-        return qs
-    if is_reportingmanager(request):
-        return filtersubordinates(request=request, perm="attendance.change_attendance", queryset=qs)
-    return Attendance.objects.none()
-
-
 def _attendance_history_status_filter(qs, status_value):
-    """History status filter compatible with both legacy Attendance and new AttendanceCorrectionRequest querysets."""
-    model = getattr(qs, "model", None)
-    if model is AttendanceCorrectionRequest:
-        status_value = (status_value or "").strip().lower()
-        if not status_value or status_value == "all":
-            return qs.filter(status__in=[
-                AttendanceCorrectionRequestStatus.APPROVED,
-                AttendanceCorrectionRequestStatus.REJECTED,
-                AttendanceCorrectionRequestStatus.REVOKED,
-            ])
-        mapping = {
-            "waiting": AttendanceCorrectionRequestStatus.WAITING,
-            "approved": AttendanceCorrectionRequestStatus.APPROVED,
-            "rejected": AttendanceCorrectionRequestStatus.REJECTED,
-            "revoked": AttendanceCorrectionRequestStatus.REVOKED,
-            "canceled": AttendanceCorrectionRequestStatus.CANCELED,
-            "cancel": AttendanceCorrectionRequestStatus.CANCELED,
-        }
-        wanted = mapping.get(status_value)
-        return qs.filter(status=wanted) if wanted else qs
     status_value = (status_value or "").strip().lower()
     if not status_value or status_value == "all":
-        return qs.exclude(is_validate_request=True)
-    if status_value == "waiting":
-        return qs.filter(is_validate_request=True)
-    if status_value == "approved":
-        return qs.filter(Q(is_validate_request_approved=True) | Q(attendance_validated=True)).exclude(is_validate_request=True)
-    if status_value == "rejected":
-        return qs.filter(Q(request_type="reject_request") | Q(action_type=AttendanceRequestActionType.REJECTED))
-    if status_value in {"canceled", "cancel"}:
-        return qs.filter(Q(request_type="cancel_request") | Q(action_type=AttendanceRequestActionType.CANCELED))
-    if status_value == "revoked":
-        return qs.filter(Q(request_type="revoke_request") | Q(action_type=AttendanceRequestActionType.REVOKED))
-    return qs.exclude(is_validate_request=True)
+        return qs.filter(status__in=[
+            AttendanceCorrectionRequestStatus.APPROVED,
+            AttendanceCorrectionRequestStatus.REJECTED,
+            AttendanceCorrectionRequestStatus.REVOKED,
+        ])
+    mapping = {
+        "waiting": AttendanceCorrectionRequestStatus.WAITING,
+        "approved": AttendanceCorrectionRequestStatus.APPROVED,
+        "rejected": AttendanceCorrectionRequestStatus.REJECTED,
+        "revoked": AttendanceCorrectionRequestStatus.REVOKED,
+        "canceled": AttendanceCorrectionRequestStatus.CANCELED,
+        "cancel": AttendanceCorrectionRequestStatus.CANCELED,
+    }
+    wanted = mapping.get(status_value)
+    return qs.filter(status=wanted) if wanted else qs.none()
 
 
 def _mutable_request_data(request):
@@ -369,680 +325,6 @@ def _locked_correction_request(pk):
         return AttendanceCorrectionRequest._base_manager.select_related(None).select_for_update().get(id=pk)
     except Exception:
         return None
-
-
-def _locked_legacy_attendance(pk):
-    try:
-        return Attendance.objects.select_for_update().get(id=pk)
-    except Exception:
-        return None
-
-
-def _attachment_file_response(file_obj, disposition="download"):
-    mime_type = attachment_mime_type(file_obj)
-    inline_ok = disposition == "view" and is_inline_viewable_mime_type(mime_type)
-    as_attachment = not inline_ok
-    filename = attachment_name(file_obj)
-    file_field = getattr(file_obj, "file", None)
-    opened = None
-    try:
-        opened = file_field.open("rb")
-    except Exception:
-        opened = getattr(file_field, "open", lambda mode='rb': None)("rb") if file_field else None
-    response = FileResponse(opened, as_attachment=as_attachment, filename=filename, content_type=mime_type)
-    response["Cache-Control"] = "private, no-store"
-    if inline_ok:
-        response["Content-Disposition"] = f'inline; filename="{filename}"'
-    else:
-        response["Content-Disposition"] = f'attachment; filename="{filename}"'
-    return response
-
-
-def _legacy_attendance_request_payload(attendance, request):
-    return AttendanceRequestSerializer(attendance, context={"request": request}).data
-
-
-def _legacy_create_attendance_request(request, serializer_class):
-    data = _mutable_request_data(request)
-    try:
-        if not data.get("employee_id") and getattr(getattr(request.user, "employee_get", None), "id", None):
-            data["employee_id"] = getattr(request.user.employee_get, "id")
-    except Exception:
-        pass
-    from attendance import forms as attendance_forms
-    form = attendance_forms.NewRequestForm(data=data, files=getattr(request, "FILES", None) or None)
-    if not form.is_valid():
-        return Response(getattr(form, "errors", {}), status=400)
-    attendance = getattr(form, "new_instance", None) or Attendance.objects.filter(id=getattr(getattr(form, "instance", None), "pk", None)).first()
-    uploaded = _uploaded_request_files(request)
-    for up in uploaded:
-        arf = AttendanceRequestFile.objects.create(file=up)
-        try:
-            attendance.request_attachments.add(arf)
-        except Exception:
-            pass
-    
-    try:
-        payload = serializer_class(attendance, context={"request": request}).data
-    except Exception:
-        payload = {"id": getattr(attendance, "id", None)}
-
-    warnings = list(getattr(form, "window_warnings", []) or [])
-    if warnings:
-        payload["window_warning"] = warnings[0]
-    return Response(payload, status=201)
-
-
-def _legacy_update_attendance_request(request, pk, serializer_class):
-    attendance = _locked_legacy_attendance(pk)
-    if attendance is None:
-        return Response({"error": "Attendance request not found."}, status=404)
-    try:
-        if getattr(attendance.employee_id, "employee_user_id", None) != request.user:
-            return Response({"error": "Only the owner can edit this request."}, status=403)
-    except Exception:
-        return Response({"error": "Only the owner can edit this request."}, status=403)
-    if not getattr(attendance, "is_validate_request", False) or getattr(attendance, "is_validate_request_approved", False):
-        return Response({"error": "Approved requests cannot be edited"} if getattr(attendance, "is_validate_request_approved", False) else {"error": "Only waiting requests can be edited."}, status=400)
-    data = _mutable_request_data(request)
-    from attendance import forms as attendance_forms
-    if hasattr(attendance, "_meta"):
-        form = attendance_forms.AttendanceRequestForm(data=data, files=getattr(request, "FILES", None) or None, instance=attendance)
-    else:
-        form = attendance_forms.AttendanceRequestForm(data=data, files=getattr(request, "FILES", None) or None)
-    if not form.is_valid():
-        return Response(getattr(form, "errors", {}), status=400)
-    attendance = form.save()
-    uploaded = _uploaded_request_files(request)
-    for up in uploaded:
-        arf = AttendanceRequestFile.objects.create(file=up)
-        try:
-            attendance.request_attachments.add(arf)
-        except Exception:
-            pass
-    
-    try:
-        payload = serializer_class(attendance, context={"request": request}).data
-    except Exception:
-        payload = {"id": getattr(attendance, "id", None)}
-
-    warnings = list(getattr(form, "window_warnings", []) or [])
-    if warnings:
-        payload["window_warning"] = warnings[0]
-    return Response(payload, status=200)
-
-
-def _legacy_approve_attendance_request(request, attendance):
-    if not user_can_approve_request(request.user, attendance):
-        return Response({"error": "You do not have permission to approve this request."}, status=403)
-    ok, warning = validate_requested_data_with_windows(attendance)
-    if not ok:
-        return Response({"error": warning or "Requested attendance cannot be approved."}, status=400)
-    wants_in, wants_out = get_requested_sessions(attendance)
-    _apply_request_override_snapshot(attendance, include_in=wants_in, include_out=wants_out)
-    attendance.attendance_validated = True
-    attendance.is_validate_request_approved = True
-    attendance.is_validate_request = False
-    try:
-        attendance.action_by = request.user.employee_get
-    except Exception:
-        attendance.action_by = None
-    attendance.action_type = AttendanceRequestActionType.APPROVED
-    attendance.action_at = dj_timezone.now()
-    try:
-        attendance.save(update_fields=[
-            "attendance_validated",
-            "is_validate_request_approved",
-            "is_validate_request",
-            "action_by",
-            "action_type",
-            "action_at",
-        ])
-    except Exception:
-        attendance.save()
-    _log_attendance_request_status_change(attendance, request, action_type=AttendanceRequestActionType.APPROVED, old_status=getattr(attendance, "request_type", None) or "waiting_request", new_status="approved")
-    requested_data = _normalize_requested_data(load_requested_data(getattr(attendance, "requested_data", None)))
-    if requested_data:
-        Attendance.objects.filter(id=attendance.id).update(**requested_data)
-    try:
-        attendance.refresh_from_db()
-    except Exception:
-        pass
-    _mark_approved_request_channels(attendance)
-    _detach_request_overridden_raw_links(attendance, include_in=wants_in, include_out=wants_out)
-    result = recompute_attendance(attendance.employee_id, attendance.attendance_date)
-    final_attendance = result.attendance if result is not None else attendance
-    
-    try:
-        payload = AttendanceRequestSerializer(final_attendance, context={"request": request}).data
-    except Exception:
-        payload = {"id": getattr(final_attendance, "id", None), "request_type": getattr(final_attendance, "request_type", None)}
-
-    if warning:
-        payload["window_warning"] = warning
-    return Response(payload, status=200)
-
-
-def _legacy_cancel_attendance_request(request, attendance):
-    try:
-        if attendance.employee_id.employee_user_id != request.user:
-            return Response({"error": "Only the requester can cancel this request."}, status=403)
-    except Exception:
-        return Response({"error": "Only the requester can cancel this request."}, status=403)
-    if not getattr(attendance, "is_validate_request", False) or getattr(attendance, "is_validate_request_approved", False):
-        return Response({"error": "Only waiting requests can be canceled."}, status=400)
-    wants_in, wants_out = get_requested_sessions(attendance)
-    old_status = getattr(attendance, "request_type", None) or "waiting_request"
-    was_create_request = getattr(attendance, "request_type", None) == "create_request"
-    attendance.is_validate_request = False
-    attendance.is_validate_request_approved = False
-    attendance.request_type = "cancel_request"
-    attendance.action_type = AttendanceRequestActionType.CANCELED
-    try:
-        attendance.action_by = request.user.employee_get
-    except Exception:
-        attendance.action_by = None
-    attendance.action_at = dj_timezone.now()
-    _log_attendance_request_status_change(attendance, request, action_type=AttendanceRequestActionType.CANCELED, old_status=old_status, new_status="cancel_request")
-    final_attendance = attendance
-    if was_create_request:
-        final_attendance = clear_request_override_and_recompute(attendance, include_in=wants_in, include_out=wants_out)
-    
-    try:
-        payload = AttendanceRequestSerializer(final_attendance, context={"request": request}).data
-    except Exception:
-        payload = {"id": getattr(final_attendance, "id", None), "request_type": getattr(final_attendance, "request_type", None)}
-
-    return Response(payload, status=200)
-
-
-def _legacy_revoke_attendance_request(request, attendance, reason=None):
-    if not getattr(attendance, "is_validate_request_approved", False):
-        return Response({"error": "Attendance request not found."}, status=404)
-    if getattr(attendance.employee_id, "employee_user_id", None) == request.user:
-        return Response({"error": "You cannot revoke your own approved request."}, status=403)
-    can_act = False
-    try:
-        can_act = bool(_can_act_on_employee(request.user, attendance.employee_id))
-    except Exception:
-        can_act = False
-    if not (can_act or user_can_approve_request(request.user, attendance)):
-        return Response({"error": "You do not have permission to revoke this request."}, status=403)
-    wants_in, wants_out = get_requested_sessions(attendance)
-    old_status = getattr(attendance, "request_type", None) or "approved"
-    _restore_request_back_to_raw(attendance, include_in=wants_in, include_out=wants_out, prev_attendance_date=attendance.attendance_date)
-    attendance.is_validate_request_approved = False
-    attendance.is_validate_request = False
-    attendance.request_type = "revoke_request"
-    attendance.action_type = AttendanceRequestActionType.REVOKED
-    attendance.action_at = dj_timezone.now()
-    try:
-        attendance.action_by = request.user.employee_get
-    except Exception:
-        attendance.action_by = None
-    try:
-        attendance.save(update_fields=[
-            "is_validate_request_approved",
-            "is_validate_request",
-            "request_type",
-            "action_type",
-            "action_at",
-            "action_by",
-        ])
-    except Exception:
-        attendance.save()
-    _log_attendance_request_status_change(attendance, request, action_type=AttendanceRequestActionType.REVOKED, old_status=old_status, new_status="revoke_request", remark=reason)
-    result = recompute_attendance(attendance.employee_id, attendance.attendance_date)
-    final_attendance = result.attendance if result is not None else attendance
-    
-    try:
-        payload = AttendanceRequestSerializer(final_attendance, context={"request": request}).data
-    except Exception:
-        payload = {"id": getattr(final_attendance, "id", None), "request_type": getattr(final_attendance, "request_type", None)}
-    return Response(payload, status=200)
-
-
-def _legacy_reject_attendance_request(request, attendance, reason):
-    if not reason:
-        return Response({"error": "Reject reason is required."}, status=400)
-    if getattr(attendance.employee_id, "employee_user_id", None) == request.user:
-        return Response({"error": "Use cancel for your own request."}, status=403)
-    can_act = False
-    try:
-        can_act = bool(_can_act_on_employee(request.user, attendance.employee_id))
-    except Exception:
-        can_act = False
-    if not (can_act or user_can_approve_request(request.user, attendance)):
-        return Response({"error": "You do not have permission to reject this request."}, status=403)
-    wants_in, wants_out = get_requested_sessions(attendance)
-    was_create_request = getattr(attendance, "request_type", None) == "create_request"
-    attendance.is_validate_request = False
-    attendance.is_validate_request_approved = False
-    attendance.request_type = "reject_request"
-    attendance.action_type = AttendanceRequestActionType.REJECTED
-    attendance.action_at = dj_timezone.now()
-    try:
-        attendance.action_by = request.user.employee_get
-    except Exception:
-        attendance.action_by = None
-    _log_attendance_request_status_change(attendance, request, action_type=AttendanceRequestActionType.REJECTED, old_status=getattr(attendance, "request_type", None) or "waiting_request", new_status="reject_request", remark=reason)
-    final_attendance = attendance
-    if was_create_request:
-        final_attendance = clear_request_override_and_recompute(attendance, include_in=wants_in, include_out=wants_out)
-    
-    try:
-        payload = AttendanceRequestSerializer(final_attendance, context={"request": request}).data
-    except Exception:
-        payload = {"id": getattr(final_attendance, "id", None), "request_type": getattr(final_attendance, "request_type", None)}
-    return Response(payload, status=200)
-
-
-
-
-def _request_user_lookup_value(request):
-    user = getattr(request, "user", None)
-    value = getattr(user, "pk", None) or getattr(user, "id", None)
-    if value is None:
-        value = getattr(getattr(user, "employee_get", None), "id", None)
-    return value if value is not None else -1
-
-def _attendance_correction_history_scope(request):
-    qs = AttendanceCorrectionRequest.objects.exclude(employee_id__employee_user_id=_request_user_lookup_value(request))
-    is_super = bool(getattr(request.user, "is_superuser", False))
-    has_global_perm = bool(getattr(request.user, "has_perm", lambda _p: False)("attendance.change_attendance"))
-    if is_super or has_global_perm:
-        return qs
-    if is_reportingmanager(request):
-        sub_ids = _subordinate_employee_ids(request)
-        if not sub_ids:
-            return AttendanceCorrectionRequest.objects.none()
-        return qs.filter(employee_id__id__in=sub_ids)
-    return AttendanceCorrectionRequest.objects.none()
-
-
-def _attendance_correction_history_status_filter(qs, status_value):
-    status_value = (status_value or "").strip().lower()
-    if not status_value or status_value == "all":
-        return qs.filter(status__in=[AttendanceCorrectionRequestStatus.APPROVED, AttendanceCorrectionRequestStatus.REJECTED, AttendanceCorrectionRequestStatus.REVOKED])
-    mapping = {
-        "waiting": AttendanceCorrectionRequestStatus.WAITING,
-        "approved": AttendanceCorrectionRequestStatus.APPROVED,
-        "rejected": AttendanceCorrectionRequestStatus.REJECTED,
-        "revoked": AttendanceCorrectionRequestStatus.REVOKED,
-        "canceled": AttendanceCorrectionRequestStatus.CANCELED,
-        "cancel": AttendanceCorrectionRequestStatus.CANCELED,
-    }
-    wanted = mapping.get(status_value)
-    return qs.filter(status=wanted) if wanted else qs
-
-
-def _work_mode_history_scope(request):
-    qs = WorkModeRequest.objects.all().exclude(employee_id__employee_user_id=request.user)
-    include_all = _is_admin_with_perm(request, "attendance.change_workmoderequest")
-    if not include_all:
-        sub_ids = _subordinate_employee_ids(request)
-        if not sub_ids:
-            return WorkModeRequest.objects.none()
-        qs = qs.filter(employee_id__id__in=sub_ids)
-    return qs
-
-
-def _work_mode_history_status_filter(qs, status_value):
-    status_value = (status_value or "").strip().lower()
-    if not status_value or status_value == "all":
-        return qs.exclude(status=WorkModeRequestStatus.PENDING)
-    mapping = {
-        "waiting": WorkModeRequestStatus.WAITING_FOR_APPROVAL,
-        "waiting_for_approval": WorkModeRequestStatus.WAITING_FOR_APPROVAL,
-        "approved": WorkModeRequestStatus.APPROVED,
-        "rejected": WorkModeRequestStatus.REJECTED,
-        "revoked": WorkModeRequestStatus.REVOKED,
-        "canceled": WorkModeRequestStatus.CANCELED,
-        "cancel": WorkModeRequestStatus.CANCELED,
-    }
-    wanted = mapping.get(status_value)
-    return qs.filter(status=wanted) if wanted else qs.exclude(status=WorkModeRequestStatus.PENDING)
-
-
-def _approval_scope_employee_options(request, *, work_type=False):
-    queryset = Employee.objects.all().order_by("employee_first_name", "employee_last_name", "id")
-    if work_type:
-        if not _is_admin_with_perm(request, "attendance.change_workmoderequest"):
-            subordinate_ids = _subordinate_employee_ids(request)
-            if not subordinate_ids:
-                queryset = Employee.objects.none()
-            else:
-                queryset = queryset.filter(id__in=subordinate_ids)
-    else:
-        is_super = bool(getattr(request.user, "is_superuser", False))
-        has_global_perm = bool(getattr(request.user, "has_perm", lambda _p: False)("attendance.change_attendance"))
-        if not (is_super or has_global_perm):
-            if is_reportingmanager(request):
-                queryset = filtersubordinatesemployeemodel(request, queryset, "attendance.change_attendance")
-            else:
-                queryset = Employee.objects.none()
-    employee = getattr(getattr(request.user, "employee_get", None), "id", None)
-    if employee is not None:
-        queryset = queryset.exclude(id=employee)
-    return [
-        {
-            "id": emp.id,
-            "employee_first_name": (getattr(emp, "employee_first_name", "") or "").strip(),
-            "employee_last_name": (getattr(emp, "employee_last_name", "") or "").strip(),
-            "name": (f"{(getattr(emp, 'employee_first_name', '') or '').strip()} {(getattr(emp, 'employee_last_name', '') or '').strip()}").strip() or f"Employee #{emp.id}",
-        }
-        for emp in queryset.distinct()
-    ]
-
-
-def _is_attendance_exempt_manager(employee) -> bool:
-    """Return True if employee should be excluded from IN/OUT attendance.
-
-    Custom rule requested: if an employee is a reporting manager of at least one
-    other employee, they act as "approver-only" and use an external attendance
-    system. They can still approve, but must not punch or be counted as missing.
-    """
-
-    try:
-        return (
-            EmployeeWorkInformation.objects.filter(reporting_manager_id=employee)
-            .only("id")
-            .exists()
-        )
-    except Exception:
-        return False
-
-
-# -----------------------------------------------------------------------------
-# Mobile single-session helpers# -----------------------------------------------------------------------------
-# Work-mode helpers (WFO/WFA/ON_DUTY)
-# -----------------------------------------------------------------------------
-def _pick_work_mode_request(employee, target_date: date, want: str):
-    """Return the *effective* WorkModeRequest for the given date.
-
-    Kept for backward compatibility; core resolution is delegated to
-    ``attendance.services.work_type_request_rules``.
-    """
-    return effective_work_type(employee, target_date, want).request
-
-
-def _resolve_effective_work_type(employee, target_date: date, want: str):
-    """Return tuple (mode, source, request)."""
-    eff = effective_work_type(employee, target_date, want)
-    return eff.mode, eff.source, eff.request
-
-
-def _mode_from_request(req) -> str:
-    # Compatibility helper
-    return req.mode if req else AttendanceWorkMode.WFO
-
-
-def _is_punch_allowed(mode: str, req, source: str):
-    from attendance.services.work_type_request_rules import EffectiveWorkType
-    return punch_allowed(EffectiveWorkType(mode=mode, source=source, request=req))
-
-def _requires_proof(mode: str) -> bool:
-    return mode in (AttendanceWorkMode.WFA, AttendanceWorkMode.ON_DUTY)
-
-def _effective_document_status_or_none(req) -> str | None:
-    if not req:
-        return None
-    resolver = getattr(req, "effective_document_status", None)
-    if callable(resolver):
-        try:
-            return resolver()
-        except Exception:
-            return getattr(req, "document_status", None)
-    return getattr(req, "document_status", None)
-
-
-def _session_on_duty_benefit_active(*, mode: str, req, punch_dt) -> bool:
-    """ON Duty benefit applies only when the punch exists for that session.
-
-    For request-based ON Duty, supporting document must be VERIFIED.
-    Scheduled ON Duty without a request still grants the session benefit once the
-    corresponding punch exists.
-    """
-
-    if mode != AttendanceWorkMode.ON_DUTY or punch_dt is None:
-        return False
-
-    if req is None:
-        return True
-
-    if getattr(req, "status", None) != WorkModeRequestStatus.APPROVED:
-        return False
-
-    return _effective_document_status_or_none(req) == WorkModeRequestDocumentStatus.VERIFIED
-
-
-def _neutralize_on_duty_session_metrics(*, in_mode: str, in_req, in_punch_dt, out_mode: str, out_req, out_punch_dt, late_by_hhmm, checked_out_early: bool, checked_out_early_by_hhmm):
-    if _session_on_duty_benefit_active(mode=in_mode, req=in_req, punch_dt=in_punch_dt):
-        late_by_hhmm = None
-    if _session_on_duty_benefit_active(mode=out_mode, req=out_req, punch_dt=out_punch_dt):
-        checked_out_early = False
-        checked_out_early_by_hhmm = None
-    return late_by_hhmm, checked_out_early, checked_out_early_by_hhmm
-
-def _parse_location_payload(request) -> dict | None:
-    """Parse location payload from request.data (multipart or JSON).
-    Accepts:
-      - location: dict or JSON string
-      - lat/lng/accuracy/provider/captured_at
-      - latitude/longitude
-    """
-    data = getattr(request, "data", {}) or {}
-    loc = data.get("location", None)
-    if loc:
-        if isinstance(loc, str):
-            try:
-                loc = json.loads(loc)
-            except Exception:
-                loc = None
-        if isinstance(loc, dict):
-            return loc
-
-    # Flat keys
-    lat = data.get("lat", None) or data.get("latitude", None)
-    lng = data.get("lng", None) or data.get("longitude", None)
-    if lat is None or lng is None:
-        return None
-
-    def _to_float(v):
-        try:
-            return float(v)
-        except Exception:
-            return None
-
-    lat_f = _to_float(lat)
-    lng_f = _to_float(lng)
-    if lat_f is None or lng_f is None:
-        return None
-
-    payload = {"lat": lat_f, "lng": lng_f}
-
-    acc = data.get("accuracy", None)
-    if acc is not None:
-        try:
-            payload["accuracy"] = float(acc)
-        except Exception:
-            payload["accuracy"] = acc
-
-    provider = data.get("provider", None) or data.get("source", None)
-    if provider:
-        payload["provider"] = str(provider)
-
-    captured_at = data.get("captured_at", None) or data.get("timestamp", None)
-    if captured_at:
-        payload["captured_at"] = str(captured_at)
-
-    return payload
-
-
-def _is_admin_with_perm(request, perm_codename: str) -> bool:
-    """Admin permission helper.
-
-    Backward compatibility:
-    - Superuser is always treated as allowed.
-    - Treat `attendance.change_attendance` as an admin approval permission for
-      work-type requests too (many installs grant this to admins).
-    """
-    try:
-        user = getattr(request, "user", None)
-        if not user:
-            return False
-        if getattr(user, "is_superuser", False):
-            return True
-        if user.has_perm(perm_codename):
-            return True
-        if perm_codename == "attendance.change_workmoderequest" and user.has_perm(
-            "attendance.change_attendance"
-        ):
-            return True
-        return False
-    except Exception:
-        return False
-
-
-def _subordinate_employee_ids(request):
-    try:
-        return get_subordinate_employee_ids(request) or []
-    except Exception:
-        return []
-
-
-def _is_supervisor_of(request, employee_id: int) -> bool:
-    """True if request.user is in the reporting chain above `employee_id`."""
-    try:
-        sub_ids = _subordinate_employee_ids(request)
-        return int(employee_id) in set(map(int, sub_ids or []))
-    except Exception:
-        return False
-
-
-def _can_act_on_employee(request, employee_id: int, perm_codename: str, allow_owner: bool = False) -> bool:
-    """Admin (has perm) OR supervisor of employee. Optionally allow owner.
-
-    IMPORTANT: Even if user is admin with perm, disallow acting on their own request unless allow_owner=True.
-    """
-    my_emp_id = None
-    try:
-        my_emp = request.user.employee_get
-        my_emp_id = int(getattr(my_emp, "id", 0) or 0)
-    except Exception:
-        my_emp_id = None
-
-    is_owner = my_emp_id is not None and int(my_emp_id) == int(employee_id)
-
-    # Block self-action unless explicitly allowed
-    if is_owner and not allow_owner:
-        return False
-
-    if _is_admin_with_perm(request, perm_codename):
-        return True
-
-    if allow_owner and is_owner:
-        return True
-
-    return _is_supervisor_of(request, employee_id)
-
-
-# -----------------------------------------------------------------------------
-def _api_now(request) -> datetime:
-    """
-    Resolve a request datetime.
-
-    Priority:
-    1) request.datetime (if injected by a wrapper)
-    2) timezone-aware now() if USE_TZ
-    3) naive datetime.now()
-    """
-    dt_attr = getattr(request, "datetime", None)
-    if dt_attr:
-        return dt_attr
-    if getattr(settings, "USE_TZ", False):
-        return dj_timezone.localtime(dj_timezone.now())
-    return datetime.now()
-
-
-def _api_today(request, dt_now: datetime) -> date:
-    """Resolve a request date if provided, otherwise use dt_now.date()."""
-    d_attr = getattr(request, "date", None)
-    return d_attr if isinstance(d_attr, date) else dt_now.date()
-
-
-def _coerce_datetime_like(dt_value: datetime | None, ref_dt: datetime) -> datetime | None:
-    """Ensure dt_value has the same timezone-awareness as ref_dt.
-
-    - If USE_TZ=True and dt_value is naive, make it aware using ref_dt.tzinfo (or current timezone).
-    - If USE_TZ=True and dt_value is aware, convert to ref_dt's timezone for safe comparison.
-    - If USE_TZ=False and dt_value is aware, make it naive.
-    """
-    if dt_value is None:
-        return None
-
-    use_tz = getattr(settings, "USE_TZ", False)
-
-    if use_tz:
-        # ref tzinfo: prefer ref_dt, fallback to Django current timezone.
-        ref_tz = ref_dt.tzinfo if dj_timezone.is_aware(ref_dt) and ref_dt.tzinfo else dj_timezone.get_current_timezone()
-
-        if dj_timezone.is_naive(dt_value):
-            return dj_timezone.make_aware(dt_value, ref_tz)
-
-        # dt_value aware: normalize to ref_tz for consistent comparisons
-        try:
-            return dj_timezone.localtime(dt_value, ref_tz)
-        except Exception:
-            return dt_value
-
-    # USE_TZ=False
-    if dj_timezone.is_aware(dt_value):
-        try:
-            return dj_timezone.make_naive(dt_value)
-        except Exception:
-            return dt_value
-    return dt_value
-
-
-def _normalize_none(value):
-    """Normalize common empty string values to Python None."""
-    if value is None:
-        return None
-    if isinstance(value, str) and value.strip() in ("", "None", "null", "NULL"):
-        return None
-    return value
-
-
-def _format_minimum_hour(value):
-    """Return minimum working hour in HH:MM (string) or None."""
-    if value is None:
-        return None
-    # Already HH:MM / HH:MM:SS string
-    if isinstance(value, str):
-        s = value.strip()
-        if not s or s.lower() in ("none", "null"):
-            return None
-        # Keep only HH:MM if seconds present
-        if len(s) >= 5 and s[2] == ":":
-            return s[:5]
-        return s
-    # datetime.time
-    try:
-        return value.strftime("%H:%M")
-    except Exception:
-        pass
-    # timedelta (best effort)
-    try:
-        total_seconds = int(value.total_seconds())
-        if total_seconds < 0:
-            return None
-        h = (total_seconds // 3600) % 24
-        m = (total_seconds % 3600) // 60
-        return f"{h:02d}:{m:02d}"
-    except Exception:
-        return str(value)
-
 
 
 def _normalize_requested_data(requested_data: dict) -> dict:
@@ -2157,16 +1439,6 @@ class AttendanceRequestView(APIView):
                 requests = requests.filter(employee_id_id=employee_id)
             requests = requests.filter(attendance_date__range=(history_month_start, history_month_end))
             requests = _attendance_history_status_filter(requests, request.GET.get("status"))
-            try:
-                history_has_results = requests.exists()
-            except Exception:
-                history_has_results = True
-            if not history_has_results:
-                requests = _attendance_request_history_scope(request)
-                if employee_id:
-                    requests = requests.filter(employee_id_id=employee_id)
-                requests = requests.filter(attendance_date__range=(history_month_start, history_month_end))
-                requests = _attendance_history_status_filter(requests, request.GET.get("status"))
         elif mine_only:
             requests = my_qs.filter(attendance_date__range=(month_range[0], month_range[1]))
             if status_filter != "all":
@@ -2183,21 +1455,6 @@ class AttendanceRequestView(APIView):
         else:
             requests = AttendanceCorrectionRequest.objects.filter(Q(id__in=approvals_qs.values("id")) | Q(id__in=my_qs.values("id"))).distinct()
 
-        try:
-            has_results = requests.exists()
-        except Exception:
-            has_results = True
-        if not has_results and approval_view != "history":
-            user_lookup = _request_user_lookup_value(request)
-            approvals_legacy = Attendance.objects.filter(is_validate_request=True).exclude(employee_id__employee_user_id=user_lookup)
-            approvals_legacy = filtersubordinates(request, perm="attendance.change_attendance", queryset=approvals_legacy)
-            owner_base_qs = Attendance.objects.filter(employee_id__employee_user_id=user_lookup)
-            my_legacy = owner_base_qs.filter(Q(action_type__isnull=False) | Q(is_validate_request=True) | Q(is_validate_request_approved=True))
-            if mine_only:
-                requests = my_legacy.filter(attendance_date__range=(month_range[0], month_range[1]))
-            else:
-                requests = (approvals_legacy | my_legacy).distinct()
-                requests = AttendanceFilters(request.GET, queryset=requests).qs
         pagenation = PageNumberPagination()
         page = pagenation.paginate_queryset(requests.order_by("-attendance_date", "-action_at", "-id"), request)
         serializer = self.serializer_class(page, many=True, context={"request": request})
@@ -2215,9 +1472,6 @@ class AttendanceRequestView(APIView):
             transaction.set_rollback(True)
             return Response({"files": getattr(ve, "messages", [str(ve)])}, status=400)
         data = _mutable_request_data(request)
-        # Legacy form path remains for compatibility when new correction fields are absent.
-        if not any(k in data for k in ("scope", "requested_check_in_time", "requested_check_out_time", "requested_check_in_date", "requested_check_out_date")):
-            return _legacy_create_attendance_request(request, self.serializer_class)
         try:
             employee = request.user.employee_get
         except Exception:
@@ -2233,7 +1487,7 @@ class AttendanceRequestView(APIView):
     def put(self, request, pk):
         req_obj = _locked_correction_request(pk)
         if req_obj is None:
-            return _legacy_update_attendance_request(request, pk, self.serializer_class)
+            return Response({"error": "Attendance correction request not found."}, status=404)
         flags = build_attendance_correction_permission_flags(req_obj, request.user)
         if not flags.get("can_edit"):
             return Response({"error": "Only the owner can edit a waiting request."}, status=status.HTTP_403_FORBIDDEN)
@@ -2258,10 +1512,7 @@ class AttendanceRequestApproveView(APIView):
     def put(self, request, pk):
         req_obj = _locked_correction_request(pk)
         if req_obj is None:
-            attendance = _locked_legacy_attendance(pk)
-            if attendance is None:
-                return Response({"error": "Attendance request not found."}, status=404)
-            return _legacy_approve_attendance_request(request, attendance)
+            return Response({"error": "Attendance correction request not found."}, status=404)
         if not correction_user_can_approve_request(request.user, req_obj):
             return Response({"error": "You do not have permission to approve this request."}, status=status.HTTP_403_FORBIDDEN)
         try:
@@ -2279,10 +1530,7 @@ class AttendanceRequestRevokeView(APIView):
         req_obj = _locked_correction_request(pk)
         reason = ((getattr(request, "data", {}) or {}).get("reason") or (getattr(request, "data", {}) or {}).get("comment") or "").strip()
         if req_obj is None:
-            attendance = _locked_legacy_attendance(pk)
-            if attendance is None:
-                return Response({"error": "Attendance request not found."}, status=404)
-            return _legacy_revoke_attendance_request(request, attendance, reason=reason)
+            return Response({"error": "Attendance correction request not found."}, status=404)
         flags = build_attendance_correction_permission_flags(req_obj, request.user)
         if not flags.get("can_revoke"):
             return Response({"error": "You do not have permission to revoke this request."}, status=status.HTTP_403_FORBIDDEN)
@@ -2300,10 +1548,7 @@ class AttendanceRequestCancelView(APIView):
     def put(self, request, pk):
         req_obj = _locked_correction_request(pk)
         if req_obj is None:
-            attendance = _locked_legacy_attendance(pk)
-            if attendance is None:
-                return Response({"error": "Attendance request not found."}, status=404)
-            return _legacy_cancel_attendance_request(request, attendance)
+            return Response({"error": "Attendance correction request not found."}, status=404)
         flags = build_attendance_correction_permission_flags(req_obj, request.user)
         if not flags.get("can_cancel"):
             return Response({"error": "Only the requester can cancel a waiting request."}, status=status.HTTP_403_FORBIDDEN)
@@ -2322,10 +1567,7 @@ class AttendanceRequestRejectView(APIView):
         req_obj = _locked_correction_request(pk)
         reason = ((getattr(request, "data", {}) or {}).get("reason") or (getattr(request, "data", {}) or {}).get("comment") or "").strip()
         if req_obj is None:
-            attendance = _locked_legacy_attendance(pk)
-            if attendance is None:
-                return Response({"error": "Attendance request not found."}, status=404)
-            return _legacy_reject_attendance_request(request, attendance, reason)
+            return Response({"error": "Attendance correction request not found."}, status=404)
         flags = build_attendance_correction_permission_flags(req_obj, request.user)
         if not flags.get("can_reject"):
             return Response({"error": "You do not have permission to reject this request."}, status=status.HTTP_403_FORBIDDEN)
