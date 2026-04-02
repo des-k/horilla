@@ -44,8 +44,8 @@
         {% for r in approvals %}
           <div class="oh-sticky-table__tr">
             <div class="oh-sticky-table__td">
-              {% with full=r.employee_id.employee_first_name|add:" "|add:r.employee_id.employee_last_name %}
-                <span title="{{ full }}">{{ full|truncatechars:24 }}</span>
+              {% with full=r.employee_id.get_full_name %}
+                <span title="{{ full|default:'-' }}">{{ full|default:'-'|truncatechars:24 }}</span>
               {% endwith %}
             </div>
             <div class="oh-sticky-table__td">
