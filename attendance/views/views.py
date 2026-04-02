@@ -383,9 +383,9 @@ def attendance_tab(request, emp_id):
     Returns: return attendance-tab template
     """
 
-    requests = Attendance.objects.filter(
-        is_validate_request=True,
+    requests = AttendanceCorrectionRequest.objects.filter(
         employee_id=emp_id,
+        status=AttendanceCorrectionRequestStatus.WAITING,
     )
     attendances_ids = json.dumps([instance.id for instance in requests])
     validate_attendances = Attendance.objects.filter(
@@ -1923,10 +1923,14 @@ def validate_bulk_attendance(request):
         try:
             attendance = Attendance.objects.get(id=obj_id)
 
-            if attendance.is_validate_request:
+            if AttendanceCorrectionRequest.objects.filter(
+                employee_id=attendance.employee_id,
+                attendance_date=attendance.attendance_date,
+                status=AttendanceCorrectionRequestStatus.WAITING,
+            ).exists():
                 error_messages.append(
                     _(
-                        "Pending attendance update request for {}'s attendance on {}!"
+                        "Pending attendance correction request for {} on {}!"
                     ).format(attendance.employee_id, attendance.attendance_date)
                 )
                 continue
