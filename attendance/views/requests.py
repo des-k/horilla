@@ -1801,3 +1801,450 @@ def get_employee_shift(request):
         },
     )
     return HttpResponse(f"{shift_id}")
+
+
+# -----------------------------------------------------------------------------
+# Redesigned Attendance Correction Request web flow (overrides legacy handlers)
+# -----------------------------------------------------------------------------
+from collections import OrderedDict
+
+from django.shortcuts import get_object_or_404
+
+from attendance.forms import MultipleFileField
+from attendance.models import (
+    AttendanceCorrectionRequest,
+    AttendanceCorrectionRequestAttachment,
+    AttendanceCorrectionRequestStatus,
+)
+from attendance.services.attendance_correction_requests import (
+    AttendanceCorrectionError,
+    approve_request,
+    build_permission_flags,
+    cancel_request,
+    create_request,
+    reject_request,
+    revoke_request,
+    update_request,
+    user_can_approve_request,
+    user_is_request_owner,
+)
+from base.methods import get_subordinate_employee_ids
+
+
+class AttendanceCorrectionRequestWebForm(forms.Form):
+    employee_id = forms.ModelChoiceField(queryset=Employee.objects.none(), widget=forms.HiddenInput(), required=True)
+    attendance_date = forms.DateField(widget=forms.DateInput(attrs={"type": "date"}), required=True)
+    attendance_clock_in = forms.TimeField(widget=forms.TimeInput(attrs={"type": "time"}), required=False)
+    attendance_clock_out = forms.TimeField(widget=forms.TimeInput(attrs={"type": "time"}), required=False)
+    request_description = forms.CharField(widget=forms.Textarea, required=True, label=_("Reason / Note"))
+    scope = forms.ChoiceField(
+        choices=[("IN", _("IN")), ("OUT", _("OUT")), ("FULL", _("IN & OUT"))],
+        required=False,
+        initial="FULL",
+        widget=forms.HiddenInput(),
+    )
+    files = MultipleFileField(required=False, label=_("Attachment"))
+
+    def __init__(self, *args, employee=None, instance=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        if employee is not None:
+            self.fields["employee_id"].queryset = Employee.objects.filter(id=employee.id)
+            self.fields["employee_id"].initial = employee.id
+        if instance is not None:
+            self.fields["employee_id"].queryset = Employee.objects.filter(id=instance.employee_id_id)
+            self.initial.setdefault("employee_id", instance.employee_id_id)
+            self.initial.setdefault("attendance_date", instance.attendance_date)
+            self.initial.setdefault("attendance_clock_in", instance.requested_check_in_time)
+            self.initial.setdefault("attendance_clock_out", instance.requested_check_out_time)
+            self.initial.setdefault("request_description", instance.reason)
+            self.initial.setdefault("scope", instance.scope)
+        try:
+            max_date = timezone.localdate() - timedelta(days=1)
+            self.fields["attendance_date"].widget.attrs["max"] = max_date.strftime("%Y-%m-%d")
+        except Exception:
+            pass
+
+
+def _web_shift_info_for_request_obj(request_obj):
+    shift = None
+    try:
+        shift = request_obj.employee_id.employee_work_info.shift_id
+    except Exception:
+        shift = None
+    if not shift:
+        return None
+    try:
+        day = request_obj.attendance_date.strftime("%A").lower()
+        day_obj = EmployeeShiftDay.objects.filter(day=day).first()
+        sched = EmployeeShiftSchedule.objects.filter(shift_id=shift, day=day_obj).first()
+        grace = cio._resolve_grace_time(sched, shift)
+        secs = int(getattr(grace, "allowed_time_in_secs", 0) or 0) if grace else 0
+        return {
+            "name": str(shift),
+            "start": sched.start_time.strftime("%H:%M") if sched and getattr(sched, "start_time", None) else "-",
+            "end": sched.end_time.strftime("%H:%M") if sched and getattr(sched, "end_time", None) else "-",
+            "flexi_minutes": int(secs // 60),
+        }
+    except Exception:
+        return None
+
+
+def _web_attachment_counts(queryset):
+    return {obj.id: getattr(obj, "attachment_links", None).count() if hasattr(obj, "attachment_links") else 0 for obj in queryset}
+
+
+def _web_shift_info_map(queryset):
+    return {obj.id: _web_shift_info_for_request_obj(obj) for obj in queryset}
+
+
+def _web_history_status_filter(qs, status_value):
+    status_value = (status_value or "all").strip().lower()
+    mapping = {
+        "approved": AttendanceCorrectionRequestStatus.APPROVED,
+        "rejected": AttendanceCorrectionRequestStatus.REJECTED,
+        "revoked": AttendanceCorrectionRequestStatus.REVOKED,
+    }
+    if status_value in mapping:
+        return qs.filter(status=mapping[status_value])
+    if status_value in {"canceled", "cancel"}:
+        return qs.none()
+    return qs
+
+
+@login_required
+def request_attendance_view(request):
+    employee = getattr(request.user, "employee_get", None)
+    is_super = bool(getattr(request.user, "is_superuser", False))
+    can_approve = bool(employee and get_subordinate_employee_ids(type("R", (), {"user": request.user})())) or is_super
+    if employee is None and not is_super:
+        return HttpResponseForbidden("Employee profile required")
+
+    status_my = (request.GET.get("status_my") or "all").strip().lower()
+    approval_subtab = (request.GET.get("approval_subtab") or "active").strip().lower()
+    if approval_subtab not in {"active", "history"}:
+        approval_subtab = "active"
+    show_approval_tab = any(
+        key in request.GET for key in ("tab", "approval_subtab", "page_app", "page_app_hist", "history_month", "history_status", "history_employee_id")
+    ) or (request.GET.get("tab") or "").strip().lower() == "approvals"
+
+    history_status = (request.GET.get("history_status") or "all").strip().lower()
+    history_employee_id = (request.GET.get("history_employee_id") or "").strip()
+    history_month_start, history_month_end, history_month = _parse_history_month_range(request.GET.get("history_month") or request.GET.get("history_date"))
+    my_month_start, my_month_end, my_month = _parse_history_month_range(request.GET.get("my_month"))
+    search = (request.GET.get("search") or "").strip()
+
+    my_qs = AttendanceCorrectionRequest.objects.filter(employee_id__employee_user_id=request.user, attendance_date__range=(my_month_start, my_month_end))
+    if status_my != "all":
+        mapping = {
+            "waiting": AttendanceCorrectionRequestStatus.WAITING,
+            "approved": AttendanceCorrectionRequestStatus.APPROVED,
+            "rejected": AttendanceCorrectionRequestStatus.REJECTED,
+            "revoked": AttendanceCorrectionRequestStatus.REVOKED,
+            "canceled": AttendanceCorrectionRequestStatus.CANCELED,
+            "cancel": AttendanceCorrectionRequestStatus.CANCELED,
+        }
+        if status_my in mapping:
+            my_qs = my_qs.filter(status=mapping[status_my])
+
+    subordinate_ids = set(get_subordinate_employee_ids(type("R", (), {"user": request.user})())) if employee else set()
+    approvals_qs = AttendanceCorrectionRequest.objects.filter(status=AttendanceCorrectionRequestStatus.WAITING)
+    if is_super:
+        approvals_qs = approvals_qs.exclude(employee_id__employee_user_id=request.user)
+        history_qs = AttendanceCorrectionRequest.objects.exclude(status__in=[AttendanceCorrectionRequestStatus.WAITING, AttendanceCorrectionRequestStatus.CANCELED])
+    elif subordinate_ids:
+        approvals_qs = approvals_qs.filter(employee_id_id__in=subordinate_ids).exclude(employee_id__employee_user_id=request.user)
+        history_qs = AttendanceCorrectionRequest.objects.filter(
+            employee_id_id__in=subordinate_ids,
+            status__in=[
+                AttendanceCorrectionRequestStatus.APPROVED,
+                AttendanceCorrectionRequestStatus.REJECTED,
+                AttendanceCorrectionRequestStatus.REVOKED,
+            ],
+        )
+    else:
+        approvals_qs = AttendanceCorrectionRequest.objects.none()
+        history_qs = AttendanceCorrectionRequest.objects.none()
+
+    history_qs = history_qs.filter(attendance_date__range=(history_month_start, history_month_end))
+    if history_employee_id:
+        history_qs = history_qs.filter(employee_id_id=history_employee_id)
+    history_qs = _web_history_status_filter(history_qs, history_status)
+
+    if search:
+        my_qs = my_qs.filter(Q(reason__icontains=search) | Q(scope__icontains=search))
+        approvals_qs = approvals_qs.filter(
+            Q(employee_id__employee_first_name__icontains=search)
+            | Q(employee_id__employee_last_name__icontains=search)
+            | Q(employee_id__badge_id__icontains=search)
+            | Q(reason__icontains=search)
+        )
+        history_qs = history_qs.filter(
+            Q(employee_id__employee_first_name__icontains=search)
+            | Q(employee_id__employee_last_name__icontains=search)
+            | Q(employee_id__badge_id__icontains=search)
+            | Q(reason__icontains=search)
+        )
+
+    my_requests = paginator_qry(my_qs.order_by("-attendance_date", "-action_at", "-id"), request.GET.get("page_my"))
+    approvals = paginator_qry(approvals_qs.order_by("-attendance_date", "-created_at", "-id"), request.GET.get("page_app"))
+    approval_history = paginator_qry(history_qs.order_by("-attendance_date", "-action_at", "-id"), request.GET.get("page_app_hist"))
+
+    status_my_options = [
+        ("all", _("All Statuses")),
+        ("waiting", _("WAITING")),
+        ("approved", _("APPROVED")),
+        ("rejected", _("REJECTED")),
+        ("revoked", _("REVOKED")),
+        ("canceled", _("CANCELED")),
+    ]
+    history_status_options = [
+        ("all", _("All Statuses")),
+        ("approved", _("APPROVED")),
+        ("rejected", _("REJECTED")),
+        ("revoked", _("REVOKED")),
+    ]
+
+    history_employees = Employee.objects.filter(id__in=subordinate_ids).order_by("employee_first_name", "employee_last_name") if subordinate_ids else Employee.objects.none()
+
+    try:
+        q_my = request.GET.copy(); q_my.pop("page_my", None); pd_my = q_my.urlencode()
+        q_app = request.GET.copy(); q_app.pop("page_app", None); pd_app = q_app.urlencode()
+        q_app_hist = request.GET.copy(); q_app_hist.pop("page_app_hist", None); pd_app_hist = q_app_hist.urlencode()
+    except Exception:
+        pd_my = pd_app = pd_app_hist = ""
+
+    current_my = list(my_requests.object_list)
+    current_app = list(approvals.object_list)
+    current_hist = list(approval_history.object_list)
+
+    return render(
+        request,
+        "attendance/attendance_requests/view.html",
+        {
+            "my_requests": my_requests,
+            "approvals": approvals,
+            "approval_history": approval_history,
+            "can_approve": can_approve,
+            "search": search,
+            "status_my": status_my,
+            "status_my_options": status_my_options,
+            "history_status": history_status,
+            "history_status_options": history_status_options,
+            "history_employee_id": history_employee_id,
+            "history_employees": history_employees,
+            "history_month": history_month,
+            "my_month": my_month,
+            "approval_subtab": approval_subtab,
+            "show_approval_tab": show_approval_tab,
+            "my_attach_counts": _web_attachment_counts(current_my),
+            "app_attach_counts": _web_attachment_counts(current_app),
+            "history_attach_counts": _web_attachment_counts(current_hist),
+            "my_shift_info": _web_shift_info_map(current_my),
+            "app_shift_info": _web_shift_info_map(current_app),
+            "history_shift_info": _web_shift_info_map(current_hist),
+            "history_time_surface": {},
+            "pd_my": pd_my,
+            "pd_app": pd_app,
+            "pd_app_hist": pd_app_hist,
+        },
+    )
+
+
+@login_required
+@hx_request_required
+@transaction.atomic
+def request_new(request):
+    employee = getattr(request.user, "employee_get", None)
+    if employee is None:
+        return HttpResponseForbidden("Employee profile required")
+    form = AttendanceCorrectionRequestWebForm(request.POST or None, request.FILES or None, employee=employee)
+    if request.method == "POST" and form.is_valid():
+        payload = {
+            "attendance_date": form.cleaned_data["attendance_date"],
+            "scope": form.cleaned_data.get("scope") or "FULL",
+            "reason": form.cleaned_data["request_description"],
+            "requested_check_in_date": form.cleaned_data["attendance_date"] if form.cleaned_data.get("attendance_clock_in") else None,
+            "requested_check_in_time": form.cleaned_data.get("attendance_clock_in"),
+            "requested_check_out_date": form.cleaned_data["attendance_date"] if form.cleaned_data.get("attendance_clock_out") else None,
+            "requested_check_out_time": form.cleaned_data.get("attendance_clock_out"),
+        }
+        try:
+            create_request(employee=employee, actor_user=request.user, payload=payload, uploaded_files=form.cleaned_data.get("files") or [])
+        except AttendanceCorrectionError as exc:
+            for field, messages_ in getattr(exc, "message_dict", {None: exc.messages}).items():
+                for message in messages_ if isinstance(messages_, list) else [messages_]:
+                    form.add_error(None if field == "error" else field, message)
+        else:
+            messages.success(request, _("Attendance correction request created."))
+            return HttpResponse(render(request, "requests/attendance/request_new_form.html", {"form": AttendanceCorrectionRequestWebForm(employee=employee), "bulk": False, "form_action": reverse("request-new-attendance")}).content.decode("utf-8") + "<script>location.reload();</script>")
+    return render(request, "requests/attendance/request_new_form.html", {"form": form, "bulk": False, "form_action": reverse("request-new-attendance")})
+
+
+@login_required
+def validate_attendance_request(request, attendance_id):
+    req_obj = get_object_or_404(AttendanceCorrectionRequest, id=attendance_id)
+    flags = build_permission_flags(req_obj, request.user)
+    if not any(flags.values()) and not user_is_request_owner(request.user, req_obj) and not getattr(request.user, "is_superuser", False):
+        return HttpResponseForbidden("Permission denied")
+    final_attendance = Attendance.objects.filter(employee_id=req_obj.employee_id, attendance_date=req_obj.attendance_date).first()
+    current_in_date = getattr(final_attendance, "attendance_clock_in_date", None)
+    current_in = getattr(final_attendance, "attendance_clock_in", None)
+    current_out_date = getattr(final_attendance, "attendance_clock_out_date", None)
+    current_out = getattr(final_attendance, "attendance_clock_out", None)
+    diff_data = OrderedDict([
+        (_("Attendance date"), (req_obj.attendance_date, req_obj.attendance_date)),
+        (_("Shift"), ("-", "-")),
+        (_("Check-In Date"), (current_in_date, req_obj.requested_check_in_date)),
+        (_("Check-In"), (current_in, req_obj.requested_check_in_time)),
+        (_("Check-Out Date"), (current_out_date, req_obj.requested_check_out_date)),
+        (_("Check-Out"), (current_out, req_obj.requested_check_out_time)),
+    ])
+    return render(request, "requests/attendance/individual_view.html", {
+        "data": diff_data,
+        "attendance": req_obj,
+        "previous": req_obj.id,
+        "next": req_obj.id,
+        "requests_ids": None,
+        "attachment_count": req_obj.attachment_links.count(),
+        "shift_info": _web_shift_info_for_request_obj(req_obj),
+    })
+
+
+@login_required
+@manager_can_enter("attendance.change_attendance")
+@transaction.atomic
+def approve_validate_attendance_request(request, attendance_id):
+    req_obj = get_object_or_404(AttendanceCorrectionRequest.objects.select_for_update(), id=attendance_id)
+    if not user_can_approve_request(request.user, req_obj):
+        messages.error(request, _("You do not have permission to approve this request."))
+        return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+    try:
+        approve_request(request_obj=req_obj, actor_user=request.user)
+        messages.success(request, _("Attendance request approved."))
+    except AttendanceCorrectionError as exc:
+        messages.error(request, "; ".join(sum(([v] if isinstance(v, str) else list(v) for v in getattr(exc, "message_dict", {"error": exc.messages}).values()), [])))
+    return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+
+
+@login_required
+@manager_can_enter("attendance.change_attendance")
+@transaction.atomic
+def revoke_validate_attendance_request(request, attendance_id):
+    req_obj = get_object_or_404(AttendanceCorrectionRequest.objects.select_for_update(), id=attendance_id)
+    if not build_permission_flags(req_obj, request.user).get("can_revoke"):
+        messages.error(request, _("You do not have permission to revoke this request."))
+        return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+    reason = (request.POST.get("reason") or request.GET.get("reason") or request.POST.get("comment") or "").strip() or _("Revoke by approver")
+    try:
+        revoke_request(request_obj=req_obj, actor_user=request.user, reason=reason)
+        messages.success(request, _("Attendance request revoked."))
+    except AttendanceCorrectionError as exc:
+        messages.error(request, "; ".join(sum(([v] if isinstance(v, str) else list(v) for v in getattr(exc, "message_dict", {"error": exc.messages}).values()), [])))
+    return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+
+
+@login_required
+@transaction.atomic
+def cancel_attendance_request(request, attendance_id):
+    req_obj = get_object_or_404(AttendanceCorrectionRequest.objects.select_for_update(), id=attendance_id)
+    if not build_permission_flags(req_obj, request.user).get("can_cancel"):
+        messages.error(request, _("Only the requester can cancel a waiting request."))
+        return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+    try:
+        cancel_request(request_obj=req_obj, actor_user=request.user)
+        messages.success(request, _("Attendance request canceled."))
+    except AttendanceCorrectionError as exc:
+        messages.error(request, "; ".join(sum(([v] if isinstance(v, str) else list(v) for v in getattr(exc, "message_dict", {"error": exc.messages}).values()), [])))
+    return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+
+
+@login_required
+@manager_can_enter("attendance.change_attendance")
+@transaction.atomic
+def reject_validate_attendance_request(request, attendance_id):
+    req_obj = get_object_or_404(AttendanceCorrectionRequest.objects.select_for_update(), id=attendance_id)
+    if request.method != "POST":
+        if not build_permission_flags(req_obj, request.user).get("can_reject"):
+            return HttpResponseForbidden("Permission denied")
+        return render(request, "attendance/attendance_requests/reject_form.html", {"attendance": req_obj})
+    if not build_permission_flags(req_obj, request.user).get("can_reject"):
+        messages.error(request, _("You do not have permission to reject this request."))
+        return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+    reason = (request.POST.get("comment") or request.POST.get("reason") or "").strip()
+    try:
+        reject_request(request_obj=req_obj, actor_user=request.user, reason=reason)
+        messages.success(request, _("Attendance request rejected."))
+    except AttendanceCorrectionError as exc:
+        messages.error(request, "; ".join(sum(([v] if isinstance(v, str) else list(v) for v in getattr(exc, "message_dict", {"error": exc.messages}).values()), [])))
+    return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+
+
+@login_required
+@hx_request_required
+@transaction.atomic
+def edit_validate_attendance(request, attendance_id):
+    req_obj = get_object_or_404(AttendanceCorrectionRequest.objects.select_for_update(), id=attendance_id)
+    if not build_permission_flags(req_obj, request.user).get("can_edit"):
+        return HttpResponseForbidden("Permission denied")
+    employee = req_obj.employee_id
+    form = AttendanceCorrectionRequestWebForm(request.POST or None, request.FILES or None, employee=employee, instance=req_obj)
+    if request.method == "POST" and form.is_valid():
+        payload = {
+            "attendance_date": form.cleaned_data["attendance_date"],
+            "scope": form.cleaned_data.get("scope") or req_obj.scope,
+            "reason": form.cleaned_data["request_description"],
+            "requested_check_in_date": form.cleaned_data["attendance_date"] if form.cleaned_data.get("attendance_clock_in") else None,
+            "requested_check_in_time": form.cleaned_data.get("attendance_clock_in"),
+            "requested_check_out_date": form.cleaned_data["attendance_date"] if form.cleaned_data.get("attendance_clock_out") else None,
+            "requested_check_out_time": form.cleaned_data.get("attendance_clock_out"),
+        }
+        try:
+            update_request(request_obj=req_obj, actor_user=request.user, payload=payload, uploaded_files=form.cleaned_data.get("files") or [])
+        except AttendanceCorrectionError as exc:
+            for field, messages_ in getattr(exc, "message_dict", {None: exc.messages}).items():
+                for message in messages_ if isinstance(messages_, list) else [messages_]:
+                    form.add_error(None if field == "error" else field, message)
+        else:
+            messages.success(request, _("Attendance correction request updated."))
+            return HttpResponse(render(request, "requests/attendance/request_new_form.html", {"form": AttendanceCorrectionRequestWebForm(employee=employee, instance=req_obj), "bulk": False, "form_action": reverse("edit-validate-attendance", args=[req_obj.id])}).content.decode("utf-8") + "<script>location.reload();</script>")
+    return render(request, "requests/attendance/request_new_form.html", {"form": form, "bulk": False, "form_action": reverse("edit-validate-attendance", args=[req_obj.id])})
+
+
+@login_required
+@hx_request_required
+def attendance_request_attachments(request, attendance_id):
+    req_obj = get_object_or_404(AttendanceCorrectionRequest, id=attendance_id)
+    flags = build_permission_flags(req_obj, request.user)
+    if not any(flags.values()) and not user_is_request_owner(request.user, req_obj) and not getattr(request.user, "is_superuser", False):
+        return HttpResponseForbidden("Permission denied")
+    files = [link.attendance_request_file for link in req_obj.attachment_links.select_related("attendance_request_file").all()]
+    return render(request, "attendance/attendance_requests/attachments_modal.html", {"req": req_obj, "files": files, "can_delete": flags.get("can_edit", False)})
+
+
+@login_required
+@transaction.atomic
+def delete_attendance_request_attachment(request, attendance_id, file_id):
+    if request.method != "POST":
+        return HttpResponseForbidden("Method not allowed")
+    req_obj = get_object_or_404(AttendanceCorrectionRequest.objects.select_for_update(), id=attendance_id)
+    if not build_permission_flags(req_obj, request.user).get("can_edit"):
+        messages.error(request, _("You do not have permission to delete this attachment."))
+        return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+    link = AttendanceCorrectionRequestAttachment.objects.filter(request_id=attendance_id, attendance_request_file_id=file_id).select_related("attendance_request_file").first()
+    if not link:
+        messages.error(request, _("Attachment not found."))
+        return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+    file_obj = link.attendance_request_file
+    storage = getattr(getattr(file_obj, "file", None), "storage", None)
+    file_name = getattr(getattr(file_obj, "file", None), "name", None)
+    link.delete()
+    try:
+        file_obj.delete()
+    finally:
+        if storage and file_name:
+            try:
+                storage.delete(file_name)
+            except Exception:
+                pass
+    messages.success(request, _("Attachment deleted."))
+    return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
