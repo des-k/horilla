@@ -369,7 +369,31 @@ def _approved_work_mode_request_for_session(employee, attendance_date: date, wan
     return None
 
 
+def _normalize_employee_lookup(employee):
+    try:
+        if hasattr(employee, "pk") and getattr(employee, "pk") is not None:
+            return employee
+    except Exception:
+        pass
+    try:
+        if hasattr(employee, "id") and getattr(employee, "id") is not None and not isinstance(getattr(employee, "id"), str):
+            return employee
+    except Exception:
+        pass
+    if isinstance(employee, int):
+        return employee
+    if isinstance(employee, str):
+        text = employee.strip()
+        if text.isdigit():
+            return int(text)
+        return None
+    return employee
+
+
 def _approved_attendance_correction_request_for_session(employee, attendance_date: date, want: str) -> Optional[AttendanceCorrectionRequest]:
+    employee = _normalize_employee_lookup(employee)
+    if employee in (None, ""):
+        return None
     qs = AttendanceCorrectionRequest.objects.filter(
         employee_id=employee,
         attendance_date=attendance_date,
