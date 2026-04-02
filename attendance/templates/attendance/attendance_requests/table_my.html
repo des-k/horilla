@@ -39,21 +39,21 @@
                   {% endwith %}
                 </div>
                 <div class="oh-sticky-table__td">
-                  {% if r.attendance_clock_in %}{{ r.attendance_clock_in|time:"H:i" }}{% else %}-{% endif %}
+                  {% if r.requested_check_in_time %}{{ r.requested_check_in_time|time:"H:i" }}{% else %}-{% endif %}
                 </div>
                 <div class="oh-sticky-table__td">
-                  {% if r.attendance_clock_out %}{{ r.attendance_clock_out|time:"H:i" }}{% else %}-{% endif %}
+                  {% if r.requested_check_out_time %}{{ r.requested_check_out_time|time:"H:i" }}{% else %}-{% endif %}
                 </div>
                 <div class="oh-sticky-table__td">
-                  {% if r.request_type == 'cancel_request' %}
+                  {% if r.status == 'CANCELED' %}
                     <span class="oh-badge oh-badge--secondary oh-badge--small oh-badge--round">{% trans "CANCELED" %}</span>
-                  {% elif r.request_type == 'revoke_request' %}
+                  {% elif r.status == 'REVOKED' %}
                     <span class="oh-badge oh-badge--warning oh-badge--small oh-badge--round">{% trans "REVOKED" %}</span>
-                  {% elif r.request_type == 'reject_request' %}
+                  {% elif r.status == 'REJECTED' %}
                     <span class="oh-badge oh-badge--danger oh-badge--small oh-badge--round">{% trans "REJECTED" %}</span>
-                  {% elif r.is_validate_request %}
+                  {% elif r.status == 'WAITING' %}
                     <span class="oh-badge oh-badge--secondary oh-badge--small oh-badge--round">{% trans "WAITING" %}</span>
-                  {% elif r.is_validate_request_approved or r.attendance_validated %}
+                  {% elif r.status == 'APPROVED' %}
                     <span class="oh-badge oh-badge--success oh-badge--small oh-badge--round">{% trans "APPROVED" %}</span>
                   {% else %}
                     <span class="oh-badge oh-badge--secondary oh-badge--small oh-badge--round">-</span>
@@ -74,39 +74,41 @@
 
                 <div class="oh-sticky-table__td">
                   <span class="text-truncate" style="max-width: 320px; display: inline-block;">
-                    {{ r.request_description|default:"-" }}
+                    {{ r.reason|default:"-" }}
                   </span>
                 </div>
 
                 <div class="oh-sticky-table__td">
-                  {% if r.action_by %}{{ r.action_by.get_full_name }}{% else %}-{% endif %}
+                  {{ r.action_actor_display|default:'-' }}
                 </div>
 
                 <div class="oh-sticky-table__td">
-                  {% if not r.is_validate_request %}
-                    {% with h=r.history.first %}
-                      {% if h %}{{ h.history_date|date:"Y-m-d H:i" }}{% else %}-{% endif %}
-                    {% endwith %}
-                  {% else %}
-                    -
-                  {% endif %}
+                  {% if r.action_at %}{{ r.action_at|date:"Y-m-d H:i" }}{% else %}-{% endif %}
                 </div>
 
                 <div class="oh-sticky-table__td oh-sticky-table__right">
                   <div class="d-flex" style="gap: 6px; justify-content: flex-end;">
-                    <button class="oh-btn oh-btn--light-bkg" title="{% trans 'View' %}"
-                      data-toggle="oh-modal-toggle" data-target="#validateAttendanceRequest"
-                      hx-get="{% url 'validate-attendance-request' r.id %}"
-                      hx-target="#validateAttendanceRequestModalBody"
-                      onclick="event.preventDefault()">
-                      <ion-icon name="eye-outline"></ion-icon>
-                    </button>
+                    {% if r.status == 'WAITING' %}
+                      <button class="oh-btn oh-btn--light-bkg" title="{% trans 'Edit Request' %}"
+                        data-toggle="oh-modal-toggle" data-target="#editValidateAttendanceRequest"
+                        hx-get="{% url 'edit-validate-attendance' r.id %}"
+                        hx-target="#editValidateAttendanceRequestModalBody"
+                        onclick="event.preventDefault()">
+                        <ion-icon name="create-outline"></ion-icon>
+                      </button>
 
-                    {% if r.is_validate_request and not r.is_validate_request_approved %}
                       <a class="oh-btn oh-btn--danger" title="{% trans 'Cancel Request' %}" href="{% url 'cancel-validate-attendance-request' r.id %}"
                         onclick="return confirm('{% trans "Cancel this request?" %}');">
                         <ion-icon name="close-circle-outline"></ion-icon>
                       </a>
+                    {% else %}
+                      <button class="oh-btn oh-btn--light-bkg" title="{% trans 'View Details' %}"
+                        data-toggle="oh-modal-toggle" data-target="#validateAttendanceRequest"
+                        hx-get="{% url 'validate-attendance-request' r.id %}"
+                        hx-target="#validateAttendanceRequestModalBody"
+                        onclick="event.preventDefault()">
+                        <ion-icon name="eye-outline"></ion-icon>
+                      </button>
                     {% endif %}
                   </div>
                 </div>
