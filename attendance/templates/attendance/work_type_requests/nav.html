@@ -44,6 +44,16 @@
           {% endfor %}
         </select>
       </div>
+      <div class="oh-input-group" style="min-width: 170px;">
+        <input
+          type="month"
+          class="oh-input w-100"
+          name="my_month"
+          aria-label="{% trans 'Month' %}"
+          value="{{ my_month }}"
+          onchange="this.form.submit()"
+        />
+      </div>
 
       <div class="oh-main__titlebar-button-container d-flex" style="gap: 8px;">
         <button class="oh-btn oh-btn--secondary" data-toggle="oh-modal-toggle" data-target="#objectCreateModal"
@@ -51,7 +61,7 @@
           <ion-icon name="add-sharp" class="mr-1"></ion-icon>{% trans "Create" %}
         </button>
 
-        <a class="oh-btn oh-btn--light-bkg" href="{% url 'attendance-work-type-request-view' %}" title="{% trans 'Reset filters' %}">
+        <a class="oh-btn oh-btn--light-bkg" href="{% url 'attendance-work-type-request-view' %}?my_month={{ my_month }}" title="{% trans 'Reset filters' %}">
           <ion-icon name="refresh-outline" class="mr-1"></ion-icon>{% trans "Reset" %}
         </a>
       </div>
