@@ -832,7 +832,6 @@ def clock_in_attendance_and_activity(
         "shift_id": shift,
         "work_type_id": employee.employee_work_info.work_type_id,
         "attendance_day": day,
-        "minimum_hour": minimum_hour,
         "attendance_validated": False,
     }
     if effective_presence_only and _has_model_field(Attendance, "is_presensi_only"):
@@ -854,9 +853,6 @@ def clock_in_attendance_and_activity(
     if attendance.shift_id_id != (shift.id if shift else None):
         attendance.shift_id = shift
         att_updates.append("shift_id")
-    if attendance.minimum_hour != minimum_hour:
-        attendance.minimum_hour = minimum_hour
-        att_updates.append("minimum_hour")
     if not attendance.work_type_id:
         attendance.work_type_id = employee.employee_work_info.work_type_id
         att_updates.append("work_type_id")
@@ -1049,7 +1045,6 @@ def clock_out_attendance_and_activity(
     attendance_defaults = {
         "shift_id": shift,
         "work_type_id": employee.employee_work_info.work_type_id,
-        "minimum_hour": minimum_hour,
         "attendance_day": day,
         "attendance_validated": False,
     }
@@ -1094,9 +1089,6 @@ def clock_out_attendance_and_activity(
     if not attendance.work_type_id:
         attendance.work_type_id = employee.employee_work_info.work_type_id
         updates.append("work_type_id")
-    if attendance.minimum_hour != minimum_hour:
-        attendance.minimum_hour = minimum_hour
-        updates.append("minimum_hour")
     if not attendance.attendance_day_id or attendance.attendance_day_id != day.id:
         attendance.attendance_day = day
         updates.append("attendance_day")
