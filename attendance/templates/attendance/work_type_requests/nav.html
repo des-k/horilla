@@ -1,5 +1,47 @@
 {% load i18n %}
 
+<style>
+  @media (min-width: 1200px) {
+    .oh-work-type-request-filter-grid {
+      display: grid !important;
+      grid-template-columns: minmax(320px, 360px) minmax(160px, 1fr) minmax(160px, 1fr) minmax(160px, 1fr) auto;
+      column-gap: 14px;
+      row-gap: 12px;
+      align-items: center;
+    }
+
+    .oh-work-type-request-filter-grid .oh-work-type-request-filter-search {
+      grid-column: 1;
+    }
+
+    .oh-work-type-request-filter-grid .oh-work-type-request-filter-status {
+      grid-column: 2;
+    }
+
+    .oh-work-type-request-filter-grid .oh-work-type-request-filter-mode {
+      grid-column: 3;
+    }
+
+    .oh-work-type-request-filter-grid .oh-work-type-request-filter-scope {
+      grid-column: 4;
+    }
+
+    .oh-work-type-request-filter-grid .oh-work-type-request-filter-month {
+      grid-column: 1;
+    }
+
+    .oh-work-type-request-filter-grid .oh-work-type-request-filter-actions {
+      grid-column: 2 / span 4;
+      justify-content: flex-start;
+      align-self: center;
+    }
+
+    .oh-work-type-request-filter-grid .oh-work-type-request-filter-actions > *:first-child {
+      margin-left: 0 !important;
+    }
+  }
+</style>
+
 <section class="oh-wrapper oh-main__topbar" x-data="{searchShow: false}">
   <div class="oh-main__titlebar oh-main__titlebar--left">
     <h1 class="oh-main__titlebar-title fw-bold">{% trans "Work Type Requests" %}</h1>
@@ -9,19 +51,19 @@
   </div>
 
   <div class="oh-main__titlebar oh-main__titlebar--right">
-    <form method="get" action="{% url 'attendance-work-type-request-view' %}" class="d-flex flex-wrap align-items-center" style="gap: 8px;" onsubmit="event.preventDefault(); this.submit();">
+    <form method="get" action="{% url 'attendance-work-type-request-view' %}" class="d-flex flex-wrap align-items-center oh-work-type-request-filter-grid" style="gap: 8px;" onsubmit="event.preventDefault(); this.submit();">
       {# Preserve current sorting when applying search / quick filters #}
       <input type="hidden" name="sort_my" value="{{ sort_my }}" />
       <input type="hidden" name="dir_my" value="{{ dir_my }}" />
       <input type="hidden" name="sort_app" value="{{ sort_app }}" />
       <input type="hidden" name="dir_app" value="{{ dir_app }}" />
 
-      <div class="oh-input-group oh-input__search-group" :class="searchShow ? 'oh-input__search-group--show' : ''">
+      <div class="oh-input-group oh-input__search-group oh-work-type-request-filter-search" :class="searchShow ? 'oh-input__search-group--show' : ''">
         <ion-icon name="search-outline" class="oh-input-group__icon oh-input-group__icon--left"></ion-icon>
         <input type="text" class="oh-input oh-input__icon" aria-label="Search Input" placeholder="{% trans 'Search' %}" name="search" value="{{ search|default:'' }}" />
       </div>
 
-      <div class="oh-input-group" style="min-width: 200px;">
+      <div class="oh-input-group oh-work-type-request-filter-status" style="min-width: 200px;">
         <select class="oh-select w-100" name="status_my" aria-label="{% trans 'Status' %}" onchange="this.form.submit()">
           {% for v, label in status_my_options %}
             <option value="{{ v }}" {% if status_my == v %}selected{% endif %}>{{ label }}</option>
@@ -29,7 +71,7 @@
         </select>
       </div>
 
-      <div class="oh-input-group" style="min-width: 170px;">
+      <div class="oh-input-group oh-work-type-request-filter-mode" style="min-width: 170px;">
         <select class="oh-select w-100" name="mode_filter" aria-label="{% trans 'Work Type' %}" onchange="this.form.submit()">
           {% for v, label in mode_filter_options %}
             <option value="{{ v }}" {% if mode_filter == v %}selected{% endif %}>{{ label }}</option>
@@ -37,14 +79,14 @@
         </select>
       </div>
 
-      <div class="oh-input-group" style="min-width: 160px;">
+      <div class="oh-input-group oh-work-type-request-filter-scope" style="min-width: 160px;">
         <select class="oh-select w-100" name="scope_filter" aria-label="{% trans 'Scope' %}" onchange="this.form.submit()">
           {% for v, label in scope_filter_options %}
             <option value="{{ v }}" {% if scope_filter == v %}selected{% endif %}>{{ label }}</option>
           {% endfor %}
         </select>
       </div>
-      <div class="oh-input-group" style="min-width: 170px;">
+      <div class="oh-input-group oh-work-type-request-filter-month" style="min-width: 170px;">
         <input
           type="month"
           class="oh-input w-100"
@@ -55,7 +97,7 @@
         />
       </div>
 
-      <div class="oh-main__titlebar-button-container d-flex" style="gap: 8px;">
+      <div class="oh-main__titlebar-button-container d-flex oh-work-type-request-filter-actions" style="gap: 8px;">
         <button class="oh-btn oh-btn--secondary" data-toggle="oh-modal-toggle" data-target="#objectCreateModal"
           hx-get="{% url 'attendance-work-type-request-create' %}" hx-target="#objectCreateModalTarget" onclick="event.preventDefault()">
           <ion-icon name="add-sharp" class="mr-1"></ion-icon>{% trans "Create" %}
