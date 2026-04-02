@@ -1,5 +1,52 @@
 {% load i18n %}
 {% load generic_template_filters %}
+<style>
+  .oh-approval-history-filter-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 14px 16px;
+    align-items: flex-end;
+  }
+
+  .oh-approval-history-filter-field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-width: 220px;
+    flex: 0 0 auto;
+  }
+
+  .oh-approval-history-filter-label {
+    margin: 0;
+    font-size: 0.85rem;
+    line-height: 1.2;
+  }
+
+  .oh-approval-history-filter-control {
+    width: 100%;
+    min-height: 40px;
+    height: 40px;
+    box-sizing: border-box;
+  }
+
+  .oh-approval-history-filter-actions {
+    display: flex;
+    align-items: flex-end;
+  }
+
+  .oh-approval-history-filter-button {
+    min-height: 40px;
+    height: 40px;
+    padding-inline: 20px;
+  }
+
+  @media (max-width: 767.98px) {
+    .oh-approval-history-filter-field {
+      min-width: 100%;
+      flex: 1 1 100%;
+    }
+  }
+</style>
 
 <div class="oh-card">
   <div class="oh-card__body">
@@ -7,29 +54,31 @@
       <input type="hidden" name="tab" value="approvals">
       <input type="hidden" name="approval_subtab" value="history">
       {% if search %}<input type="hidden" name="search" value="{{ search }}">{% endif %}
-      <div class="oh-history-filter-row d-flex flex-wrap">
-        <div class="oh-history-filter-field">
-          <label class="oh-label">{% trans "Employee" %}</label>
-          <select name="history_employee_id" class="oh-select oh-history-filter-control">
+      {% if status_my %}<input type="hidden" name="status_my" value="{{ status_my }}">{% endif %}
+      {% if my_month %}<input type="hidden" name="my_month" value="{{ my_month }}">{% endif %}
+      <div class="oh-history-filter-row oh-approval-history-filter-row">
+        <div class="oh-history-filter-field oh-approval-history-filter-field">
+          <label class="oh-label oh-approval-history-filter-label">{% trans "Employee" %}</label>
+          <select name="history_employee_id" class="oh-select oh-history-filter-control oh-approval-history-filter-control">
             <option value="">{% trans "All employees" %}</option>
             {% for employee in history_employees %}
               <option value="{{ employee.id }}" {% if history_employee_id == employee.id|stringformat:'s' %}selected{% endif %}>{{ employee.get_full_name }}</option>
             {% endfor %}
           </select>
         </div>
-        <div class="oh-history-filter-field">
-          <label class="oh-label">{% trans "Month" %}</label>
-          <input type="month" name="history_month" class="oh-input oh-history-filter-control" value="{{ history_month }}">
+        <div class="oh-history-filter-field oh-approval-history-filter-field">
+          <label class="oh-label oh-approval-history-filter-label">{% trans "Month" %}</label>
+          <input type="month" name="history_month" class="oh-input oh-history-filter-control oh-approval-history-filter-control" value="{{ history_month }}">
         </div>
-        <div class="oh-history-filter-field">
-          <label class="oh-label">{% trans "Request Status" %}</label>
-          <select name="history_status" class="oh-select oh-history-filter-control">
+        <div class="oh-history-filter-field oh-approval-history-filter-field">
+          <label class="oh-label oh-approval-history-filter-label">{% trans "Request Status" %}</label>
+          <select name="history_status" class="oh-select oh-history-filter-control oh-approval-history-filter-control">
             {% for value,label in history_status_options %}
               <option value="{{ value }}" {% if history_status == value %}selected{% endif %}>{{ label }}</option>
             {% endfor %}
           </select>
         </div>
-        <div class="oh-history-filter-actions"><button type="submit" class="oh-btn oh-btn--secondary oh-history-filter-button">{% trans "Apply" %}</button></div>
+        <div class="oh-history-filter-actions oh-approval-history-filter-actions"><button type="submit" class="oh-btn oh-btn--secondary oh-history-filter-button oh-approval-history-filter-button">{% trans "Apply" %}</button></div>
       </div>
     </form>
 
