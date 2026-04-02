@@ -110,6 +110,270 @@ class AttendanceRequestActionType(models.TextChoices):
     REVOKED = "REVOKED", _("Revoked")
 
 
+class AttendanceCorrectionRequestScope(models.TextChoices):
+    IN = "IN", _("IN")
+    OUT = "OUT", _("OUT")
+    FULL = "FULL", _("FULL (IN & OUT)")
+
+
+class AttendanceCorrectionRequestStatus(models.TextChoices):
+    WAITING = "WAITING", _("Waiting")
+    APPROVED = "APPROVED", _("Approved")
+    REJECTED = "REJECTED", _("Rejected")
+    REVOKED = "REVOKED", _("Revoked")
+    CANCELED = "CANCELED", _("Canceled")
+
+
+class AttendanceCorrectionRequest(HorillaModel):
+    employee_id = models.ForeignKey(
+        Employee,
+        on_delete=models.PROTECT,
+        related_name="attendance_correction_requests",
+        verbose_name=_("Employee"),
+    )
+    attendance_date = models.DateField(validators=[attendance_date_validate], verbose_name=_("Attendance Date"))
+    scope = models.CharField(
+        max_length=8,
+        choices=AttendanceCorrectionRequestScope.choices,
+        default=AttendanceCorrectionRequestScope.FULL,
+        verbose_name=_("Scope"),
+    )
+    requested_check_in_date = models.DateField(null=True, blank=True, verbose_name=_("Requested Check-In Date"))
+    requested_check_in_time = models.TimeField(null=True, blank=True, verbose_name=_("Requested Check-In Time"))
+    requested_check_out_date = models.DateField(null=True, blank=True, verbose_name=_("Requested Check-Out Date"))
+    requested_check_out_time = models.TimeField(null=True, blank=True, verbose_name=_("Requested Check-Out Time"))
+    reason = models.TextField(verbose_name=_("Reason"))
+    status = models.CharField(
+        max_length=16,
+        choices=AttendanceCorrectionRequestStatus.choices,
+        default=AttendanceCorrectionRequestStatus.WAITING,
+        verbose_name=_("Status"),
+    )
+    action_reason = models.TextField(null=True, blank=True, verbose_name=_("Action Reason"))
+    action_by = models.ForeignKey(
+        Employee,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="acted_attendance_correction_requests",
+        verbose_name=_("Action By"),
+    )
+    action_at = models.DateTimeField(null=True, blank=True, verbose_name=_("Action At"))
+    action_type = models.CharField(
+        max_length=32,
+        null=True,
+        blank=True,
+        choices=AttendanceRequestActionType.choices,
+        verbose_name=_("Action Type"),
+    )
+    approved_by = models.ForeignKey(
+        Employee,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="approved_attendance_correction_requests",
+        verbose_name=_("Approved By"),
+    )
+    approved_at = models.DateTimeField(null=True, blank=True, verbose_name=_("Approved At"))
+    rejected_by = models.ForeignKey(
+        Employee,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="rejected_attendance_correction_requests",
+        verbose_name=_("Rejected By"),
+    )
+    rejected_at = models.DateTimeField(null=True, blank=True, verbose_name=_("Rejected At"))
+    revoked_by = models.ForeignKey(
+        Employee,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="revoked_attendance_correction_requests",
+        verbose_name=_("Revoked By"),
+    )
+    revoked_at = models.DateTimeField(null=True, blank=True, verbose_name=_("Revoked At"))
+    canceled_by = models.ForeignKey(
+        Employee,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="canceled_attendance_correction_requests",
+        verbose_name=_("Canceled By"),
+    )
+    canceled_at = models.DateTimeField(null=True, blank=True, verbose_name=_("Canceled At"))
+
+    objects = HorillaCompanyManager(related_company_field="employee_id__employee_work_info__company_id")
+
+    class Meta:
+        ordering = ["-attendance_date", "-action_at", "-id"]
+        verbose_name = _("Attendance Correction Request")
+        verbose_name_plural = _("Attendance Correction Requests")
+
+    def __str__(self):
+        return f"{self.employee_id} - {self.attendance_date} ({self.scope})"
+
+    def covers_in(self) -> bool:
+        return self.scope in (AttendanceCorrectionRequestScope.IN, AttendanceCorrectionRequestScope.FULL)
+
+    def covers_out(self) -> bool:
+        return self.scope in (AttendanceCorrectionRequestScope.OUT, AttendanceCorrectionRequestScope.FULL)
+
+    @property
+    def requested_check_in_dt(self):
+        if self.requested_check_in_date and self.requested_check_in_time:
+            return datetime.combine(self.requested_check_in_date, self.requested_check_in_time)
+        return None
+
+    @property
+    def requested_check_out_dt(self):
+        if self.requested_check_out_date and self.requested_check_out_time:
+            return datetime.combine(self.requested_check_out_date, self.requested_check_out_time)
+        return None
+
+    @property
+    def action_actor_display(self):
+        actor = self.action_by or self.approved_by or self.rejected_by or self.revoked_by or self.canceled_by
+        if not actor:
+            return None
+        try:
+            full_name = f"{actor.employee_first_name} {actor.employee_last_name}".strip()
+            return full_name or str(actor)
+        except Exception:
+            return str(actor)
+
+    @property
+    def attendance_clock_in_date(self):
+        return self.requested_check_in_date
+
+    @property
+    def attendance_clock_in(self):
+        return self.requested_check_in_time
+
+    @property
+    def attendance_clock_out_date(self):
+        return self.requested_check_out_date
+
+    @property
+    def attendance_clock_out(self):
+        return self.requested_check_out_time
+
+    @property
+    def request_description(self):
+        return self.reason
+
+    @property
+    def is_validate_request(self):
+        return self.status == AttendanceCorrectionRequestStatus.WAITING
+
+    @property
+    def is_validate_request_approved(self):
+        return self.status == AttendanceCorrectionRequestStatus.APPROVED
+
+    @property
+    def attendance_validated(self):
+        return self.status == AttendanceCorrectionRequestStatus.APPROVED
+
+    @property
+    def request_type(self):
+        mapping = {
+            AttendanceCorrectionRequestStatus.CANCELED: "cancel_request",
+            AttendanceCorrectionRequestStatus.REJECTED: "reject_request",
+            AttendanceCorrectionRequestStatus.REVOKED: "revoke_request",
+        }
+        return mapping.get(self.status, "update_request")
+
+    @property
+    def request_attachments(self):
+        try:
+            return AttendanceRequestFile.objects.filter(
+                attendance_correction_request_links__request=self
+            ).distinct()
+        except Exception:
+            return AttendanceRequestFile.objects.none()
+
+    @property
+    def history(self):
+        class _HistoryShim:
+            def __init__(self, action_at):
+                self._action_at = action_at
+            def first(self):
+                if not self._action_at:
+                    return None
+                return type("HistoryItem", (), {"history_date": self._action_at})()
+        return _HistoryShim(self.action_effective_at)
+
+    def clean(self):
+        super().clean()
+        if self.scope in (AttendanceCorrectionRequestScope.IN, AttendanceCorrectionRequestScope.FULL):
+            if not self.requested_check_in_date or not self.requested_check_in_time:
+                raise ValidationError({"requested_check_in_time": _("Requested check-in is required for this scope.")})
+        if self.scope in (AttendanceCorrectionRequestScope.OUT, AttendanceCorrectionRequestScope.FULL):
+            if not self.requested_check_out_date or not self.requested_check_out_time:
+                raise ValidationError({"requested_check_out_time": _("Requested check-out is required for this scope.")})
+        if self.scope == AttendanceCorrectionRequestScope.FULL:
+            in_dt = self.requested_check_in_dt
+            out_dt = self.requested_check_out_dt
+            if in_dt and out_dt and out_dt <= in_dt:
+                raise ValidationError({"requested_check_out_time": _("Requested check-out must be after requested check-in.")})
+
+
+class AttendanceCorrectionRequestSession(HorillaModel):
+    request = models.ForeignKey(
+        "attendance.AttendanceCorrectionRequest",
+        on_delete=models.CASCADE,
+        related_name="sessions",
+        verbose_name=_("Request"),
+    )
+    employee_id = models.ForeignKey(
+        Employee,
+        on_delete=models.CASCADE,
+        related_name="attendance_correction_request_sessions",
+        verbose_name=_("Employee"),
+    )
+    attendance_date = models.DateField(verbose_name=_("Attendance Date"))
+    session = models.CharField(max_length=8, choices=[("IN", _("IN")), ("OUT", _("OUT"))], verbose_name=_("Session"))
+    is_active_lock = models.BooleanField(default=True, verbose_name=_("Active Lock"))
+
+    class Meta:
+        ordering = ["attendance_date", "id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["employee_id", "attendance_date", "session"],
+                condition=Q(is_active_lock=True),
+                name="uniq_active_attendance_correction_slot",
+            )
+        ]
+        verbose_name = _("Attendance Correction Request Session")
+        verbose_name_plural = _("Attendance Correction Request Sessions")
+
+    def __str__(self):
+        return f"{self.employee_id} - {self.attendance_date} - {self.session}"
+
+
+class AttendanceCorrectionRequestAttachment(HorillaModel):
+    request = models.ForeignKey(
+        "attendance.AttendanceCorrectionRequest",
+        on_delete=models.CASCADE,
+        related_name="attachment_links",
+        verbose_name=_("Request"),
+    )
+    attendance_request_file = models.ForeignKey(
+        "attendance.AttendanceRequestFile",
+        on_delete=models.PROTECT,
+        related_name="attendance_correction_request_links",
+        verbose_name=_("Attachment"),
+    )
+
+    class Meta:
+        ordering = ["id"]
+        verbose_name = _("Attendance Correction Request Attachment")
+        verbose_name_plural = _("Attendance Correction Request Attachments")
+
+    def __str__(self):
+        return f"{self.request_id} - {self.attendance_request_file_id}"
+
+
 class WorkModeRequestRejectReasonCode(models.TextChoices):
     """Reason code for REJECTED WorkModeRequest."""
     MANUAL_REJECT = "MANUAL_REJECT", _("Manual Reject")
