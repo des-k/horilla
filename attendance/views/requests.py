@@ -2042,7 +2042,7 @@ def request_attendance_view(request):
             "my_shift_info": _web_shift_info_map(current_my),
             "app_shift_info": _web_shift_info_map(current_app),
             "history_shift_info": _web_shift_info_map(current_hist),
-            "history_time_surface": {},
+            "history_time_surface": {obj.id: build_attendance_request_time_surface(obj) for obj in current_hist},
             "pd_my": pd_my,
             "pd_app": pd_app,
             "pd_app_hist": pd_app_hist,
