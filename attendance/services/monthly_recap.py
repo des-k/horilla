@@ -21,6 +21,7 @@ from attendance.models import (
     AttendanceActivity,
     AttendanceWorkMode,
     WorkModeRequest,
+    WorkModeRequestDocumentStatus,
     WorkModeRequestScope,
     WorkModeRequestStatus,
 )
@@ -386,6 +387,71 @@ def _approved_request_dt(
     return None
 
 
+def _effective_document_status_safe(req) -> Optional[str]:
+    if not req:
+        return None
+    resolver = getattr(req, "effective_document_status", None)
+    if callable(resolver):
+        try:
+            return resolver()
+        except Exception:
+            return getattr(req, "document_status", None)
+    return getattr(req, "document_status", None)
+
+
+def _resolve_effective_request_approved(
+    *,
+    requests: List[WorkModeRequest],
+    attendance_date: date,
+    want: str,
+) -> Optional[WorkModeRequest]:
+    """Approved WorkModeRequest covering the target session, newest first."""
+
+    if want not in ("in", "out"):
+        return None
+
+    scope_first = WorkModeRequestScope.IN if want == "in" else WorkModeRequestScope.OUT
+
+    def _covers(req: WorkModeRequest) -> bool:
+        return req.start_date <= attendance_date <= req.end_date
+
+    approved = [r for r in requests if r.status == WorkModeRequestStatus.APPROVED and _covers(r)]
+    approved.sort(key=lambda r: r.id, reverse=True)
+
+    for r in approved:
+        if r.scope == scope_first:
+            return r
+
+    for r in approved:
+        if r.scope == WorkModeRequestScope.FULL:
+            return r
+
+    return None
+
+
+def _session_on_duty_benefit_active(*, mode: str, request_obj, final_dt: Optional[datetime]) -> bool:
+    """Return True only when ON Duty benefit should neutralize late/early for that session."""
+
+    if mode != AttendanceWorkMode.ON_DUTY or final_dt is None:
+        return False
+
+    if request_obj is None:
+        return True
+
+    if getattr(request_obj, "status", None) != WorkModeRequestStatus.APPROVED:
+        return False
+
+    return _effective_document_status_safe(request_obj) == WorkModeRequestDocumentStatus.VERIFIED
+
+
+def _compose_work_type_display(display_in_mode: str, display_out_mode: str) -> str:
+    if display_in_mode == AttendanceWorkMode.ON_DUTY and display_out_mode == AttendanceWorkMode.ON_DUTY:
+        return "On Duty FULL"
+    if display_in_mode == display_out_mode:
+        return _work_mode_label(display_in_mode)
+    return f"IN: {_work_mode_label(display_in_mode)}<br>OUT: {_work_mode_label(display_out_mode)}"
+
+
 def _work_mode_label(mode: str) -> str:
     if mode == AttendanceWorkMode.ON_DUTY:
         return "On Duty"
@@ -514,6 +580,7 @@ def _canonical_row_from_attendance(
     grace_in_sec: int = 0,
     grace_out_sec: int = 0,
     grace_clock_in_type: str = "after",
+    requests_by_id: Optional[Dict[int, WorkModeRequest]] = None,
 ) -> Optional[MonthlyRecapRow]:
     if not best_att:
         return None
@@ -570,19 +637,29 @@ def _canonical_row_from_attendance(
         if has_activity or approved_request_row or incomplete_row:
             return None
 
-    display_in_mode = _session_mode(best_att, "IN") or _attendance_level_mode(best_att) or AttendanceWorkMode.WFO
-    display_out_mode = _session_mode(best_att, "OUT") or display_in_mode
+    baseline_mode = _attendance_level_mode(best_att) or AttendanceWorkMode.WFO
+    display_in_mode = _session_mode(best_att, "IN") or baseline_mode
+    display_out_mode = _session_mode(best_att, "OUT") or baseline_mode
+    work_type_disp = _compose_work_type_display(display_in_mode, display_out_mode)
 
-    if display_in_mode == AttendanceWorkMode.ON_DUTY and display_out_mode == AttendanceWorkMode.ON_DUTY:
-        work_type_disp = "On Duty FULL"
-    elif display_in_mode == AttendanceWorkMode.ON_DUTY and display_out_mode != AttendanceWorkMode.ON_DUTY:
-        work_type_disp = "On Duty IN"
-    elif display_out_mode == AttendanceWorkMode.ON_DUTY and display_in_mode != AttendanceWorkMode.ON_DUTY:
-        work_type_disp = "On Duty OUT"
-    elif display_in_mode == display_out_mode:
-        work_type_disp = _work_mode_label(display_in_mode)
-    else:
-        work_type_disp = f"IN: {_work_mode_label(display_in_mode)}<br>OUT: {_work_mode_label(display_out_mode)}"
+    in_request_obj = None
+    out_request_obj = None
+    if requests_by_id:
+        in_req_id = getattr(best_att, "in_related_work_type_request_id", None)
+        out_req_id = getattr(best_att, "out_related_work_type_request_id", None)
+        in_request_obj = requests_by_id.get(in_req_id)
+        out_request_obj = requests_by_id.get(out_req_id)
+
+    grant_on_duty_in = _session_on_duty_benefit_active(
+        mode=display_in_mode,
+        request_obj=in_request_obj,
+        final_dt=final_in_dt,
+    )
+    grant_on_duty_out = _session_on_duty_benefit_active(
+        mode=display_out_mode,
+        request_obj=out_request_obj,
+        final_dt=final_out_dt,
+    )
 
     late_minutes = coerce_non_negative_decimal(getattr(best_att, "late_minutes", 0) or 0)
     early_out_minutes = coerce_non_negative_decimal(getattr(best_att, "early_out_minutes", 0) or 0)
@@ -602,17 +679,17 @@ def _canonical_row_from_attendance(
                 final_out_dt=final_out_dt,
                 grace_seconds=grace_in_sec,
                 clock_in_type=grace_clock_in_type,
-                is_presence_only=(display_in_mode == AttendanceWorkMode.ON_DUTY and display_out_mode == AttendanceWorkMode.ON_DUTY),
+                is_presence_only=bool(grant_on_duty_in and grant_on_duty_out),
                 early_out_grace_seconds=grace_out_sec,
             )
-            if display_in_mode != AttendanceWorkMode.ON_DUTY:
-                late_minutes = seconds_to_decimal_minutes(metrics.late_seconds)
-            else:
+            if grant_on_duty_in:
                 late_minutes = coerce_non_negative_decimal(0)
-            if display_out_mode != AttendanceWorkMode.ON_DUTY:
-                early_out_minutes = seconds_to_decimal_minutes(metrics.early_out_seconds)
             else:
+                late_minutes = seconds_to_decimal_minutes(metrics.late_seconds)
+            if grant_on_duty_out:
                 early_out_minutes = coerce_non_negative_decimal(0)
+            else:
+                early_out_minutes = seconds_to_decimal_minutes(metrics.early_out_seconds)
         except Exception:
             pass
 
@@ -1348,6 +1425,11 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
         for r in all_requests
         if getattr(r, "id", None) is not None
     }
+    requests_by_id = {
+        getattr(r, "id", None): r
+        for r in all_requests
+        if getattr(r, "id", None) is not None
+    }
 
     leave_qs = LeaveRequest.objects.filter(
         employee_id=employee,
@@ -1471,6 +1553,7 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
             grace_in_sec=grace_in_sec,
             grace_out_sec=grace_out_sec,
             grace_clock_in_type=grace_clock_in_type,
+            requests_by_id=requests_by_id,
         )
         if canonical_row is not None:
             rows.append(canonical_row)
@@ -1650,13 +1733,23 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
 
         baseline_mode = _attendance_level_mode(best_att) or scheduled_attendance_mode(employee, d)
 
-        eff_in_mode = _resolve_effective_mode_approved(
+        eff_in_request = _resolve_effective_request_approved(
+            requests=requests,
+            attendance_date=d,
+            want="in",
+        )
+        eff_out_request = _resolve_effective_request_approved(
+            requests=requests,
+            attendance_date=d,
+            want="out",
+        )
+        eff_in_mode = getattr(eff_in_request, "mode", None) or _resolve_effective_mode_approved(
             requests=requests,
             attendance_date=d,
             want="in",
             baseline_mode=baseline_mode,
         )
-        eff_out_mode = _resolve_effective_mode_approved(
+        eff_out_mode = getattr(eff_out_request, "mode", None) or _resolve_effective_mode_approved(
             requests=requests,
             attendance_date=d,
             want="out",
@@ -1692,16 +1785,7 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
             fallback_mode=eff_out_mode,
         )
 
-        if display_in_mode == AttendanceWorkMode.ON_DUTY and display_out_mode == AttendanceWorkMode.ON_DUTY:
-            work_type_disp = "On Duty FULL"
-        elif display_in_mode == AttendanceWorkMode.ON_DUTY and display_out_mode != AttendanceWorkMode.ON_DUTY:
-            work_type_disp = "On Duty IN"
-        elif display_out_mode == AttendanceWorkMode.ON_DUTY and display_in_mode != AttendanceWorkMode.ON_DUTY:
-            work_type_disp = "On Duty OUT"
-        elif display_in_mode == display_out_mode:
-            work_type_disp = _work_mode_label(display_in_mode)
-        else:
-            work_type_disp = f"IN: {_work_mode_label(display_in_mode)}<br>OUT: {_work_mode_label(display_out_mode)}"
+        work_type_disp = _compose_work_type_display(display_in_mode, display_out_mode)
 
         leave_note_suffixes: List[str] = []
         if half_day_kind == "first_half":
@@ -1727,8 +1811,19 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
             early_out_grace_seconds=grace_out_sec,
         )
         earliest_check_out_dt = metrics.earliest_checkout_dt
-        late_sec = 0.0 if eff_in_mode == AttendanceWorkMode.ON_DUTY else float(metrics.late_seconds)
-        early_sec = 0.0 if eff_out_mode == AttendanceWorkMode.ON_DUTY else float(metrics.early_out_seconds)
+        grant_on_duty_in = _session_on_duty_benefit_active(
+            mode=eff_in_mode,
+            request_obj=eff_in_request,
+            final_dt=final_in_dt,
+        )
+        grant_on_duty_out = _session_on_duty_benefit_active(
+            mode=eff_out_mode,
+            request_obj=eff_out_request,
+            final_dt=final_out_dt,
+        )
+
+        late_sec = 0.0 if grant_on_duty_in else float(metrics.late_seconds)
+        early_sec = 0.0 if grant_on_duty_out else float(metrics.early_out_seconds)
 
         late_minutes = _seconds_to_minutes(late_sec)
         early_minutes = _seconds_to_minutes(early_sec)
