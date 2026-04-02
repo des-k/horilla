@@ -407,6 +407,50 @@ class MonthlyRecapIntegrationTests(SimpleTestCase):
         self.assertEqual(row.work_type, "On Duty FULL")
         self.assertEqual(row.note, "")
 
+    def test_monthly_recap_keeps_missing_checkout_penalty_for_verified_on_duty_in_only(self):
+        verified_on_duty_in = SimpleNamespace(
+            id=62,
+            employee_id=self.employee,
+            start_date=self.target_date,
+            end_date=self.target_date,
+            status=monthly_recap.WorkModeRequestStatus.APPROVED,
+            scope=monthly_recap.WorkModeRequestScope.IN,
+            mode=monthly_recap.AttendanceWorkMode.ON_DUTY,
+            planned_time=time(9, 12),
+            document_status=monthly_recap.WorkModeRequestDocumentStatus.VERIFIED,
+            effective_document_status=lambda: monthly_recap.WorkModeRequestDocumentStatus.VERIFIED,
+        )
+        canonical_attendance = SimpleNamespace(
+            id=63,
+            employee_id=self.employee,
+            attendance_date=self.target_date,
+            attendance_clock_in_date=self.target_date,
+            attendance_clock_in=time(9, 12),
+            attendance_clock_out_date=None,
+            attendance_clock_out=None,
+            attendance_clock_in_mode=monthly_recap.AttendanceWorkMode.ON_DUTY,
+            attendance_clock_out_mode=None,
+            work_type_id=SimpleNamespace(work_type='WFA'),
+            reconciliation_source='SOURCE_ON_DUTY',
+            reconciliation_note='ON Duty final',
+            in_related_work_type_request_id=verified_on_duty_in.id,
+            out_related_work_type_request_id=None,
+            late_minutes=72,
+            early_out_minutes=0,
+            attendance_validated=True,
+            is_validate_request_approved=False,
+            minimum_hour='08:00',
+        )
+
+        _, row = self._get_recap(attendances=[canonical_attendance], requests=[verified_on_duty_in])
+
+        self.assertEqual(row.work_type, 'IN: On Duty<br>OUT: WFA')
+        self.assertEqual(row.check_in, '09:12')
+        self.assertEqual(row.check_out, '-')
+        self.assertEqual(row.late, '00:00')
+        self.assertGreater(row.early_out_minutes, 0)
+
+
     def test_monthly_recap_does_not_drift_when_raw_history_contains_rejected_request_log(self):
         rejected_request = SimpleNamespace(
             id=70,
