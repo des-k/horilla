@@ -124,13 +124,30 @@ def user_can_approve_request(user, request_obj: AttendanceCorrectionRequest) -> 
 
 
 def build_permission_flags(request_obj: AttendanceCorrectionRequest, user) -> dict:
+    status_value = getattr(request_obj, "status", None)
+    if status_value is None:
+        try:
+            from attendance.services.attendance_request_access import user_is_request_owner as legacy_owner, user_can_approve_request as legacy_approve
+            is_owner = legacy_owner(user, request_obj)
+            waiting = bool(getattr(request_obj, "is_validate_request", False))
+            approved = bool(getattr(request_obj, "is_validate_request_approved", False))
+            can_approve = legacy_approve(user, request_obj) and waiting
+            return {
+                "can_edit": bool(is_owner and waiting and not approved),
+                "can_cancel": bool(is_owner and waiting and not approved),
+                "can_approve": bool(can_approve),
+                "can_reject": bool(can_approve),
+                "can_revoke": bool(legacy_approve(user, request_obj) and approved and not is_owner),
+            }
+        except Exception:
+            return {"can_edit": False, "can_cancel": False, "can_approve": False, "can_reject": False, "can_revoke": False}
     is_owner = user_is_request_owner(user, request_obj)
-    can_approve = user_can_approve_request(user, request_obj) and request_obj.status == AttendanceCorrectionRequestStatus.WAITING
+    can_approve = user_can_approve_request(user, request_obj) and status_value == AttendanceCorrectionRequestStatus.WAITING
     can_reject = can_approve
-    can_revoke = user_can_approve_request(user, request_obj) and request_obj.status == AttendanceCorrectionRequestStatus.APPROVED
+    can_revoke = user_can_approve_request(user, request_obj) and status_value == AttendanceCorrectionRequestStatus.APPROVED
     return {
-        "can_edit": bool(is_owner and request_obj.status == AttendanceCorrectionRequestStatus.WAITING),
-        "can_cancel": bool(is_owner and request_obj.status == AttendanceCorrectionRequestStatus.WAITING),
+        "can_edit": bool(is_owner and status_value == AttendanceCorrectionRequestStatus.WAITING),
+        "can_cancel": bool(is_owner and status_value == AttendanceCorrectionRequestStatus.WAITING),
         "can_approve": bool(can_approve),
         "can_reject": bool(can_reject),
         "can_revoke": bool(can_revoke),
