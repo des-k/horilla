@@ -4,9 +4,9 @@
   .oh-work-type-request-filter-grid {
     display: flex;
     flex-wrap: wrap;
-    align-items: stretch;
+    align-items: center;
     justify-content: flex-end;
-    gap: 14px;
+    gap: 10px;
     width: 100%;
   }
 
@@ -15,28 +15,38 @@
   }
 
   .oh-work-type-request-filter-grid .oh-work-type-request-filter-month {
-    flex: 0 0 260px;
-    min-width: 260px;
-  }
-
-  .oh-work-type-request-filter-grid .oh-work-type-request-filter-status,
-  .oh-work-type-request-filter-grid .oh-work-type-request-filter-mode,
-  .oh-work-type-request-filter-grid .oh-work-type-request-filter-scope {
     flex: 0 0 170px;
     min-width: 170px;
+  }
+
+  .oh-work-type-request-filter-grid .oh-work-type-request-filter-status {
+    flex: 0 0 165px;
+    min-width: 165px;
+  }
+
+  .oh-work-type-request-filter-grid .oh-work-type-request-filter-mode {
+    flex: 0 0 138px;
+    min-width: 138px;
+  }
+
+  .oh-work-type-request-filter-grid .oh-work-type-request-filter-scope {
+    flex: 0 0 118px;
+    min-width: 118px;
   }
 
   .oh-work-type-request-filter-grid .oh-input,
   .oh-work-type-request-filter-grid .oh-select,
   .oh-work-type-request-filter-grid .oh-btn {
-    min-height: 56px;
-    height: 56px;
+    min-height: 34px;
+    height: 34px;
     box-sizing: border-box;
   }
 
   .oh-work-type-request-filter-grid .oh-input,
   .oh-work-type-request-filter-grid .oh-select {
     width: 100%;
+    padding-top: 0;
+    padding-bottom: 0;
   }
 
   .oh-work-type-request-filter-grid .oh-btn {
@@ -44,13 +54,15 @@
     align-items: center;
     justify-content: center;
     white-space: nowrap;
-    padding: 0 18px;
+    padding: 0 12px;
+    line-height: 1;
   }
 
   .oh-work-type-request-filter-grid .oh-work-type-request-filter-actions {
     display: flex;
-    align-items: stretch;
-    gap: 10px;
+    flex-wrap: nowrap;
+    align-items: center;
+    gap: 8px;
     margin-left: auto;
     flex: 0 0 auto;
   }
@@ -64,8 +76,8 @@
     .oh-work-type-request-filter-grid .oh-work-type-request-filter-status,
     .oh-work-type-request-filter-grid .oh-work-type-request-filter-mode,
     .oh-work-type-request-filter-grid .oh-work-type-request-filter-scope {
-      flex: 1 1 220px;
-      min-width: 220px;
+      flex: 1 1 180px;
+      min-width: 180px;
     }
 
     .oh-work-type-request-filter-grid .oh-work-type-request-filter-actions {
