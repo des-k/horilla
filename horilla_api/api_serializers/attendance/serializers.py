@@ -147,7 +147,6 @@ class AttendanceRequestSerializer(serializers.ModelSerializer):
     can_approve = serializers.SerializerMethodField(read_only=True)
     can_reject = serializers.SerializerMethodField(read_only=True)
     can_revoke = serializers.SerializerMethodField(read_only=True)
-    requested_data = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = AttendanceCorrectionRequest
@@ -165,7 +164,7 @@ class AttendanceRequestSerializer(serializers.ModelSerializer):
             "final_attendance_clock_in_date", "final_attendance_clock_out_date",
             "effective_attendance_clock_in", "effective_attendance_clock_out",
             "effective_attendance_clock_in_date", "effective_attendance_clock_out_date",
-            "requested_data", "can_edit", "can_cancel", "can_approve", "can_reject", "can_revoke",
+            "can_edit", "can_cancel", "can_approve", "can_reject", "can_revoke",
         ]
 
     def _final_attendance(self, obj):
@@ -247,18 +246,6 @@ class AttendanceRequestSerializer(serializers.ModelSerializer):
         if obj.status == AttendanceCorrectionRequestStatus.APPROVED and obj.requested_check_out_date:
             return obj.requested_check_out_date
         return self.get_final_attendance_clock_out_date(obj)
-
-    def get_requested_data(self, obj):
-        data = {"__meta": {"current_scope": obj.scope}}
-        if obj.requested_check_in_date:
-            data["attendance_clock_in_date"] = obj.requested_check_in_date.isoformat()
-        if obj.requested_check_in_time:
-            data["attendance_clock_in"] = obj.requested_check_in_time.strftime("%H:%M:%S")
-        if obj.requested_check_out_date:
-            data["attendance_clock_out_date"] = obj.requested_check_out_date.isoformat()
-        if obj.requested_check_out_time:
-            data["attendance_clock_out"] = obj.requested_check_out_time.strftime("%H:%M:%S")
-        return data
 
     def _perm(self, obj, key):
         request = self.context.get("request") if hasattr(self, "context") else None
