@@ -669,7 +669,7 @@ def _canonical_row_from_attendance(
                 schedule=schedule_obj,
                 shift_start_dt=shift_start_dt,
                 shift_end_dt=shift_end_dt,
-                minimum_hour=minimum_hour or getattr(best_att, "minimum_hour", None) or "00:00",
+                minimum_hour=minimum_hour or getattr(schedule_obj, "minimum_working_hour", None) or getattr(best_att, "minimum_hour", None) or "00:00",
                 leave_kind=half_day_kind,
                 check_in_cutoff_dt=check_in_cutoff_dt,
             )
@@ -1547,7 +1547,7 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
             schedule_obj=rules.get("schedule"),
             shift_start_dt=shift_start_dt,
             shift_end_dt=shift_end_dt,
-            minimum_hour=((getattr(best_att, "minimum_hour", None) if best_att else None) or getattr(rules.get("schedule"), "minimum_working_hour", None) or "00:00"),
+            minimum_hour=(getattr(rules.get("schedule"), "minimum_working_hour", None) or (getattr(best_att, "minimum_hour", None) if best_att else None) or "00:00"),
             half_day_kind=half_day_kind,
             check_in_cutoff_dt=rules.get("check_in_window_end_dt") and _normalize_dt(rules.get("check_in_window_end_dt"), tzinfo) or cutoff_in_dt,
             grace_in_sec=grace_in_sec,
@@ -1797,7 +1797,7 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
             schedule=schedule_obj,
             shift_start_dt=shift_start_dt,
             shift_end_dt=shift_end_dt,
-            minimum_hour=getattr(best_att, "minimum_hour", None) or getattr(schedule_obj, "minimum_working_hour", None) or "00:00",
+            minimum_hour=getattr(schedule_obj, "minimum_working_hour", None) or getattr(best_att, "minimum_hour", None) or "00:00",
             leave_kind=half_day_kind,
             check_in_cutoff_dt=check_in_window_end_dt or cutoff_in_dt,
         )
