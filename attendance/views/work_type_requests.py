@@ -205,6 +205,9 @@ def work_type_request_view(request):
     history_month_start, history_month_end, history_month = _parse_history_month_range(
         request.GET.get("history_month") or request.GET.get("history_date")
     )
+    my_month_start, my_month_end, my_month = _parse_history_month_range(
+        request.GET.get("my_month")
+    )
 
     allowed_mode_filter = {"": None, "all": None, "wfa": AttendanceWorkMode.WFA, "on_duty": AttendanceWorkMode.ON_DUTY}
     allowed_scope_filter = {"": None, "all": None, "in": "in", "out": "out", "full": "full"}
@@ -248,6 +251,7 @@ def work_type_request_view(request):
     if dir_app not in ("asc", "desc"): dir_app = "desc"
 
     my_qs = WorkModeRequest.objects.none() if employee is None else WorkModeRequest.objects.filter(employee_id=employee)
+    my_qs = my_qs.filter(start_date__lte=my_month_end, end_date__gte=my_month_start)
     mode_value = allowed_mode_filter.get(mode_filter)
     if mode_value: my_qs = my_qs.filter(mode=mode_value)
     scope_value = allowed_scope_filter.get(scope_filter)
@@ -381,6 +385,7 @@ def work_type_request_view(request):
         "history_employee_id": history_employee_id,
         "history_employees": history_employees,
         "history_month": history_month,
+        "my_month": my_month,
         "approval_subtab": approval_subtab,
         "show_approval_tab": show_approval_tab,
         "mode_filter": mode_filter,
