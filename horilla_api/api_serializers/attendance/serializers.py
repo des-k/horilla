@@ -27,6 +27,7 @@ from attendance.services.work_type_request_files import (
 from attendance.services.attendance_request_presentation import (
     build_attendance_request_time_surface,
 )
+from attendance.services.attendance_correction_requests import build_permission_flags as build_attendance_correction_permission_flags
 
 
 class AttendanceSerializer(serializers.ModelSerializer):
@@ -118,31 +119,17 @@ class AttendanceSerializer(serializers.ModelSerializer):
 
 
 class AttendanceRequestSerializer(serializers.ModelSerializer):
-    employee_first_name = serializers.CharField(
-        source="employee_id.employee_first_name", read_only=True
-    )
-    employee_last_name = serializers.CharField(
-        source="employee_id.employee_last_name", read_only=True
-    )
-    shift_name = serializers.CharField(source="shift_id.employee_shift", read_only=True)
+    employee_first_name = serializers.CharField(source="employee_id.employee_first_name", read_only=True)
+    employee_last_name = serializers.CharField(source="employee_id.employee_last_name", read_only=True)
     badge_id = serializers.CharField(source="employee_id.badge_id", read_only=True)
     employee_profile_url = serializers.SerializerMethodField(read_only=True)
-
-    # Direct attachments uploaded on the attendance request
+    request_description = serializers.CharField(source="reason", read_only=True)
+    status = serializers.CharField(read_only=True)
+    request_status = serializers.CharField(source="status", read_only=True)
+    action_by_name = serializers.SerializerMethodField(read_only=True)
     attachments = serializers.SerializerMethodField(read_only=True)
     attachment_urls = serializers.SerializerMethodField(read_only=True)
-    # Alias for UI parity with Work Type Requests
     file_urls = serializers.SerializerMethodField(read_only=True)
-
-    # Status label for mobile/web UI (WAITING / APPROVED / REJECTED / CANCEL)
-    status = serializers.SerializerMethodField(read_only=True)
-    request_status = serializers.SerializerMethodField(read_only=True)
-    action_by_name = serializers.SerializerMethodField(read_only=True)
-    action_type = serializers.SerializerMethodField(read_only=True)
-    action_at = serializers.SerializerMethodField(read_only=True)
-    approved_at = serializers.SerializerMethodField(read_only=True)
-    rejected_at = serializers.SerializerMethodField(read_only=True)
-    canceled_at = serializers.SerializerMethodField(read_only=True)
     proposed_attendance_clock_in = serializers.SerializerMethodField(read_only=True)
     proposed_attendance_clock_out = serializers.SerializerMethodField(read_only=True)
     proposed_attendance_clock_in_date = serializers.SerializerMethodField(read_only=True)
@@ -155,112 +142,34 @@ class AttendanceRequestSerializer(serializers.ModelSerializer):
     effective_attendance_clock_out = serializers.SerializerMethodField(read_only=True)
     effective_attendance_clock_in_date = serializers.SerializerMethodField(read_only=True)
     effective_attendance_clock_out_date = serializers.SerializerMethodField(read_only=True)
+    can_edit = serializers.SerializerMethodField(read_only=True)
+    can_cancel = serializers.SerializerMethodField(read_only=True)
+    can_approve = serializers.SerializerMethodField(read_only=True)
+    can_reject = serializers.SerializerMethodField(read_only=True)
+    can_revoke = serializers.SerializerMethodField(read_only=True)
+    requested_data = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
-        model = Attendance
-        exclude = [
-            "attendance_overtime",
-            "attendance_overtime_approve",
-            "attendance_validated",
-            "approved_overtime_second",
-            "is_validate_request",
-            "is_validate_request_approved",
-            "request_type",
-            "created_at",
+        model = AttendanceCorrectionRequest
+        fields = [
+            "id", "employee_id", "employee_first_name", "employee_last_name", "badge_id",
+            "employee_profile_url", "attendance_date", "scope",
+            "requested_check_in_date", "requested_check_in_time",
+            "requested_check_out_date", "requested_check_out_time",
+            "reason", "request_description", "status", "request_status",
+            "action_reason", "action_type", "action_at", "approved_at", "rejected_at", "revoked_at", "canceled_at",
+            "action_by_name", "attachments", "attachment_urls", "file_urls",
+            "proposed_attendance_clock_in", "proposed_attendance_clock_out",
+            "proposed_attendance_clock_in_date", "proposed_attendance_clock_out_date",
+            "final_attendance_clock_in", "final_attendance_clock_out",
+            "final_attendance_clock_in_date", "final_attendance_clock_out_date",
+            "effective_attendance_clock_in", "effective_attendance_clock_out",
+            "effective_attendance_clock_in_date", "effective_attendance_clock_out_date",
+            "requested_data", "can_edit", "can_cancel", "can_approve", "can_reject", "can_revoke",
         ]
 
-    def create(self, validated_data):
-        from attendance.services.attendance_correction_scope_rules import (
-            build_requested_data_for_save,
-            infer_scope_from_values,
-        )
-
-        employee_id = validated_data.get("employee_id")
-        attendance_date = validated_data.get("attendance_date")
-        attendances = Attendance.objects.filter(
-            employee_id=employee_id, attendance_date=attendance_date
-        )
-        data = {
-            "employee_id": validated_data.get("employee_id"),
-            "attendance_date": validated_data.get("attendance_date"),
-            "attendance_clock_in_date": validated_data.get("attendance_clock_in_date"),
-            "attendance_clock_in": validated_data.get("attendance_clock_in"),
-            "attendance_clock_out": validated_data.get("attendance_clock_out"),
-            "attendance_clock_out_date": validated_data.get("attendance_clock_out_date"),
-            "shift_id": validated_data.get("shift_id"),
-            "work_type_id": validated_data.get("work_type_id"),
-            "attendance_worked_hour": validated_data.get("attendance_worked_hour"),
-            "minimum_hour": validated_data.get("minimum_hour"),
-        }
-        payload = Attendance(**data).serialize()
-        incoming_scope = infer_scope_from_values(
-            payload.get("attendance_clock_in"),
-            payload.get("attendance_clock_out"),
-        )
-        request_description = self.initial_data.get("request_description")
-
-        if attendances.exists():
-            attendance = attendances.first()
-            attendance.requested_data = build_requested_data_for_save(
-                new_payload=payload,
-                existing_requested_data=getattr(attendance, "requested_data", None),
-                incoming_scope=incoming_scope,
-                keep_existing_fields=(attendance.request_type != "create_request"),
-            )
-            attendance.is_validate_request = True
-            attendance.is_validate_request_approved = False
-            if attendance.request_type != "create_request":
-                attendance.request_type = "update_request"
-            attendance.request_description = request_description
-            attendance.save()
-            return attendance
-
-        new_instance = Attendance(**data)
-        new_instance.requested_data = build_requested_data_for_save(
-            new_payload=payload,
-            existing_requested_data=None,
-            incoming_scope=incoming_scope,
-            keep_existing_fields=False,
-        )
-        new_instance.is_validate_request = True
-        new_instance.attendance_validated = False
-        new_instance.request_description = request_description
-        new_instance.request_type = "create_request"
-        new_instance.save()
-        return new_instance
-
-    def update(self, instance, validated_data):
-        if "employee_id" in validated_data:
-            validated_data.pop("employee_id")
-        return super().update(instance, validated_data)
-
-    def get_attachments(self, obj):
-        try:
-            from attendance.services.attendance_request_access import iter_request_attachments
-            request = self.context.get("request") if hasattr(self, "context") else None
-            attachments = []
-            for f in iter_request_attachments(obj):
-                try:
-                    attachments.append(
-                        build_attendance_attachment_metadata(
-                            request,
-                            obj,
-                            f,
-                            include_delete_url=True,
-                        )
-                    )
-                except Exception:
-                    continue
-            return attachments
-        except Exception:
-            return []
-
-    def get_attachment_urls(self, obj):
-        return [item.get("url") for item in self.get_attachments(obj) if item.get("url")]
-
-    def get_file_urls(self, obj):
-        # Backward/UX compatibility with WorkModeRequestSerializer
-        return self.get_attachment_urls(obj)
+    def _final_attendance(self, obj):
+        return Attendance.objects.filter(employee_id=obj.employee_id, attendance_date=obj.attendance_date).first()
 
     def get_employee_profile_url(self, obj):
         try:
@@ -269,117 +178,107 @@ class AttendanceRequestSerializer(serializers.ModelSerializer):
         except Exception:
             return None
 
-    def _compute_status(self, obj):
-        """Stable status label for mobile/web UI."""
-        try:
-            rt = getattr(obj, "request_type", None)
-            if rt == "cancel_request":
-                return "CANCELED"
-            if rt == "revoke_request":
-                return "REVOKED"
-            if rt == "reject_request":
-                return "REJECTED"
-            if getattr(obj, "is_validate_request", False):
-                return "WAITING"
-            if getattr(obj, "is_validate_request_approved", False) or getattr(obj, "attendance_validated", False):
-                return "APPROVED"
-        except Exception:
-            pass
-        return None
-
-    def get_status(self, obj):
-        return self._compute_status(obj)
-
-    def get_request_status(self, obj):
-        # Alias used by some mobile builds
-        return self._compute_status(obj)
-
     def get_action_by_name(self, obj):
-        actor = getattr(obj, "action_by", None)
-        if not actor:
-            return None
-        try:
-            first = getattr(actor, "employee_first_name", "") or ""
-            last = getattr(actor, "employee_last_name", "") or ""
-            name = (first + " " + last).strip()
-            return name or str(actor)
-        except Exception:
-            return None
+        return obj.action_actor_display
 
-    def _get_action_type(self, obj):
-        value = getattr(obj, "action_type", None)
-        if value:
-            return value
-        status = self._compute_status(obj)
-        if status == "APPROVED":
-            return "APPROVED"
-        if status == "REJECTED":
-            return "REJECTED"
-        if status == "CANCELED":
-            return "CANCELED"
-        if status == "REVOKED":
-            return "REVOKED"
-        return None
+    def get_attachments(self, obj):
+        request = self.context.get("request") if hasattr(self, "context") else None
+        out = []
+        for link in obj.attachment_links.select_related("attendance_request_file").all():
+            file_obj = getattr(link, "attendance_request_file", None)
+            if not file_obj:
+                continue
+            try:
+                out.append(build_attendance_attachment_metadata(request, obj, file_obj, include_delete_url=False))
+            except Exception:
+                continue
+        return out
 
-    def get_action_type(self, obj):
-        return self._get_action_type(obj)
+    def get_attachment_urls(self, obj):
+        return [item.get("url") for item in self.get_attachments(obj) if item.get("url")]
 
-    def _get_action_at(self, obj):
-        return getattr(obj, "action_at", None)
-
-    def get_action_at(self, obj):
-        return self._get_action_at(obj)
-
-    def get_approved_at(self, obj):
-        return self._get_action_at(obj) if self._get_action_type(obj) == "APPROVED" else None
-
-    def get_rejected_at(self, obj):
-        return self._get_action_at(obj) if self._get_action_type(obj) == "REJECTED" else None
-
-    def get_canceled_at(self, obj):
-        return self._get_action_at(obj) if self._get_action_type(obj) == "CANCELED" else None
-
-    def _request_time_surface(self, obj):
-        return build_attendance_request_time_surface(obj)
-
-    def _surface_value(self, obj, key):
-        return self._request_time_surface(obj).get(key)
+    def get_file_urls(self, obj):
+        return self.get_attachment_urls(obj)
 
     def get_proposed_attendance_clock_in(self, obj):
-        return self._surface_value(obj, "proposed_attendance_clock_in")
+        return obj.requested_check_in_time
 
     def get_proposed_attendance_clock_out(self, obj):
-        return self._surface_value(obj, "proposed_attendance_clock_out")
+        return obj.requested_check_out_time
 
     def get_proposed_attendance_clock_in_date(self, obj):
-        return self._surface_value(obj, "proposed_attendance_clock_in_date")
+        return obj.requested_check_in_date
 
     def get_proposed_attendance_clock_out_date(self, obj):
-        return self._surface_value(obj, "proposed_attendance_clock_out_date")
+        return obj.requested_check_out_date
 
     def get_final_attendance_clock_in(self, obj):
-        return self._surface_value(obj, "final_attendance_clock_in")
+        att = self._final_attendance(obj)
+        return getattr(att, "attendance_clock_in", None)
 
     def get_final_attendance_clock_out(self, obj):
-        return self._surface_value(obj, "final_attendance_clock_out")
+        att = self._final_attendance(obj)
+        return getattr(att, "attendance_clock_out", None)
 
     def get_final_attendance_clock_in_date(self, obj):
-        return self._surface_value(obj, "final_attendance_clock_in_date")
+        att = self._final_attendance(obj)
+        return getattr(att, "attendance_clock_in_date", None)
 
     def get_final_attendance_clock_out_date(self, obj):
-        return self._surface_value(obj, "final_attendance_clock_out_date")
+        att = self._final_attendance(obj)
+        return getattr(att, "attendance_clock_out_date", None)
 
     def get_effective_attendance_clock_in(self, obj):
-        return self._surface_value(obj, "effective_attendance_clock_in")
+        if obj.status == AttendanceCorrectionRequestStatus.APPROVED and obj.requested_check_in_time:
+            return obj.requested_check_in_time
+        return self.get_final_attendance_clock_in(obj)
 
     def get_effective_attendance_clock_out(self, obj):
-        return self._surface_value(obj, "effective_attendance_clock_out")
+        if obj.status == AttendanceCorrectionRequestStatus.APPROVED and obj.requested_check_out_time:
+            return obj.requested_check_out_time
+        return self.get_final_attendance_clock_out(obj)
 
     def get_effective_attendance_clock_in_date(self, obj):
-        return self._surface_value(obj, "effective_attendance_clock_in_date")
+        if obj.status == AttendanceCorrectionRequestStatus.APPROVED and obj.requested_check_in_date:
+            return obj.requested_check_in_date
+        return self.get_final_attendance_clock_in_date(obj)
 
     def get_effective_attendance_clock_out_date(self, obj):
-        return self._surface_value(obj, "effective_attendance_clock_out_date")
+        if obj.status == AttendanceCorrectionRequestStatus.APPROVED and obj.requested_check_out_date:
+            return obj.requested_check_out_date
+        return self.get_final_attendance_clock_out_date(obj)
+
+    def get_requested_data(self, obj):
+        data = {"__meta": {"current_scope": obj.scope}}
+        if obj.requested_check_in_date:
+            data["attendance_clock_in_date"] = obj.requested_check_in_date.isoformat()
+        if obj.requested_check_in_time:
+            data["attendance_clock_in"] = obj.requested_check_in_time.strftime("%H:%M:%S")
+        if obj.requested_check_out_date:
+            data["attendance_clock_out_date"] = obj.requested_check_out_date.isoformat()
+        if obj.requested_check_out_time:
+            data["attendance_clock_out"] = obj.requested_check_out_time.strftime("%H:%M:%S")
+        return data
+
+    def _perm(self, obj, key):
+        request = self.context.get("request") if hasattr(self, "context") else None
+        flags = build_attendance_correction_permission_flags(obj, getattr(request, "user", None))
+        return flags.get(key, False)
+
+    def get_can_edit(self, obj):
+        return self._perm(obj, "can_edit")
+
+    def get_can_cancel(self, obj):
+        return self._perm(obj, "can_cancel")
+
+    def get_can_approve(self, obj):
+        return self._perm(obj, "can_approve")
+
+    def get_can_reject(self, obj):
+        return self._perm(obj, "can_reject")
+
+    def get_can_revoke(self, obj):
+        return self._perm(obj, "can_revoke")
 
 
 class AttendanceOverTimeSerializer(serializers.ModelSerializer):
