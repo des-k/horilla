@@ -417,80 +417,8 @@ def own_attendance_sort(request):
 @login_required
 @hx_request_required
 def search_attendance_requests(request):
-    field = request.GET.get("field")
-    all_attendance = Attendance.objects.all()
-    if request.GET.get("sortby"):
-        all_attendance = sortby(request, all_attendance, "sortby")
-
-    requests = all_attendance.filter(
-        is_validate_request=True, employee_id__is_active=True
-    )
-    requests = filtersubordinates(
-        request=request,
-        perm="attendance.view_attendance",
-        queryset=requests,
-    )
-    requests = requests | all_attendance.filter(
-        employee_id__employee_user_id=request.user,
-        is_validate_request=True,
-    )
-    requests = AttendanceFilters(request.GET, requests).qs
-    attendances = filtersubordinates(
-        request=request,
-        perm="attendance.view_attendance",
-        queryset=all_attendance.all(),
-    )
-    attendances = attendances | all_attendance.filter(
-        employee_id__employee_user_id=request.user
-    )
-    attendances = AttendanceFilters(request.GET, attendances).qs
-    previous_data = request.GET.urlencode()
-    data_dict = parse_qs(previous_data)
-    get_key_instances(Attendance, data_dict)
-
-    keys_to_remove = [key for key, value in data_dict.items() if value == ["unknown"]]
-    for key in keys_to_remove:
-        data_dict.pop(key)
-
-    template = "requests/attendance/request_lines.html"
-    requests_ids = json.dumps(
-        [
-            instance.id
-            for instance in paginator_qry(
-                requests, request.GET.get("rpage")
-            ).object_list
-        ]
-    )
-    attendances_ids = json.dumps(
-        [
-            instance.id
-            for instance in paginator_qry(
-                attendances, request.GET.get("page")
-            ).object_list
-        ]
-    )
-    if field != "" and field is not None:
-        requests = group_by_queryset(requests, field, request.GET.get("rpage"), "rpage")
-        attendances = group_by_queryset(
-            attendances, field, request.GET.get("page"), "page"
-        )
-        template = "requests/attendance/group_by.html"
-    else:
-        requests = paginator_qry(requests, request.GET.get("rpage"))
-        attendances = paginator_qry(attendances, request.GET.get("page"))
-    return render(
-        request,
-        template,
-        {
-            "requests": requests,
-            "attendances": attendances,
-            "requests_ids": requests_ids,
-            "attendances_ids": attendances_ids,
-            "pd": previous_data,
-            "filter_dict": data_dict,
-            "field": field,
-        },
-    )
+    from attendance.views.requests import request_attendance_view
+    return request_attendance_view(request)
 
 
 @login_required
