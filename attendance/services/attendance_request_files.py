@@ -15,6 +15,10 @@ from attendance.services.attachment_contract import (
     preferred_attachment_url,
 )
 from attendance.services.attendance_request_access import iter_request_attachments, user_can_view_request
+from attendance.services.attendance_correction_requests import (
+    build_permission_flags as build_correction_permission_flags,
+    user_is_request_owner as correction_user_is_request_owner,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -29,19 +33,32 @@ class AttachmentLink:
     url: str
 
 
-def attachment_belongs_to_request(attendance: Attendance, file_obj) -> bool:
+def _iter_generic_attachments(request_obj):
+    if isinstance(request_obj, Attendance):
+        yield from iter_request_attachments(request_obj)
+        return
     try:
-        return any(getattr(f, "id", None) == getattr(file_obj, "id", None) for f in iter_request_attachments(attendance))
+        for link in request_obj.attachment_links.select_related("attendance_request_file").all():
+            file_obj = getattr(link, "attendance_request_file", None)
+            if file_obj:
+                yield file_obj
+    except Exception:
+        return
+
+
+def attachment_belongs_to_request(request_obj, file_obj) -> bool:
+    try:
+        return any(getattr(f, "id", None) == getattr(file_obj, "id", None) for f in _iter_generic_attachments(request_obj))
     except Exception:
         return False
 
 
-def build_attachment_token(attendance_id: int, file_id: int) -> str:
+def build_attachment_token(request_id: int, file_id: int) -> str:
     signer = TimestampSigner(salt=SIGNER_SALT)
-    return signer.sign(f"{attendance_id}:{file_id}")
+    return signer.sign(f"{request_id}:{file_id}")
 
 
-def verify_attachment_token(attendance_id: int, file_id: int, token: str | None, *, max_age: int = DEFAULT_MAX_AGE_SECONDS) -> bool:
+def verify_attachment_token(request_id: int, file_id: int, token: str | None, *, max_age: int = DEFAULT_MAX_AGE_SECONDS) -> bool:
     if not token:
         return False
     signer = TimestampSigner(salt=SIGNER_SALT)
@@ -49,10 +66,10 @@ def verify_attachment_token(attendance_id: int, file_id: int, token: str | None,
         value = signer.unsign(token, max_age=max_age)
     except (BadSignature, SignatureExpired):
         return False
-    return value == f"{attendance_id}:{file_id}"
+    return value == f"{request_id}:{file_id}"
 
 
-def build_attachment_url(request, attendance: Attendance, file_obj, *, kind: str = "preferred") -> str:
+def build_attachment_url(request, request_obj, file_obj, *, kind: str = "preferred") -> str:
     if kind == "view":
         route_name = "api-attendance-request-attachment-view"
     elif kind == "download":
@@ -60,12 +77,12 @@ def build_attachment_url(request, attendance: Attendance, file_obj, *, kind: str
     else:
         route_name = None
 
-    token = build_attachment_token(attendance.id, file_obj.id)
+    token = build_attachment_token(request_obj.id, file_obj.id)
     if route_name:
-        path = reverse(route_name, kwargs={"attendance_id": attendance.id, "file_id": file_obj.id})
+        path = reverse(route_name, kwargs={"attendance_id": request_obj.id, "file_id": file_obj.id})
         url = f"{path}?token={token}"
     else:
-        metadata = build_attachment_metadata(request, attendance, file_obj)
+        metadata = build_attachment_metadata(request, request_obj, file_obj)
         url = preferred_attachment_url(metadata) or metadata.get("download_url") or metadata.get("view_url") or ""
 
     try:
@@ -74,9 +91,9 @@ def build_attachment_url(request, attendance: Attendance, file_obj, *, kind: str
         return url
 
 
-def build_attachment_metadata(request, attendance: Attendance, file_obj, *, include_delete_url: bool = False) -> dict:
-    view_url = build_attachment_url(request, attendance, file_obj, kind="view")
-    download_url = build_attachment_url(request, attendance, file_obj, kind="download")
+def build_attachment_metadata(request, request_obj, file_obj, *, include_delete_url: bool = False) -> dict:
+    view_url = build_attachment_url(request, request_obj, file_obj, kind="view")
+    download_url = build_attachment_url(request, request_obj, file_obj, kind="download")
     metadata = {
         "id": getattr(file_obj, "id", None),
         "name": attachment_name(file_obj),
@@ -90,9 +107,9 @@ def build_attachment_metadata(request, attendance: Attendance, file_obj, *, incl
         try:
             delete_path = reverse(
                 "api-attendance-request-attachment-download",
-                kwargs={"attendance_id": attendance.id, "file_id": file_obj.id},
+                kwargs={"attendance_id": request_obj.id, "file_id": file_obj.id},
             )
-            delete_url = f"{delete_path}?token={build_attachment_token(attendance.id, file_obj.id)}"
+            delete_url = f"{delete_path}?token={build_attachment_token(request_obj.id, file_obj.id)}"
             try:
                 delete_url = request.build_absolute_uri(delete_url)
             except Exception:
@@ -103,11 +120,18 @@ def build_attachment_metadata(request, attendance: Attendance, file_obj, *, incl
     return metadata
 
 
-def request_can_view_attachment(request, attendance: Attendance) -> bool:
-    if not request or not attendance:
+def request_can_view_attachment(request, request_obj) -> bool:
+    if not request or not request_obj:
         return False
     try:
-        return user_can_view_request(request.user, attendance)
+        if isinstance(request_obj, Attendance):
+            return user_can_view_request(request.user, request_obj)
+        flags = build_correction_permission_flags(request_obj, request.user)
+        return bool(
+            getattr(request.user, "is_superuser", False)
+            or correction_user_is_request_owner(request.user, request_obj)
+            or any(flags.values())
+        )
     except Exception:
-        logger.exception("Failed to resolve attendance attachment permissions for attendance %s", getattr(attendance, "id", None))
+        logger.exception("Failed to resolve attendance attachment permissions for request %s", getattr(request_obj, "id", None))
         return False
