@@ -178,8 +178,8 @@ def _validate_current_day_scope_window(*, employee, scope: str, start_date: date
         raise ValidationError("Check-out window has ended. Work Type Request can no longer be created for today.")
 
     if scope == WorkModeRequestScope.OUT:
-        if check_out_start_dt and now_dt < check_out_start_dt:
-            raise ValidationError("OUT scope can only be requested during the check-out window.")
+        # OUT requests for today remain allowed until the check-out window has ended.
+        # The expired case is already handled above by `check_out_passed`.
         return
 
     if check_in_passed:
