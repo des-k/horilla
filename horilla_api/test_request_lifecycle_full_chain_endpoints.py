@@ -7,6 +7,8 @@ from attendance.models import (
     Attendance,
     AttendanceActivity,
     AttendanceChannel,
+    AttendanceCorrectionRequest,
+    AttendanceCorrectionRequestStatus,
     AttendancePunchDirection,
     AttendancePunchSource,
     AttendancePunchingHistory,
@@ -163,19 +165,21 @@ class RequestLifecycleFullChainEndpointTests(AttendanceApiIntegrationMixin, APIT
         attendance = self._attendance()
         self.assertEqual(attendance.attendance_clock_in, time(8, 0))
         self.assertEqual(attendance.attendance_clock_out, time(17, 0))
-        attendance.request_type = 'update_request'
-        attendance.is_validate_request = True
-        attendance.is_validate_request_approved = False
-        attendance.requested_data = {
-            'attendance_clock_in': '08:30:00',
-            'attendance_clock_out': '17:30:00',
-            '__meta': {'current_scope': 'FULL'},
-        }
-        attendance.save(update_fields=['request_type', 'is_validate_request', 'is_validate_request_approved', 'requested_data'])
+        request_obj = AttendanceCorrectionRequest.objects.create(
+            employee_id=self.employee,
+            attendance_date=self.target_date,
+            scope='FULL',
+            requested_check_in_date=self.target_date,
+            requested_check_in_time=time(8, 30),
+            requested_check_out_date=self.target_date,
+            requested_check_out_time=time(17, 30),
+            reason='Adjust both punches',
+            status=AttendanceCorrectionRequestStatus.WAITING,
+        )
 
         with self.shift_ctx:
             response = self.auth_client(self.admin_user).put(
-                f'/api/attendance/attendance-request-approve/{attendance.id}',
+                f'/api/attendance/attendance-request-approve/{request_obj.id}',
                 {},
                 format='json',
             )
@@ -201,8 +205,8 @@ class RequestLifecycleFullChainEndpointTests(AttendanceApiIntegrationMixin, APIT
 
         with self.shift_ctx:
             revoke = self.auth_client(self.admin_user).put(
-                f'/api/attendance/attendance-request-revoke/{attendance.id}',
-                {},
+                f'/api/attendance/attendance-request-revoke/{request_obj.id}',
+                {'reason': 'Manager revoked correction'},
                 format='json',
             )
         self.assertEqual(revoke.status_code, 200)
@@ -227,20 +231,21 @@ class RequestLifecycleFullChainEndpointTests(AttendanceApiIntegrationMixin, APIT
         with self.shift_ctx:
             recompute_attendance(self.employee, self.target_date)
 
-        attendance = self._attendance()
-        attendance.request_type = 'update_request'
-        attendance.is_validate_request = True
-        attendance.is_validate_request_approved = False
-        attendance.requested_data = {
-            'attendance_clock_in': '08:30:00',
-            'attendance_clock_out': '17:30:00',
-            '__meta': {'current_scope': 'FULL'},
-        }
-        attendance.save(update_fields=['request_type', 'is_validate_request', 'is_validate_request_approved', 'requested_data'])
+        request_obj = AttendanceCorrectionRequest.objects.create(
+            employee_id=self.employee,
+            attendance_date=self.target_date,
+            scope='FULL',
+            requested_check_in_date=self.target_date,
+            requested_check_in_time=time(8, 30),
+            requested_check_out_date=self.target_date,
+            requested_check_out_time=time(17, 30),
+            reason='Adjust both punches',
+            status=AttendanceCorrectionRequestStatus.WAITING,
+        )
 
         with self.shift_ctx:
             approve = self.auth_client(self.admin_user).put(
-                f'/api/attendance/attendance-request-approve/{attendance.id}',
+                f'/api/attendance/attendance-request-approve/{request_obj.id}',
                 {},
                 format='json',
             )
@@ -248,8 +253,8 @@ class RequestLifecycleFullChainEndpointTests(AttendanceApiIntegrationMixin, APIT
 
         with self.shift_ctx:
             first_revoke = self.auth_client(self.admin_user).put(
-                f'/api/attendance/attendance-request-revoke/{attendance.id}',
-                {},
+                f'/api/attendance/attendance-request-revoke/{request_obj.id}',
+                {'reason': 'Manager revoked correction'},
                 format='json',
             )
         self.assertEqual(first_revoke.status_code, 200)
@@ -258,15 +263,16 @@ class RequestLifecycleFullChainEndpointTests(AttendanceApiIntegrationMixin, APIT
 
         with self.shift_ctx:
             second_revoke = self.auth_client(self.admin_user).put(
-                f'/api/attendance/attendance-request-revoke/{attendance.id}',
+                f'/api/attendance/attendance-request-revoke/{request_obj.id}',
                 {},
                 format='json',
             )
-        self.assertEqual(second_revoke.status_code, 404)
+        self.assertEqual(second_revoke.status_code, 403)
         self.assertEqual(self._attendance_activity_snapshot(), baseline_snapshot)
         self.assertEqual(self._punch_snapshot(in_punch, out_punch), baseline_punch_snapshot)
         attendance = self._attendance()
-        self.assertEqual(attendance.request_type, 'revoke_request')
+        request_obj.refresh_from_db()
+        self.assertEqual(request_obj.status, AttendanceCorrectionRequestStatus.REVOKED)
 
     def test_work_mode_approve_and_revoke_endpoints_update_modes_without_orphaning_raw_trail(self):
         in_punch, out_punch = self._create_raw_punches(work_mode=AttendanceWorkMode.WFO, in_time_value=time(8, 20), out_time_value=time(16, 40))
