@@ -10,6 +10,7 @@ from datetime import datetime
 import pandas as pd
 
 from attendance.models import Attendance
+from attendance.methods.utils import schedule_minimum_hour_for_date
 from base.models import EmployeeShift, WorkType
 from employee.models import Employee
 
@@ -192,7 +193,7 @@ def process_attendance_data(attendance_dicts):
                         attendance_clock_out_date=check_out_date,
                         attendance_clock_out=format_time(check_out),
                         attendance_worked_hour=format_time(worked_hour),
-                        minimum_hour=format_time(minimum_hour),
+                        minimum_hour=schedule_minimum_hour_for_date(attendance_date, shift, fallback=format_time(minimum_hour) or "00:00"),
                     )
                 )
                 existing_attendance_records[(badge_id, attendance_date)] = (
