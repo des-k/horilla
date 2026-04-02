@@ -1813,6 +1813,12 @@ class AttendanceRequestView(APIView):
             request_history_filter
         ).distinct()
 
+        mine_only = (request.GET.get("mine") or "").strip().lower() in {"1", "true", "yes"}
+        status_filter = (request.GET.get("status") or "all").strip().lower()
+        month_range = _parse_filter_month_range(
+            request.GET.get("month") or request.GET.get("date")
+        ) or _parse_filter_month_range(dj_timezone.localdate().strftime("%Y-%m"))
+
         if approval_view == "history":
             requests = _attendance_request_history_scope(request)
             employee_id = (request.GET.get("employee_id") or "").strip()
@@ -1823,6 +1829,22 @@ class AttendanceRequestView(APIView):
             ) or _parse_filter_month_range(dj_timezone.localdate().strftime("%Y-%m"))
             requests = requests.filter(attendance_date__range=(history_month_start, history_month_end))
             requests = _attendance_history_status_filter(requests, request.GET.get("status"))
+        elif mine_only:
+            requests = my_qs.filter(attendance_date__range=(month_range[0], month_range[1]))
+            if status_filter == "waiting":
+                requests = requests.filter(is_validate_request=True)
+            elif status_filter == "approved":
+                requests = (
+                    requests.filter(Q(is_validate_request_approved=True) | Q(attendance_validated=True))
+                    .exclude(is_validate_request=True)
+                    .exclude(request_type__in=["cancel_request", "reject_request", "revoke_request"])
+                )
+            elif status_filter == "rejected":
+                requests = requests.filter(request_type="reject_request")
+            elif status_filter == "revoked":
+                requests = requests.filter(request_type="revoke_request")
+            elif status_filter in {"canceled", "cancel"}:
+                requests = requests.filter(request_type="cancel_request")
         else:
             requests = (approvals_qs | my_qs).distinct()
 
