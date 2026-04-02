@@ -2157,6 +2157,16 @@ class AttendanceRequestView(APIView):
                 requests = requests.filter(employee_id_id=employee_id)
             requests = requests.filter(attendance_date__range=(history_month_start, history_month_end))
             requests = _attendance_history_status_filter(requests, request.GET.get("status"))
+            try:
+                history_has_results = requests.exists()
+            except Exception:
+                history_has_results = True
+            if not history_has_results:
+                requests = _attendance_request_history_scope(request)
+                if employee_id:
+                    requests = requests.filter(employee_id_id=employee_id)
+                requests = requests.filter(attendance_date__range=(history_month_start, history_month_end))
+                requests = _attendance_history_status_filter(requests, request.GET.get("status"))
         elif mine_only:
             requests = my_qs.filter(attendance_date__range=(month_range[0], month_range[1]))
             if status_filter != "all":
