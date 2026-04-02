@@ -123,10 +123,7 @@ class AttendanceRequestSerializer(serializers.ModelSerializer):
     employee_last_name = serializers.CharField(source="employee_id.employee_last_name", read_only=True)
     badge_id = serializers.CharField(source="employee_id.badge_id", read_only=True)
     employee_profile_url = serializers.SerializerMethodField(read_only=True)
-    reason = serializers.SerializerMethodField(read_only=True)
-    request_description = serializers.SerializerMethodField(read_only=True)
-    status = serializers.SerializerMethodField(read_only=True)
-    request_status = serializers.SerializerMethodField(read_only=True)
+    request_status = serializers.CharField(source="status", read_only=True)
     action_by_name = serializers.SerializerMethodField(read_only=True)
     attachments = serializers.SerializerMethodField(read_only=True)
     attachment_urls = serializers.SerializerMethodField(read_only=True)
@@ -156,7 +153,7 @@ class AttendanceRequestSerializer(serializers.ModelSerializer):
             "employee_profile_url", "attendance_date", "scope",
             "requested_check_in_date", "requested_check_in_time",
             "requested_check_out_date", "requested_check_out_time",
-            "reason", "request_description", "status", "request_status",
+            "reason", "status", "request_status",
             "action_reason", "action_type", "action_at", "approved_at", "rejected_at", "revoked_at", "canceled_at",
             "action_by_name", "attachments", "attachment_urls", "file_urls",
             "proposed_attendance_clock_in", "proposed_attendance_clock_out",
@@ -167,18 +164,6 @@ class AttendanceRequestSerializer(serializers.ModelSerializer):
             "effective_attendance_clock_in_date", "effective_attendance_clock_out_date",
             "can_edit", "can_cancel", "can_approve", "can_reject", "can_revoke",
         ]
-
-    def _is_legacy_attendance(self, obj):
-        return isinstance(obj, Attendance) or getattr(obj, "requested_data", None) is not None
-
-    def _requested_payload(self, obj):
-        if self._is_legacy_attendance(obj):
-            try:
-                from attendance.services.attendance_correction_scope_rules import load_requested_data
-                return load_requested_data(getattr(obj, "requested_data", None))
-            except Exception:
-                return {}
-        return {}
 
     def _fmt_time(self, value):
         try:
@@ -203,48 +188,7 @@ class AttendanceRequestSerializer(serializers.ModelSerializer):
             return value
 
     def _final_attendance(self, obj):
-        if self._is_legacy_attendance(obj):
-            return obj
         return Attendance.objects.filter(employee_id=obj.employee_id, attendance_date=obj.attendance_date).first()
-
-    def get_reason(self, obj):
-        return getattr(obj, "reason", None) or getattr(obj, "request_description", None)
-
-    def get_request_description(self, obj):
-        return self.get_reason(obj)
-
-    def get_status(self, obj):
-        status = getattr(obj, "status", None)
-        if isinstance(status, (list, tuple, dict, set)):
-            status = None
-        if status:
-            return status
-        action = getattr(obj, "action_type", None)
-        mapping = {
-            AttendanceRequestActionType.APPROVED: "APPROVED",
-            AttendanceRequestActionType.REJECTED: "REJECTED",
-            AttendanceRequestActionType.REVOKED: "REVOKED",
-            AttendanceRequestActionType.CANCELED: "CANCELED",
-        }
-        if action in mapping:
-            return mapping[action]
-        if getattr(obj, "is_validate_request", False):
-            return "WAITING"
-        if getattr(obj, "is_validate_request_approved", False):
-            return "APPROVED"
-        req_type = (getattr(obj, "request_type", None) or "").strip().lower()
-        mapping2 = {"cancel_request": "CANCELED", "revoke_request": "REVOKED", "reject_request": "REJECTED"}
-        return mapping2.get(req_type, req_type.upper() or None)
-
-    def get_request_status(self, obj):
-        return self.get_status(obj)
-
-    def get_action_type(self, obj):
-        action = getattr(obj, "action_type", None)
-        if action:
-            return str(action)
-        status_value = self.get_status(obj)
-        return status_value
 
     def get_employee_profile_url(self, obj):
         try:
@@ -289,23 +233,15 @@ class AttendanceRequestSerializer(serializers.ModelSerializer):
         return self.get_attachment_urls(obj)
 
     def get_proposed_attendance_clock_in(self, obj):
-        if self._is_legacy_attendance(obj):
-            return self._fmt_time(self._requested_payload(obj).get("attendance_clock_in"))
         return self._fmt_time(obj.requested_check_in_time)
 
     def get_proposed_attendance_clock_out(self, obj):
-        if self._is_legacy_attendance(obj):
-            return self._fmt_time(self._requested_payload(obj).get("attendance_clock_out"))
         return self._fmt_time(obj.requested_check_out_time)
 
     def get_proposed_attendance_clock_in_date(self, obj):
-        if self._is_legacy_attendance(obj):
-            return self._fmt_date(self._requested_payload(obj).get("attendance_clock_in_date"))
         return self._fmt_date(obj.requested_check_in_date)
 
     def get_proposed_attendance_clock_out_date(self, obj):
-        if self._is_legacy_attendance(obj):
-            return self._fmt_date(self._requested_payload(obj).get("attendance_clock_out_date"))
         return self._fmt_date(obj.requested_check_out_date)
 
     def get_final_attendance_clock_in(self, obj):
@@ -325,29 +261,21 @@ class AttendanceRequestSerializer(serializers.ModelSerializer):
         return self._fmt_date(getattr(att, "attendance_clock_out_date", None))
 
     def get_effective_attendance_clock_in(self, obj):
-        if self._is_legacy_attendance(obj):
-            return self.get_proposed_attendance_clock_in(obj) or self.get_final_attendance_clock_in(obj)
         if getattr(obj, "status", None) == AttendanceCorrectionRequestStatus.APPROVED and obj.requested_check_in_time:
             return self._fmt_time(obj.requested_check_in_time)
         return self.get_final_attendance_clock_in(obj)
 
     def get_effective_attendance_clock_out(self, obj):
-        if self._is_legacy_attendance(obj):
-            return self.get_proposed_attendance_clock_out(obj) or self.get_final_attendance_clock_out(obj)
         if getattr(obj, "status", None) == AttendanceCorrectionRequestStatus.APPROVED and obj.requested_check_out_time:
             return self._fmt_time(obj.requested_check_out_time)
         return self.get_final_attendance_clock_out(obj)
 
     def get_effective_attendance_clock_in_date(self, obj):
-        if self._is_legacy_attendance(obj):
-            return self.get_proposed_attendance_clock_in_date(obj) or self.get_final_attendance_clock_in_date(obj)
         if getattr(obj, "status", None) == AttendanceCorrectionRequestStatus.APPROVED and obj.requested_check_in_date:
             return self._fmt_date(obj.requested_check_in_date)
         return self.get_final_attendance_clock_in_date(obj)
 
     def get_effective_attendance_clock_out_date(self, obj):
-        if self._is_legacy_attendance(obj):
-            return self.get_proposed_attendance_clock_out_date(obj) or self.get_final_attendance_clock_out_date(obj)
         if getattr(obj, "status", None) == AttendanceCorrectionRequestStatus.APPROVED and obj.requested_check_out_date:
             return self._fmt_date(obj.requested_check_out_date)
         return self.get_final_attendance_clock_out_date(obj)
@@ -355,22 +283,7 @@ class AttendanceRequestSerializer(serializers.ModelSerializer):
     def _perm(self, obj, key):
         request = self.context.get("request") if hasattr(self, "context") else None
         user = getattr(request, "user", None)
-        if self._is_legacy_attendance(obj):
-            try:
-                from attendance.services.attendance_request_access import user_can_approve_request as legacy_can_approve, user_is_request_owner as legacy_is_owner
-                is_owner = legacy_is_owner(user, obj)
-                can_approve = legacy_can_approve(user, obj) and bool(getattr(obj, "is_validate_request", False))
-                flags = {
-                    "can_edit": bool(is_owner and getattr(obj, "is_validate_request", False) and not getattr(obj, "is_validate_request_approved", False)),
-                    "can_cancel": bool(is_owner and getattr(obj, "is_validate_request", False) and not getattr(obj, "is_validate_request_approved", False)),
-                    "can_approve": bool(can_approve),
-                    "can_reject": bool(can_approve),
-                    "can_revoke": bool(legacy_can_approve(user, obj) and getattr(obj, "is_validate_request_approved", False)),
-                }
-            except Exception:
-                flags = {}
-        else:
-            flags = build_attendance_correction_permission_flags(obj, user)
+        flags = build_attendance_correction_permission_flags(obj, user)
         return flags.get(key, False)
 
     def get_can_edit(self, obj):
@@ -387,106 +300,6 @@ class AttendanceRequestSerializer(serializers.ModelSerializer):
 
     def get_can_revoke(self, obj):
         return self._perm(obj, "can_revoke")
-
-
-class AttendanceOverTimeSerializer(serializers.ModelSerializer):
-    badge_id = serializers.CharField(source="employee_id.badge_id", read_only=True)
-    employee_first_name = serializers.CharField(
-        source="employee_id.employee_first_name", read_only=True
-    )
-    employee_last_name = serializers.CharField(
-        source="employee_id.employee_last_name", read_only=True
-    )
-    employee_profile_url = serializers.SerializerMethodField(read_only=True)
-    # Direct attachments uploaded on the attendance request
-    attachment_urls = serializers.SerializerMethodField(read_only=True)
-    # Alias for UI parity with Work Type Requests
-    file_urls = serializers.SerializerMethodField(read_only=True)
-
-    class Meta:
-        model = AttendanceOverTime
-        fields = [
-            "id",
-            "employee_first_name",
-            "employee_last_name",
-            "employee_profile_url",
-            "badge_id",
-            "employee_id",
-            "month",
-            "year",
-            "worked_hours",
-            "pending_hours",
-            "overtime",
-        ]
-
-    def get_attachment_urls(self, obj):
-        try:
-            from attendance.services.attendance_request_access import iter_request_attachments
-            urls = []
-            seen = set()
-            for f in iter_request_attachments(obj):
-                try:
-                    u = getattr(getattr(f, 'file', None), 'url', None)
-                    if u and u not in seen:
-                        seen.add(u)
-                        urls.append(u)
-                except Exception:
-                    continue
-            return urls
-        except Exception:
-            return []
-
-    def get_file_urls(self, obj):
-        # Backward/UX compatibility with WorkModeRequestSerializer
-        return self.get_attachment_urls(obj)
-
-    def get_employee_profile_url(self, obj):
-        try:
-            employee_profile = obj.employee_id.employee_profile
-            return employee_profile.url
-        except:
-            return None
-
-
-class AttendanceLateComeEarlyOutSerializer(serializers.ModelSerializer):
-    employee_first_name = serializers.CharField(
-        source="employee_id.employee_first_name", read_only=True
-    )
-    employee_last_name = serializers.CharField(
-        source="employee_id.employee_last_name", read_only=True
-    )
-
-    class Meta:
-        model = AttendanceLateComeEarlyOut
-        fields = "__all__"
-
-
-class AttendanceActivitySerializer(serializers.ModelSerializer):
-    employee_first_name = serializers.CharField(
-        source="employee_id.employee_first_name", read_only=True
-    )
-    employee_last_name = serializers.CharField(
-        source="employee_id.employee_last_name", read_only=True
-    )
-    clock_in_channel_display = serializers.SerializerMethodField(read_only=True)
-    clock_out_channel_display = serializers.SerializerMethodField(read_only=True)
-
-    class Meta:
-        model = AttendanceActivity
-        fields = "__all__"
-
-    def get_clock_in_channel_display(self, obj):
-        try:
-            return obj.get_clock_in_channel_display()
-        except Exception:
-            return getattr(obj, "clock_in_channel", None)
-
-    def get_clock_out_channel_display(self, obj):
-        try:
-            return obj.get_clock_out_channel_display()
-        except Exception:
-            return getattr(obj, "clock_out_channel", None)
-
 
 class WorkModeRequestSerializer(serializers.ModelSerializer):
     employee_first_name = serializers.CharField(
