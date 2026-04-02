@@ -33,6 +33,8 @@ class AttendanceCorrectionWebSmokeTests(AttendanceApiIntegrationMixin, TestCase)
         listing = self.client.get('/attendance/request-attendance-view/')
         self.assertEqual(listing.status_code, 200)
         self.assertContains(listing, 'Attendance Requests')
+        self.assertContains(listing, 'Edit Request')
+        self.assertNotContains(listing, 'title="View"')
 
         detail = self.client.get(f'/attendance/validate-attendance-request/{request_obj.id}/', HTTP_HX_REQUEST='true')
         self.assertEqual(detail.status_code, 200)
