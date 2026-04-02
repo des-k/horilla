@@ -1,47 +1,77 @@
 {% load i18n %}
 
 <style>
-  .oh-main__titlebar--right {
+  .oh-work-type-request-filter-grid {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: stretch;
+    justify-content: flex-end;
+    gap: 14px;
     width: 100%;
   }
 
-  .oh-work-type-request-filter-grid {
-    display: flex !important;
-    width: 100%;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 14px;
+  .oh-work-type-request-filter-grid .oh-input-group {
+    margin: 0;
   }
 
   .oh-work-type-request-filter-grid .oh-work-type-request-filter-month {
-    min-width: 260px;
     flex: 0 0 260px;
+    min-width: 260px;
   }
 
   .oh-work-type-request-filter-grid .oh-work-type-request-filter-status,
   .oh-work-type-request-filter-grid .oh-work-type-request-filter-mode,
   .oh-work-type-request-filter-grid .oh-work-type-request-filter-scope {
-    min-width: 190px;
-    flex: 0 0 190px;
+    flex: 0 0 170px;
+    min-width: 170px;
+  }
+
+  .oh-work-type-request-filter-grid .oh-input,
+  .oh-work-type-request-filter-grid .oh-select,
+  .oh-work-type-request-filter-grid .oh-btn {
+    min-height: 56px;
+    height: 56px;
+    box-sizing: border-box;
+  }
+
+  .oh-work-type-request-filter-grid .oh-input,
+  .oh-work-type-request-filter-grid .oh-select {
+    width: 100%;
+  }
+
+  .oh-work-type-request-filter-grid .oh-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    white-space: nowrap;
+    padding: 0 18px;
   }
 
   .oh-work-type-request-filter-grid .oh-work-type-request-filter-actions {
     display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 12px;
-    margin-left: 6px;
+    align-items: stretch;
+    gap: 10px;
+    margin-left: auto;
+    flex: 0 0 auto;
   }
 
   @media (max-width: 991.98px) {
+    .oh-work-type-request-filter-grid {
+      justify-content: flex-start;
+    }
+
     .oh-work-type-request-filter-grid .oh-work-type-request-filter-month,
     .oh-work-type-request-filter-grid .oh-work-type-request-filter-status,
     .oh-work-type-request-filter-grid .oh-work-type-request-filter-mode,
-    .oh-work-type-request-filter-grid .oh-work-type-request-filter-scope,
+    .oh-work-type-request-filter-grid .oh-work-type-request-filter-scope {
+      flex: 1 1 220px;
+      min-width: 220px;
+    }
+
     .oh-work-type-request-filter-grid .oh-work-type-request-filter-actions {
-      flex: 1 1 100%;
-      min-width: 100%;
       margin-left: 0;
+      width: 100%;
+      justify-content: flex-start;
     }
   }
 </style>
@@ -53,15 +83,15 @@
 
   <div class="oh-main__titlebar oh-main__titlebar--right">
     <form method="get" action="{% url 'attendance-work-type-request-view' %}" class="oh-work-type-request-filter-grid" onsubmit="event.preventDefault(); this.submit();">
-      {# Preserve current sorting when applying search / quick filters #}
       <input type="hidden" name="sort_my" value="{{ sort_my }}" />
       <input type="hidden" name="dir_my" value="{{ dir_my }}" />
       <input type="hidden" name="sort_app" value="{{ sort_app }}" />
       <input type="hidden" name="dir_app" value="{{ dir_app }}" />
+
       <div class="oh-input-group oh-work-type-request-filter-month">
         <input
           type="month"
-          class="oh-input w-100"
+          class="oh-input"
           name="my_month"
           aria-label="{% trans 'Month' %}"
           value="{{ my_month }}"
@@ -70,7 +100,7 @@
       </div>
 
       <div class="oh-input-group oh-work-type-request-filter-status">
-        <select class="oh-select w-100" name="status_my" aria-label="{% trans 'Status' %}" onchange="this.form.submit()">
+        <select class="oh-select" name="status_my" aria-label="{% trans 'Status' %}" onchange="this.form.submit()">
           {% for v, label in status_my_options %}
             <option value="{{ v }}" {% if status_my == v %}selected{% endif %}>{{ label }}</option>
           {% endfor %}
@@ -78,7 +108,7 @@
       </div>
 
       <div class="oh-input-group oh-work-type-request-filter-mode">
-        <select class="oh-select w-100" name="mode_filter" aria-label="{% trans 'Work Type' %}" onchange="this.form.submit()">
+        <select class="oh-select" name="mode_filter" aria-label="{% trans 'Work Type' %}" onchange="this.form.submit()">
           {% for v, label in mode_filter_options %}
             <option value="{{ v }}" {% if mode_filter == v %}selected{% endif %}>{{ label }}</option>
           {% endfor %}
@@ -86,7 +116,7 @@
       </div>
 
       <div class="oh-input-group oh-work-type-request-filter-scope">
-        <select class="oh-select w-100" name="scope_filter" aria-label="{% trans 'Scope' %}" onchange="this.form.submit()">
+        <select class="oh-select" name="scope_filter" aria-label="{% trans 'Scope' %}" onchange="this.form.submit()">
           {% for v, label in scope_filter_options %}
             <option value="{{ v }}" {% if scope_filter == v %}selected{% endif %}>{{ label }}</option>
           {% endfor %}
