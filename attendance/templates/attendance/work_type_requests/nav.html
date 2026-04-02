@@ -1,39 +1,60 @@
 {% load i18n %}
 
 <style>
-  @media (min-width: 1200px) {
+  @media (min-width: 992px) {
+    .oh-main__titlebar--right {
+      width: 100%;
+    }
+
     .oh-work-type-request-filter-grid {
       display: grid !important;
-      grid-template-columns: minmax(320px, 360px) minmax(160px, 1fr) minmax(160px, 1fr) minmax(160px, 1fr) auto;
+      width: 100%;
+      grid-template-columns: 350px 190px 190px 190px auto;
+      grid-template-areas:
+        "search status mode scope ."
+        "month actions actions actions actions";
       column-gap: 14px;
       row-gap: 12px;
       align-items: center;
     }
 
     .oh-work-type-request-filter-grid .oh-work-type-request-filter-search {
-      grid-column: 1;
+      grid-area: search;
+      width: 350px;
+      min-width: 350px;
+      justify-self: start;
     }
 
     .oh-work-type-request-filter-grid .oh-work-type-request-filter-status {
-      grid-column: 2;
+      grid-area: status;
+      width: 190px;
+      min-width: 190px;
     }
 
     .oh-work-type-request-filter-grid .oh-work-type-request-filter-mode {
-      grid-column: 3;
+      grid-area: mode;
+      width: 190px;
+      min-width: 190px;
     }
 
     .oh-work-type-request-filter-grid .oh-work-type-request-filter-scope {
-      grid-column: 4;
+      grid-area: scope;
+      width: 190px;
+      min-width: 190px;
     }
 
     .oh-work-type-request-filter-grid .oh-work-type-request-filter-month {
-      grid-column: 1;
+      grid-area: month;
+      width: 350px;
+      min-width: 350px;
+      justify-self: start;
     }
 
     .oh-work-type-request-filter-grid .oh-work-type-request-filter-actions {
-      grid-column: 2 / span 4;
+      grid-area: actions;
       justify-content: flex-start;
       align-self: center;
+      margin-top: 0 !important;
     }
 
     .oh-work-type-request-filter-grid .oh-work-type-request-filter-actions > *:first-child {
