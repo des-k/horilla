@@ -781,7 +781,7 @@ def _recalculate_attendance_summary(attendance, *, shift_start_dt=None, shift_en
             schedule=schedule,
             shift_start_dt=shift_start_dt,
             shift_end_dt=shift_end_dt,
-            minimum_hour=getattr(attendance, "minimum_hour", None) or "00:00",
+            minimum_hour=(getattr(schedule, "minimum_working_hour", None) or getattr(attendance, "minimum_hour", None) or "00:00"),
             leave_kind=None,
             check_in_cutoff_dt=None,
         )
