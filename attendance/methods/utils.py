@@ -5,7 +5,7 @@ This module is used write custom methods
 """
 
 import calendar
-from datetime import datetime, time, timedelta
+from datetime import date as _date, datetime, time, timedelta
 
 import pandas as pd
 from django.core.exceptions import ValidationError
@@ -16,7 +16,7 @@ from django.http import HttpResponse
 from django.utils.translation import gettext_lazy as _
 
 from base.methods import get_pagination
-from base.models import WEEK_DAYS, CompanyLeaves, Holidays
+from base.models import WEEK_DAYS, CompanyLeaves, Holidays, EmployeeShiftDay
 from employee.models import Employee
 from horilla.horilla_settings import HORILLA_DATE_FORMATS, HORILLA_TIME_FORMATS
 
@@ -186,6 +186,26 @@ def shift_schedule_today(day, shift):
         start_time_sec = strtime_seconds(schedule_today.start_time.strftime("%H:%M"))
         end_time_sec = strtime_seconds(schedule_today.end_time.strftime("%H:%M"))
     return (minimum_hour, start_time_sec, end_time_sec)
+
+
+def schedule_minimum_hour_for_date(attendance_date, shift, fallback="00:00"):
+    """Resolve minimum working hour from shift schedule for a concrete attendance date."""
+    if not attendance_date or shift is None:
+        return fallback or "00:00"
+
+    if isinstance(attendance_date, datetime):
+        attendance_date = attendance_date.date()
+    elif not isinstance(attendance_date, _date):
+        return fallback or "00:00"
+
+    try:
+        day = EmployeeShiftDay.objects.get(day=attendance_date.strftime("%A").lower())
+    except Exception:
+        return fallback or "00:00"
+
+    minimum_hour, _, _ = shift_schedule_today(day=day, shift=shift)
+    minimum_hour = minimum_hour or fallback or "00:00"
+    return attendance_day_checking(str(attendance_date), minimum_hour)
 
 
 def overtime_calculation(attendance):
