@@ -2529,6 +2529,11 @@ class WorkModeRequestView(APIView):
         if request.GET.get("mine") in ("1", "true", "True"):
             qs = own_qs
 
+        month_range = _parse_filter_month_range(request.GET.get("month") or request.GET.get("date"))
+        if month_range:
+            month_start, month_end, _ = month_range
+            qs = qs.filter(start_date__lte=month_end, end_date__gte=month_start)
+
         status_q = request.GET.get("status")
         if status_q:
             qs = qs.filter(status=status_q)
