@@ -285,6 +285,95 @@ class MobileAttendanceActionParityTests(SimpleTestCase):
         self.assertEqual(update_punch_history.call_args.kwargs["work_mode"], AttendanceWorkMode.WFA)
         self.assertIs(update_punch_history.call_args.kwargs["related_work_mode_request"], approved_req)
 
+    def test_checking_status_verified_on_duty_in_hides_late_by_when_check_in_exists(self):
+        approved_req = SimpleNamespace(
+            id=811,
+            status="approved",
+            scope="in",
+            document_status="verified",
+            effective_document_status=lambda: "verified",
+        )
+        attendance = SimpleNamespace(
+            attendance_clock_in=time(10, 15, 18),
+            attendance_clock_out=None,
+            attendance_clock_in_date=self.attendance_date,
+            attendance_clock_out_date=None,
+            in_attendance_status="VALID",
+            out_attendance_status=None,
+            in_attendance_reject_reason_code=None,
+            out_attendance_reject_reason_code=None,
+            in_related_work_type_request_id=approved_req.id,
+            out_related_work_type_request_id=None,
+            reconciliation_source="SOURCE_ON_DUTY",
+            attendance_worked_hour="00:00",
+            is_presensi_only=False,
+        )
+        status_request = self._status_request()
+        status_patches = self._status_patches(
+            modes=[(AttendanceWorkMode.ON_DUTY, "request", approved_req), (AttendanceWorkMode.WFO, "schedule", None)],
+            allowed=[True, True],
+            attendance=attendance,
+        )
+
+        for manager in status_patches:
+            manager.start()
+        try:
+            status_response = CheckingStatus.as_view()(status_request)
+        finally:
+            for manager in reversed(status_patches):
+                manager.stop()
+
+        self.assertEqual(status_response.status_code, 200)
+        self.assertEqual(status_response.data["in_mode"], AttendanceWorkMode.ON_DUTY)
+        self.assertEqual(status_response.data["out_mode"], AttendanceWorkMode.WFO)
+        self.assertIsNone(status_response.data["late_by"])
+        self.assertEqual(status_response.data["header_state_code"], "CHECKED_IN")
+        self.assertIn("Earliest Check Out", status_response.data["header_detail_message"])
+        self.assertNotIn("Late by", status_response.data["header_detail_message"])
+
+    def test_checking_status_verified_on_duty_out_hides_early_out_after_checkout_exists(self):
+        approved_req = SimpleNamespace(
+            id=812,
+            status="approved",
+            scope="out",
+            document_status="verified",
+            effective_document_status=lambda: "verified",
+        )
+        attendance = SimpleNamespace(
+            attendance_clock_in=time(8, 0),
+            attendance_clock_out=time(16, 44, 59),
+            attendance_clock_in_date=self.attendance_date,
+            attendance_clock_out_date=self.attendance_date,
+            in_attendance_status="VALID",
+            out_attendance_status="VALID",
+            in_attendance_reject_reason_code=None,
+            out_attendance_reject_reason_code=None,
+            in_related_work_type_request_id=None,
+            out_related_work_type_request_id=approved_req.id,
+            reconciliation_source="SOURCE_ON_DUTY",
+            attendance_worked_hour="08:44",
+            is_presensi_only=False,
+        )
+        status_request = self._status_request()
+        status_patches = self._status_patches(
+            modes=[(AttendanceWorkMode.WFO, "schedule", None), (AttendanceWorkMode.ON_DUTY, "request", approved_req)],
+            allowed=[True, True],
+            attendance=attendance,
+        )
+
+        for manager in status_patches:
+            manager.start()
+        try:
+            status_response = CheckingStatus.as_view()(status_request)
+        finally:
+            for manager in reversed(status_patches):
+                manager.stop()
+
+        self.assertEqual(status_response.status_code, 200)
+        self.assertFalse(status_response.data["checked_out_early"])
+        self.assertIsNone(status_response.data["checked_out_early_by"])
+        self.assertEqual(status_response.data["out_mode"], AttendanceWorkMode.ON_DUTY)
+
     def test_checking_status_late_by_ignores_check_in_seconds(self):
         attendance = SimpleNamespace(
             attendance_clock_in=time(10, 15, 18),
