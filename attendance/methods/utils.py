@@ -197,7 +197,7 @@ def overtime_calculation(attendance):
         attendance : attendance instance
     """
 
-    minimum_hour = attendance.minimum_hour
+    minimum_hour = attendance.get_schedule_minimum_hour() if hasattr(attendance, "get_schedule_minimum_hour") else attendance.minimum_hour
     at_work = attendance.attendance_worked_hour
     at_work_sec = strtime_seconds(at_work)
     minimum_hour_sec = strtime_seconds(minimum_hour)
