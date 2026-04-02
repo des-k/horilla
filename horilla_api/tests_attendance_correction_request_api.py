@@ -90,6 +90,7 @@ class AttendanceCorrectionRequestApiTests(AttendanceApiIntegrationMixin, APITest
         self.assertTrue(create_response.data['can_cancel'])
         self.assertFalse(create_response.data['can_approve'])
         self.assertNotIn('request_type', create_response.data)
+        self.assertNotIn('requested_data', create_response.data)
         request_id = create_response.data['id']
 
         # waiting request can change scope and revalidates against itself only
