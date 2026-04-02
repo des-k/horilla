@@ -297,6 +297,26 @@ def _attendance_request_history_scope(request):
 
 
 def _attendance_history_status_filter(qs, status_value):
+    """History status filter compatible with both legacy Attendance and new AttendanceCorrectionRequest querysets."""
+    model = getattr(qs, "model", None)
+    if model is AttendanceCorrectionRequest:
+        status_value = (status_value or "").strip().lower()
+        if not status_value or status_value == "all":
+            return qs.filter(status__in=[
+                AttendanceCorrectionRequestStatus.APPROVED,
+                AttendanceCorrectionRequestStatus.REJECTED,
+                AttendanceCorrectionRequestStatus.REVOKED,
+            ])
+        mapping = {
+            "waiting": AttendanceCorrectionRequestStatus.WAITING,
+            "approved": AttendanceCorrectionRequestStatus.APPROVED,
+            "rejected": AttendanceCorrectionRequestStatus.REJECTED,
+            "revoked": AttendanceCorrectionRequestStatus.REVOKED,
+            "canceled": AttendanceCorrectionRequestStatus.CANCELED,
+            "cancel": AttendanceCorrectionRequestStatus.CANCELED,
+        }
+        wanted = mapping.get(status_value)
+        return qs.filter(status=wanted) if wanted else qs
     status_value = (status_value or "").strip().lower()
     if not status_value or status_value == "all":
         return qs.exclude(is_validate_request=True)
@@ -469,6 +489,17 @@ def _legacy_approve_attendance_request(request, attendance):
         attendance.action_by = None
     attendance.action_type = AttendanceRequestActionType.APPROVED
     attendance.action_at = dj_timezone.now()
+    try:
+        attendance.save(update_fields=[
+            "attendance_validated",
+            "is_validate_request_approved",
+            "is_validate_request",
+            "action_by",
+            "action_type",
+            "action_at",
+        ])
+    except Exception:
+        attendance.save()
     _log_attendance_request_status_change(attendance, request, action_type=AttendanceRequestActionType.APPROVED, old_status=getattr(attendance, "request_type", None) or "waiting_request", new_status="approved")
     requested_data = _normalize_requested_data(load_requested_data(getattr(attendance, "requested_data", None)))
     if requested_data:
@@ -526,6 +557,8 @@ def _legacy_cancel_attendance_request(request, attendance):
 
 
 def _legacy_revoke_attendance_request(request, attendance, reason=None):
+    if not getattr(attendance, "is_validate_request_approved", False):
+        return Response({"error": "Attendance request not found."}, status=404)
     if getattr(attendance.employee_id, "employee_user_id", None) == request.user:
         return Response({"error": "You cannot revoke your own approved request."}, status=403)
     can_act = False
@@ -547,6 +580,17 @@ def _legacy_revoke_attendance_request(request, attendance, reason=None):
         attendance.action_by = request.user.employee_get
     except Exception:
         attendance.action_by = None
+    try:
+        attendance.save(update_fields=[
+            "is_validate_request_approved",
+            "is_validate_request",
+            "request_type",
+            "action_type",
+            "action_at",
+            "action_by",
+        ])
+    except Exception:
+        attendance.save()
     _log_attendance_request_status_change(attendance, request, action_type=AttendanceRequestActionType.REVOKED, old_status=old_status, new_status="revoke_request", remark=reason)
     result = recompute_attendance(attendance.employee_id, attendance.attendance_date)
     final_attendance = result.attendance if result is not None else attendance
@@ -2092,6 +2136,7 @@ class AttendanceRequestView(APIView):
 
         approval_view = (request.GET.get("approval_view") or "").strip().lower()
         month_range = _parse_filter_month_range(request.GET.get("month") or request.GET.get("date")) or _parse_filter_month_range(dj_timezone.localdate().strftime("%Y-%m"))
+        history_month_start, history_month_end, _ = _parse_filter_month_range(request.GET.get("month") or request.GET.get("date")) or month_range
         status_filter = (request.GET.get("status") or "all").strip().lower()
         mine_only = (request.GET.get("mine") or "").strip().lower() in {"1", "true", "yes"}
 
@@ -2110,9 +2155,8 @@ class AttendanceRequestView(APIView):
             employee_id = (request.GET.get("employee_id") or "").strip()
             if employee_id:
                 requests = requests.filter(employee_id_id=employee_id)
-            # legacy source regression reference: attendance_date__range=(history_month_start, history_month_end)
-            requests = requests.filter(attendance_date__range=(month_range[0], month_range[1]))
-            requests = _attendance_correction_history_status_filter(requests, status_filter)
+            requests = requests.filter(attendance_date__range=(history_month_start, history_month_end))
+            requests = _attendance_history_status_filter(requests, request.GET.get("status"))
         elif mine_only:
             requests = my_qs.filter(attendance_date__range=(month_range[0], month_range[1]))
             if status_filter != "all":
@@ -2133,16 +2177,13 @@ class AttendanceRequestView(APIView):
             has_results = requests.exists()
         except Exception:
             has_results = True
-        if not has_results:
+        if not has_results and approval_view != "history":
             user_lookup = _request_user_lookup_value(request)
             approvals_legacy = Attendance.objects.filter(is_validate_request=True).exclude(employee_id__employee_user_id=user_lookup)
             approvals_legacy = filtersubordinates(request, perm="attendance.change_attendance", queryset=approvals_legacy)
             owner_base_qs = Attendance.objects.filter(employee_id__employee_user_id=user_lookup)
             my_legacy = owner_base_qs.filter(Q(action_type__isnull=False) | Q(is_validate_request=True) | Q(is_validate_request_approved=True))
-            if approval_view == "history":
-                requests = my_legacy.filter(attendance_date__range=(month_range[0], month_range[1]))
-                requests = AttendanceFilters(request.GET, queryset=requests).qs
-            elif mine_only:
+            if mine_only:
                 requests = my_legacy.filter(attendance_date__range=(month_range[0], month_range[1]))
             else:
                 requests = (approvals_legacy | my_legacy).distinct()
