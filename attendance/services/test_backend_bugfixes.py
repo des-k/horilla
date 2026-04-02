@@ -137,6 +137,15 @@ class CanonicalFlowSourceInspectionTests(SimpleTestCase):
         self.assertNotIn('AttendanceActivity.objects.filter(', inspect.getsource(AttendanceRequestRejectView.put))
         self.assertNotIn('AttendanceLateComeEarlyOut.objects.filter(attendance_id=attendance).delete()', inspect.getsource(AttendanceRequestRejectView.put))
 
+    def test_raw_clock_flows_do_not_snapshot_minimum_hour_before_canonical_reconcile(self):
+        in_source = inspect.getsource(clock_in_out.clock_in_attendance_and_activity)
+        out_source = inspect.getsource(clock_in_out.clock_out_attendance_and_activity)
+
+        self.assertNotIn('attendance.minimum_hour = minimum_hour', in_source)
+        self.assertNotIn('attendance.minimum_hour = minimum_hour', out_source)
+        self.assertNotIn('"minimum_hour": minimum_hour', in_source)
+        self.assertNotIn('"minimum_hour": minimum_hour', out_source)
+
     def test_web_clock_in_does_not_manually_reapply_late_come_before_reconcile(self):
         source = inspect.getsource(clock_in_out.clock_in_attendance_and_activity)
         self.assertNotIn('late_come(', source)
@@ -451,3 +460,27 @@ class WorkTypeRequestWfaDocumentPolicyTests(SimpleTestCase):
         self.assertNotIn('def _save_on_duty_uploads(', web_source)
         self.assertNotIn('req.files.clear()', web_source)
 
+
+
+class ScheduleMinimumHourHelperTests(SimpleTestCase):
+    def test_schedule_minimum_hour_for_date_prefers_shift_schedule(self):
+        from attendance.methods.utils import schedule_minimum_hour_for_date
+
+        shift = SimpleNamespace(id=1)
+        day = SimpleNamespace()
+        with patch('attendance.methods.utils.EmployeeShiftDay.objects.get', return_value=day), \
+             patch('attendance.methods.utils.shift_schedule_today', return_value=('07:30', None, None)), \
+             patch('attendance.methods.utils.attendance_day_checking', return_value='07:30') as day_check:
+            value = schedule_minimum_hour_for_date(date(2026, 4, 2), shift, fallback='09:00')
+
+        self.assertEqual(value, '07:30')
+        day_check.assert_called_once_with('2026-04-02', '07:30')
+
+    def test_schedule_minimum_hour_for_date_falls_back_when_schedule_missing(self):
+        from attendance.methods.utils import schedule_minimum_hour_for_date
+
+        shift = SimpleNamespace(id=1)
+        with patch('attendance.methods.utils.EmployeeShiftDay.objects.get', side_effect=Exception('missing')):
+            value = schedule_minimum_hour_for_date(date(2026, 4, 2), shift, fallback='09:00')
+
+        self.assertEqual(value, '09:00')
