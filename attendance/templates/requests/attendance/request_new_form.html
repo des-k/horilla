@@ -12,7 +12,7 @@
     <div class="oh-modal__dialog-body">
         <div class="oh-general__tab-target oh-profile-section" id="personal">
             <form
-                hx-post="{% url 'request-new-attendance' %}?bulk={{bulk}}"
+                hx-post="{{ form_action|default:(request_new_url|default:'/attendance/request-new-attendance') }}?bulk={{bulk|default:False}}"
                 hx-target="#objectCreateModalTarget"
                 hx-encoding="multipart/form-data"
                 enctype="multipart/form-data"
@@ -82,7 +82,7 @@
                                     <div class="d-flex flex-wrap" style="gap: 10px;">
                                         <button type="button" class="oh-btn oh-btn--light" data-att-scope="IN">{% trans "IN" %}</button>
                                         <button type="button" class="oh-btn oh-btn--light" data-att-scope="OUT">{% trans "OUT" %}</button>
-                                        <button type="button" class="oh-btn oh-btn--light" data-att-scope="BOTH">{% trans "IN & OUT" %}</button>
+                                        <button type="button" class="oh-btn oh-btn--light" data-att-scope="FULL">{% trans "IN & OUT" %}</button>
                                     </div>
                                     <small class="text-muted d-block" style="margin-top: 6px;">
                                         {% trans "Choose whether you are correcting Check In, Check Out, or both." %}
@@ -133,8 +133,8 @@
     if (val === 'OUT' && inInput) inInput.value = '';
   }
 
-  const initialScope = (scopeInput && scopeInput.value) ? scopeInput.value.toUpperCase() : 'BOTH';
-  setScope(['IN','OUT','BOTH'].includes(initialScope) ? initialScope : 'BOTH');
+  const initialScope = (scopeInput && scopeInput.value) ? scopeInput.value.toUpperCase() : 'FULL';
+  setScope(['IN','OUT','FULL'].includes(initialScope) ? initialScope : 'FULL');
 
   scopeBtns.forEach(btn => {
     btn.addEventListener('click', function () {
