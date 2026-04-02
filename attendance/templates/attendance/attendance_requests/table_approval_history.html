@@ -168,7 +168,7 @@
                     {% trans "View" %}
                   </button>
                 </div>
-                <div class="oh-sticky-table__td"><span class="text-truncate" style="max-width: 320px; display: inline-block;">{{ r.request_description|default:r.reason|default:"-" }}</span></div>
+                <div class="oh-sticky-table__td"><span class="text-truncate" style="max-width: 320px; display: inline-block;">{% if r.request_description %}{{ r.request_description }}{% elif r.reason %}{{ r.reason }}{% else %}-{% endif %}</span></div>
                 <div class="oh-sticky-table__td">{{ r.action_actor_display|default:'-' }}</div>
                 <div class="oh-sticky-table__td">{% if r.action_at %}{{ r.action_at|date:"Y-m-d H:i" }}{% else %}-{% endif %}</div>
               </div>
