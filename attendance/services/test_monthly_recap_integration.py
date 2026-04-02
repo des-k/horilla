@@ -407,6 +407,46 @@ class MonthlyRecapIntegrationTests(SimpleTestCase):
         self.assertEqual(row.work_type, "On Duty FULL")
         self.assertEqual(row.note, "")
 
+    def test_monthly_recap_displays_linked_approved_in_scope_work_type_before_any_punch(self):
+        approved_wfa_in = SimpleNamespace(
+            id=90,
+            employee_id=self.employee,
+            start_date=self.target_date,
+            end_date=self.target_date,
+            status=monthly_recap.WorkModeRequestStatus.APPROVED,
+            scope=monthly_recap.WorkModeRequestScope.IN,
+            mode=monthly_recap.AttendanceWorkMode.WFA,
+            planned_time=time(10, 34),
+        )
+        canonical_attendance = SimpleNamespace(
+            id=91,
+            employee_id=self.employee,
+            attendance_date=self.target_date,
+            attendance_clock_in_date=None,
+            attendance_clock_in=None,
+            attendance_clock_out_date=None,
+            attendance_clock_out=None,
+            attendance_clock_in_mode=None,
+            attendance_clock_out_mode=None,
+            work_type_id=SimpleNamespace(work_type='WFO'),
+            reconciliation_source='SOURCE_WFA',
+            reconciliation_note='WFA reconciled under normal attendance rules',
+            in_related_work_type_request_id=approved_wfa_in.id,
+            out_related_work_type_request_id=None,
+            late_minutes=0,
+            early_out_minutes=0,
+            attendance_validated=True,
+            is_validate_request_approved=False,
+            minimum_hour='07:30',
+        )
+
+        _, row = self._get_recap(attendances=[canonical_attendance], requests=[approved_wfa_in])
+
+        self.assertEqual(row.check_in, '-')
+        self.assertEqual(row.check_out, '-')
+        self.assertEqual(row.work_type, 'IN: WFA<br>OUT: WFO')
+        self.assertEqual(row.note, 'WFA reconciled under normal attendance rules')
+
     def test_monthly_recap_keeps_missing_checkout_penalty_for_verified_on_duty_in_only(self):
         verified_on_duty_in = SimpleNamespace(
             id=62,
