@@ -14,6 +14,9 @@ from attendance.models import (
     Attendance,
     AttendanceActivity,
     AttendanceChannel,
+    AttendanceCorrectionRequest,
+    AttendanceCorrectionRequestScope,
+    AttendanceCorrectionRequestStatus,
     AttendanceLateComeEarlyOut,
     AttendancePunchDirection,
     AttendancePunchingHistory,
@@ -366,6 +369,19 @@ def _approved_work_mode_request_for_session(employee, attendance_date: date, wan
     return None
 
 
+def _approved_attendance_correction_request_for_session(employee, attendance_date: date, want: str) -> Optional[AttendanceCorrectionRequest]:
+    qs = AttendanceCorrectionRequest.objects.filter(
+        employee_id=employee,
+        attendance_date=attendance_date,
+        status=AttendanceCorrectionRequestStatus.APPROVED,
+    )
+    if want == "in":
+        qs = qs.filter(scope__in=[AttendanceCorrectionRequestScope.IN, AttendanceCorrectionRequestScope.FULL])
+    else:
+        qs = qs.filter(scope__in=[AttendanceCorrectionRequestScope.OUT, AttendanceCorrectionRequestScope.FULL])
+    return qs.order_by("-approved_at", "-id").first()
+
+
 def _latest_revoked_request(employee, attendance_date: date) -> Optional[WorkModeRequest]:
     return (
         WorkModeRequest.objects.filter(
@@ -385,7 +401,18 @@ def _request_is_approved_request_override(attendance: Attendance, direction: str
         if direction == AttendancePunchDirection.IN
         else getattr(attendance, "attendance_clock_out_channel", None)
     )
-    return channel in {AttendanceChannel.APPROVED_REQUEST, AttendanceChannel.CORRECTION_REQUEST}
+    if channel not in {AttendanceChannel.APPROVED_REQUEST, AttendanceChannel.CORRECTION_REQUEST}:
+        return False
+
+    # Legacy Attendance-based request overrides should only stay active while the
+    # legacy request state itself indicates an approved/request-override record.
+    # New AttendanceCorrectionRequest entities also reuse CORRECTION_REQUEST as the
+    # final channel, but after revoke they must fall back to raw punches instead of
+    # persisting the previous final value from Attendance.
+    return bool(
+        getattr(attendance, "is_validate_request_approved", False)
+        or getattr(attendance, "requested_data", None)
+    )
 
 
 def _session_dt_from_attendance(attendance: Attendance, direction: str) -> Optional[datetime]:
@@ -714,7 +741,7 @@ def _work_hours(policy: AttendancePolicy | None, final_in_dt: Optional[datetime]
     return format_time(seconds)
 
 
-def _sync_attendance_and_activity(attendance: Attendance, activity: AttendanceActivity, *, final_in_dt: Optional[datetime], final_out_dt: Optional[datetime], final_in_punch: Optional[AttendancePunchingHistory], final_out_punch: Optional[AttendancePunchingHistory], source: str, note: str, final_in_mode: str, final_out_mode: str, final_in_request: Optional[WorkModeRequest], final_out_request: Optional[WorkModeRequest], ctx: ShiftContext, minimum_hour: str, is_presence_only: bool, late_minutes: int, early_minutes: int, policy: AttendancePolicy | None = None):
+def _sync_attendance_and_activity(attendance: Attendance, activity: AttendanceActivity, *, final_in_dt: Optional[datetime], final_out_dt: Optional[datetime], final_in_punch: Optional[AttendancePunchingHistory], final_out_punch: Optional[AttendancePunchingHistory], source: str, note: str, final_in_mode: str, final_out_mode: str, final_in_request: Optional[WorkModeRequest], final_out_request: Optional[WorkModeRequest], correction_in_override: bool = False, correction_out_override: bool = False, ctx: ShiftContext, minimum_hour: str, is_presence_only: bool, late_minutes: int, early_minutes: int, policy: AttendancePolicy | None = None):
     existing_in_channel = getattr(attendance, "attendance_clock_in_channel", None)
     existing_out_channel = getattr(attendance, "attendance_clock_out_channel", None)
     existing_in_mode = getattr(attendance, "attendance_clock_in_mode", None)
@@ -755,12 +782,12 @@ def _sync_attendance_and_activity(attendance: Attendance, activity: AttendanceAc
         attendance.attendance_clock_in_mode = final_in_mode
         attendance.in_attendance_status = AttendancePunchStatus.VALID
         attendance.in_attendance_reject_reason_code = None
-    elif _request_is_approved_request_override(attendance, AttendancePunchDirection.IN):
+    elif correction_in_override or _request_is_approved_request_override(attendance, AttendancePunchDirection.IN):
         attendance.attendance_clock_in_punch = None
-        attendance.attendance_clock_in_channel = existing_in_channel
+        attendance.attendance_clock_in_channel = AttendanceChannel.CORRECTION_REQUEST
         attendance.attendance_clock_in_mode = existing_in_mode or final_in_mode
-        attendance.attendance_clock_in_image = existing_in_image
-        attendance.attendance_clock_in_location = existing_in_location
+        attendance.attendance_clock_in_image = None
+        attendance.attendance_clock_in_location = None
     else:
         attendance.attendance_clock_in_punch = None
         if not final_in_dt:
@@ -777,12 +804,12 @@ def _sync_attendance_and_activity(attendance: Attendance, activity: AttendanceAc
         attendance.attendance_clock_out_mode = final_out_mode
         attendance.out_attendance_status = AttendancePunchStatus.VALID
         attendance.out_attendance_reject_reason_code = None
-    elif _request_is_approved_request_override(attendance, AttendancePunchDirection.OUT):
+    elif correction_out_override or _request_is_approved_request_override(attendance, AttendancePunchDirection.OUT):
         attendance.attendance_clock_out_punch = None
-        attendance.attendance_clock_out_channel = existing_out_channel
+        attendance.attendance_clock_out_channel = AttendanceChannel.CORRECTION_REQUEST
         attendance.attendance_clock_out_mode = existing_out_mode or final_out_mode
-        attendance.attendance_clock_out_image = existing_out_image
-        attendance.attendance_clock_out_location = existing_out_location
+        attendance.attendance_clock_out_image = None
+        attendance.attendance_clock_out_location = None
     else:
         attendance.attendance_clock_out_punch = None
         if not final_out_dt:
@@ -845,6 +872,8 @@ def recompute_attendance(employee, attendance_date: date) -> ReconciliationResul
     work_request = _approved_work_mode_request(employee, attendance_date)
     work_request_in = _approved_work_mode_request_for_session(employee, attendance_date, "in")
     work_request_out = _approved_work_mode_request_for_session(employee, attendance_date, "out")
+    correction_request_in = _approved_attendance_correction_request_for_session(employee, attendance_date, "in")
+    correction_request_out = _approved_attendance_correction_request_for_session(employee, attendance_date, "out")
     revoked_request = _latest_revoked_request(employee, attendance_date)
     logs = list(_candidate_logs(employee, attendance_date, ctx))
     raw = _pick_raw_sessions(logs, ctx)
@@ -878,7 +907,12 @@ def recompute_attendance(employee, attendance_date: date) -> ReconciliationResul
             or _should_preserve_on_duty_raw_truth(revoked_request)
         )
 
-        if _request_is_approved_request_override(attendance, AttendancePunchDirection.IN):
+        if correction_request_in is not None:
+            final_in_dt = _localize(_combine(correction_request_in.requested_check_in_date, correction_request_in.requested_check_in_time))
+            source = SOURCE_ATTENDANCE_REQUEST
+            note = NOTE_APPROVED_ATTENDANCE_REQUEST
+            final_in_request = None
+        elif _request_is_approved_request_override(attendance, AttendancePunchDirection.IN):
             final_in_dt = _session_dt_from_attendance(attendance, AttendancePunchDirection.IN)
             source = SOURCE_ATTENDANCE_REQUEST
             note = NOTE_APPROVED_ATTENDANCE_REQUEST
@@ -894,7 +928,12 @@ def recompute_attendance(employee, attendance_date: date) -> ReconciliationResul
                 final_in_punch = selected_in_punch
                 final_in_dt = _localize(final_in_punch.punch_timestamp)
 
-        if _request_is_approved_request_override(attendance, AttendancePunchDirection.OUT):
+        if correction_request_out is not None:
+            final_out_dt = _localize(_combine(correction_request_out.requested_check_out_date, correction_request_out.requested_check_out_time))
+            source = SOURCE_ATTENDANCE_REQUEST
+            note = NOTE_APPROVED_ATTENDANCE_REQUEST
+            final_out_request = None
+        elif _request_is_approved_request_override(attendance, AttendancePunchDirection.OUT):
             final_out_dt = _session_dt_from_attendance(attendance, AttendancePunchDirection.OUT)
             source = SOURCE_ATTENDANCE_REQUEST
             note = NOTE_APPROVED_ATTENDANCE_REQUEST
@@ -1017,6 +1056,8 @@ def recompute_attendance(employee, attendance_date: date) -> ReconciliationResul
         final_out_mode=final_out_mode,
         final_in_request=final_in_request,
         final_out_request=final_out_request,
+        correction_in_override=bool(correction_request_in),
+        correction_out_override=bool(correction_request_out),
         ctx=ctx,
         minimum_hour=minimum_hour,
         is_presence_only=is_presence_only,
