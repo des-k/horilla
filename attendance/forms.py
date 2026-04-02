@@ -74,6 +74,13 @@ from horilla_widgets.widgets.select_widgets import HorillaMultiSelectWidget
 
 logger = logging.getLogger(__name__)
 
+
+def _resolve_schedule_minimum_hour(attendance_date, shift, fallback="00:00"):
+    from attendance.methods.utils import schedule_minimum_hour_for_date
+
+    return schedule_minimum_hour_for_date(attendance_date, shift, fallback=fallback)
+
+
 def _fmt_dt_value(value, fmt):
     return value.strftime(fmt) if value is not None else None
 
@@ -1052,8 +1059,8 @@ class NewRequestForm(AttendanceRequestForm):
                 rules.get("check_out_window_end_dt"),
             )
 
-        # Default minimum_hour and worked_hour (hidden fields)
-        minimum_hour = self.cleaned_data.get("minimum_hour") or self.data.get("minimum_hour") or "00:00"
+        # Minimum hour must always come from the shift schedule for the selected date.
+        minimum_hour = _resolve_schedule_minimum_hour(attendance_date, shift, fallback=self.cleaned_data.get("minimum_hour") or self.data.get("minimum_hour") or "00:00")
         self.cleaned_data["minimum_hour"] = minimum_hour
 
         worked_hour = self.cleaned_data.get("attendance_worked_hour") or "00:00"
@@ -1135,7 +1142,7 @@ class NewRequestForm(AttendanceRequestForm):
                     "work_type_id": self.data.get("work_type_id") or (str(getattr(work_type, "id", "")) if work_type else ""),
                     "shift_id": self.data.get("shift_id") or (str(getattr(shift, "id", "")) if shift else ""),
                     "attendance_worked_hour": self.data.get("attendance_worked_hour") or worked_hour,
-                    "minimum_hour": self.data.get("minimum_hour") or minimum_hour,
+                    "minimum_hour": minimum_hour,
                 },
                 existing_requested_data=getattr(attendance, "requested_data", None),
                 incoming_scope=incoming_scope,
@@ -1162,7 +1169,7 @@ class NewRequestForm(AttendanceRequestForm):
                 "work_type_id": self.data.get("work_type_id") or (str(getattr(work_type, "id", "")) if work_type else ""),
                 "shift_id": self.data.get("shift_id") or (str(getattr(shift, "id", "")) if shift else ""),
                 "attendance_worked_hour": self.data.get("attendance_worked_hour") or worked_hour,
-                "minimum_hour": self.data.get("minimum_hour") or minimum_hour,
+                "minimum_hour": minimum_hour,
             },
             existing_requested_data=None,
             incoming_scope=incoming_scope,
@@ -1553,9 +1560,19 @@ class BulkAttendanceRequestForm(BaseModelForm):
         from_date = cleaned_data.get("from_date")
         to_date = cleaned_data.get("to_date")
         attendance_worked_hour = cleaned_data.get("attendance_worked_hour") or "00:00"
-        minimum_hour = cleaned_data.get("minimum_hour") or "00:00"
         attendance_clock_out = cleaned_data.get("attendance_clock_out")
         employee_id = cleaned_data.get("employee_id")
+        shift_id = cleaned_data.get("shift_id") or (
+            employee_id.employee_work_info.shift_id
+            if employee_id and hasattr(employee_id, "employee_work_info")
+            else None
+        )
+        minimum_hour = _resolve_schedule_minimum_hour(
+            from_date,
+            shift_id,
+            fallback=cleaned_data.get("minimum_hour") or "00:00",
+        )
+        cleaned_data["minimum_hour"] = minimum_hour
         now = datetime.datetime.now().time()
         today = datetime.datetime.today().date()
         validate_time_format(attendance_worked_hour)
@@ -1620,6 +1637,7 @@ class BulkAttendanceRequestForm(BaseModelForm):
                     "attendance_date": date,
                     "attendance_clock_in_date": date,
                     "attendance_clock_out_date": date,
+                    "minimum_hour": _resolve_schedule_minimum_hour(date, shift_id, fallback=minimum_hour),
                 }
             )
             form = NewRequestForm(data=initial_data)
