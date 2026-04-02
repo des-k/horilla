@@ -42,6 +42,7 @@ from attendance.models import (
     EmployeeShiftDay,
     WorkModeRequest,
     AttendanceWorkMode,
+    WorkModeRequestDocumentStatus,
     WorkModeRequestScope,
     WorkModeRequestStatus,
     WorkModeRequestActionType,
@@ -403,6 +404,46 @@ def _is_punch_allowed(mode: str, req, source: str):
 
 def _requires_proof(mode: str) -> bool:
     return mode in (AttendanceWorkMode.WFA, AttendanceWorkMode.ON_DUTY)
+
+def _effective_document_status_or_none(req) -> str | None:
+    if not req:
+        return None
+    resolver = getattr(req, "effective_document_status", None)
+    if callable(resolver):
+        try:
+            return resolver()
+        except Exception:
+            return getattr(req, "document_status", None)
+    return getattr(req, "document_status", None)
+
+
+def _session_on_duty_benefit_active(*, mode: str, req, punch_dt) -> bool:
+    """ON Duty benefit applies only when the punch exists for that session.
+
+    For request-based ON Duty, supporting document must be VERIFIED.
+    Scheduled ON Duty without a request still grants the session benefit once the
+    corresponding punch exists.
+    """
+
+    if mode != AttendanceWorkMode.ON_DUTY or punch_dt is None:
+        return False
+
+    if req is None:
+        return True
+
+    if getattr(req, "status", None) != WorkModeRequestStatus.APPROVED:
+        return False
+
+    return _effective_document_status_or_none(req) == WorkModeRequestDocumentStatus.VERIFIED
+
+
+def _neutralize_on_duty_session_metrics(*, in_mode: str, in_req, in_punch_dt, out_mode: str, out_req, out_punch_dt, late_by_hhmm, checked_out_early: bool, checked_out_early_by_hhmm):
+    if _session_on_duty_benefit_active(mode=in_mode, req=in_req, punch_dt=in_punch_dt):
+        late_by_hhmm = None
+    if _session_on_duty_benefit_active(mode=out_mode, req=out_req, punch_dt=out_punch_dt):
+        checked_out_early = False
+        checked_out_early_by_hhmm = None
+    return late_by_hhmm, checked_out_early, checked_out_early_by_hhmm
 
 def _parse_location_payload(request) -> dict | None:
     """Parse location payload from request.data (multipart or JSON).
@@ -1126,6 +1167,8 @@ class ClockInAPIView(APIView):
         earliest_check_out_hhmm = None
         invalid_check_in = False
         late_by_hhmm = None
+        _note_in_dt = None
+        _note_out_dt = None
         try:
             leave_kind_for_note = None
             if leave_breakdown_for_attendance_date is not None:
@@ -1159,6 +1202,18 @@ class ClockInAPIView(APIView):
             earliest_check_out_hhmm = None
             invalid_check_in = False
             late_by_hhmm = None
+
+        late_by_hhmm, _ignored_checked_out_early, _ignored_checked_out_early_by = _neutralize_on_duty_session_metrics(
+            in_mode=in_mode,
+            in_req=in_req,
+            in_punch_dt=_note_in_dt,
+            out_mode=out_mode,
+            out_req=out_req,
+            out_punch_dt=_note_out_dt,
+            late_by_hhmm=late_by_hhmm,
+            checked_out_early=False,
+            checked_out_early_by_hhmm=None,
+        )
 
         response_payload = {
             "message": "Clocked-In",
@@ -1331,6 +1386,8 @@ class ClockOutAPIView(APIView):
         last_check_out = attendance.attendance_clock_out.strftime("%I:%M %p") if attendance and getattr(attendance, "attendance_clock_out", None) else None
         late_by_hhmm = None
         earliest_check_out_dt = None
+        _note_in_dt = None
+        _note_out_dt = None
 
         try:
             leave_kind_for_note = None
@@ -1378,6 +1435,18 @@ class ClockOutAPIView(APIView):
             late_by_hhmm = None
             checked_out_early = False
             checked_out_early_by = None
+
+        late_by_hhmm, checked_out_early, checked_out_early_by = _neutralize_on_duty_session_metrics(
+            in_mode=in_mode,
+            in_req=in_req,
+            in_punch_dt=_note_in_dt,
+            out_mode=out_mode,
+            out_req=out_req,
+            out_punch_dt=_note_out_dt,
+            late_by_hhmm=late_by_hhmm,
+            checked_out_early=checked_out_early,
+            checked_out_early_by_hhmm=checked_out_early_by,
+        )
 
         try:
             min_formatted = _format_minimum_hour(minimum_hour)
@@ -3832,6 +3901,18 @@ class CheckingStatus(APIView):
                 except Exception:
                     checked_out_early = False
                     checked_out_early_by_hhmm = None
+
+        late_by_hhmm, checked_out_early, checked_out_early_by_hhmm = _neutralize_on_duty_session_metrics(
+            in_mode=in_mode,
+            in_req=in_req,
+            in_punch_dt=clock_in_t,
+            out_mode=out_mode,
+            out_req=out_req,
+            out_punch_dt=clock_out_t,
+            late_by_hhmm=late_by_hhmm,
+            checked_out_early=checked_out_early,
+            checked_out_early_by_hhmm=checked_out_early_by_hhmm,
+        )
 
         note_context = _build_mobile_header_note_context(
             employee=employee,
