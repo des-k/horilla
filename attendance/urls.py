@@ -380,21 +380,6 @@ urlpatterns = [
         name="attendance-request-delete-attachment",
     ),
     path(
-        "select-all-filter-attendance-request",
-        attendance.views.requests.select_all_filter_attendance_request,
-        name="select-all-filter-attendance-request",
-    ),
-    path(
-        "bulk-reject-attendance-request",
-        attendance.views.requests.bulk_reject_attendance_request,
-        name="bulk-reject-attendance-request",
-    ),
-    path(
-        "bulk-approve-attendance-request",
-        attendance.views.requests.bulk_approve_attendance_request,
-        name="bulk-approve-attendance-request",
-    ),
-    path(
         "request-new-attendance",
         attendance.views.requests.request_new,
         name="request-new-attendance",
@@ -534,11 +519,6 @@ urlpatterns = [
         name="work-records-change-month",
     ),
     path("enable-timerunner", views.enable_timerunner, name="enable-timerunner"),
-    path(
-        "get-employee-shift",
-        attendance.views.requests.get_employee_shift,
-        name="get-employee-shift",
-    ),
     path(
         "cut-penalty/<int:instance_id>/",
         attendance.views.penalty.cut_available_leave,
