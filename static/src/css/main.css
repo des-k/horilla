@@ -17357,26 +17357,35 @@ div.ui-tooltip {
 }
 
 .oh-history-filter-row {
-  gap: 8px;
+  gap: 12px;
   align-items: flex-end;
 }
 
 .oh-history-filter-field {
   min-width: 180px;
-  flex: 1 1 180px;
+  flex: 1 1 200px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
 .oh-history-filter-control {
-  min-height: 38px;
+  min-height: 40px;
+  height: 40px;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .oh-history-filter-actions {
   display: flex;
   align-items: flex-end;
+  padding-bottom: 0;
 }
 
 .oh-history-filter-button {
-  min-height: 38px;
+  min-height: 40px;
+  height: 40px;
+  padding-inline: 18px;
 }
 
 .oh-request-history-time__primary,
