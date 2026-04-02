@@ -90,6 +90,22 @@ class WorkModeRequestCreateWindowRuleTests(SimpleTestCase):
                     end_date=self.target_date,
                 )
 
+    def test_out_scope_allowed_before_checkout_window_starts(self):
+        now_dt = timezone.make_aware(datetime(2026, 3, 26, 10, 55))
+        rules = {
+            'check_in_window_end_dt': timezone.make_aware(datetime(2026, 3, 26, 10, 0)),
+            'check_out_window_start_dt': timezone.make_aware(datetime(2026, 3, 26, 17, 0)),
+            'check_out_window_end_dt': timezone.make_aware(datetime(2026, 3, 26, 20, 0)),
+        }
+        with self._patch_common(now_dt=now_dt, rules=rules):
+            validate_work_type_request(
+                employee=self.employee,
+                mode=AttendanceWorkMode.WFA,
+                scope=WorkModeRequestScope.OUT,
+                start_date=self.target_date,
+                end_date=self.target_date,
+            )
+
     def test_out_scope_allowed_when_only_checkout_window_remains_open(self):
         now_dt = timezone.make_aware(datetime(2026, 3, 26, 18, 0))
         rules = {
