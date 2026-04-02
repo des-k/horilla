@@ -500,6 +500,14 @@ def _session_mode(obj, session: str) -> Optional[str]:
     )
 
 
+def _linked_approved_request_mode(request_obj) -> Optional[str]:
+    if not request_obj:
+        return None
+    if getattr(request_obj, "status", None) != WorkModeRequestStatus.APPROVED:
+        return None
+    return _normalize_work_mode(getattr(request_obj, "mode", None))
+
+
 def _resolve_final_session_mode(
     *,
     attendances: List[Attendance],
@@ -637,11 +645,6 @@ def _canonical_row_from_attendance(
         if has_activity or approved_request_row or incomplete_row:
             return None
 
-    baseline_mode = _attendance_level_mode(best_att) or AttendanceWorkMode.WFO
-    display_in_mode = _session_mode(best_att, "IN") or baseline_mode
-    display_out_mode = _session_mode(best_att, "OUT") or baseline_mode
-    work_type_disp = _compose_work_type_display(display_in_mode, display_out_mode)
-
     in_request_obj = None
     out_request_obj = None
     if requests_by_id:
@@ -649,6 +652,19 @@ def _canonical_row_from_attendance(
         out_req_id = getattr(best_att, "out_related_work_type_request_id", None)
         in_request_obj = requests_by_id.get(in_req_id)
         out_request_obj = requests_by_id.get(out_req_id)
+
+    baseline_mode = _attendance_level_mode(best_att) or AttendanceWorkMode.WFO
+    display_in_mode = (
+        _session_mode(best_att, "IN")
+        or _linked_approved_request_mode(in_request_obj)
+        or baseline_mode
+    )
+    display_out_mode = (
+        _session_mode(best_att, "OUT")
+        or _linked_approved_request_mode(out_request_obj)
+        or baseline_mode
+    )
+    work_type_disp = _compose_work_type_display(display_in_mode, display_out_mode)
 
     grant_on_duty_in = _session_on_duty_benefit_active(
         mode=display_in_mode,
