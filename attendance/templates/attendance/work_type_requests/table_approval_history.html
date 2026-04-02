@@ -7,6 +7,8 @@
       {% if search %}<input type="hidden" name="search" value="{{ search }}">{% endif %}
       {% if mode_filter %}<input type="hidden" name="mode_filter" value="{{ mode_filter }}">{% endif %}
       {% if scope_filter %}<input type="hidden" name="scope_filter" value="{{ scope_filter }}">{% endif %}
+      {% if status_my %}<input type="hidden" name="status_my" value="{{ status_my }}">{% endif %}
+      {% if my_month %}<input type="hidden" name="my_month" value="{{ my_month }}">{% endif %}
       <div class="oh-history-filter-row d-flex flex-wrap">
         <div class="oh-history-filter-field">
           <label class="oh-label">{% trans "Employee" %}</label>
@@ -58,7 +60,6 @@
                 <div class="oh-sticky-table__td">{% if r.end_date and r.end_date != r.start_date %}{{ r.start_date }} → {{ r.end_date }}{% else %}{{ r.start_date }}{% endif %}</div>
                 <div class="oh-sticky-table__td"><span class="oh-badge oh-badge--secondary oh-badge--small oh-badge--round">{{ r.status|upper }}</span></div>
                 <div class="oh-sticky-table__td">{% if r.mode == 'on_duty' %}{{ r.get_document_status_display }}{% else %}-{% endif %}</div>
-                <div class="oh-sticky-table__td">{% if r.action_by %}{{ r.action_by.get_full_name|default:r.action_by }}{% else %}-{% endif %}{% if r.action_at %}<div class="text-muted" style="font-size:11px; margin-top:4px;">{{ r.action_at }}</div>{% endif %}</div>
                 <div class="oh-sticky-table__td">
                   {% if r.current_document_file_count %}
                     <div class="d-flex align-items-center gap-2">
@@ -74,13 +75,14 @@
                         hx-target="#objectDetailsModalTarget"
                         onclick="event.preventDefault()"
                       >
-                      <ion-icon name="document-attach-outline"></ion-icon>
+                        <ion-icon name="document-attach-outline"></ion-icon>
                       </button>
                     </div>
                   {% else %}
                     <span class="text-muted">-</span>
                   {% endif %}
                 </div>
+                <div class="oh-sticky-table__td">{% if r.action_by %}{{ r.action_by.get_full_name|default:r.action_by }}{% else %}-{% endif %}{% if r.action_at %}<div class="text-muted" style="font-size:11px; margin-top:4px;">{{ r.action_at }}</div>{% endif %}</div>
                 <div class="oh-sticky-table__td">{{ r.reason|default:r.action_reason|default:r.document_remark|default:'-' }}</div>
               </div>
             {% endfor %}
