@@ -339,6 +339,9 @@ def request_attendance_view(request):
     history_month_start, history_month_end, history_month = _parse_history_month_range(
         request.GET.get("history_month") or request.GET.get("history_date")
     )
+    my_month_start, my_month_end, my_month = _parse_history_month_range(
+        request.GET.get("my_month")
+    )
 
     request_history_filter = (
         Q(is_validate_request=True)
@@ -364,6 +367,7 @@ def request_attendance_view(request):
     approvals_qs = approvals_qs.exclude(employee_id__employee_user_id=request.user).distinct()
 
     my_qs = Attendance.objects.filter(employee_id__employee_user_id=request.user).filter(request_history_filter).distinct()
+    my_qs = my_qs.filter(attendance_date__range=(my_month_start, my_month_end))
     if status_my == "waiting":
         my_qs = my_qs.filter(is_validate_request=True)
     elif status_my == "approved":
@@ -532,6 +536,7 @@ def request_attendance_view(request):
             "history_employee_id": history_employee_id,
             "history_employees": history_employees,
             "history_month": history_month,
+            "my_month": my_month,
             "approval_subtab": approval_subtab,
             "show_approval_tab": show_approval_tab,
             "my_attach_counts": my_attach_counts,
