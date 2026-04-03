@@ -301,6 +301,102 @@ class AttendanceRequestSerializer(serializers.ModelSerializer):
     def get_can_revoke(self, obj):
         return self._perm(obj, "can_revoke")
 
+class AttendanceOverTimeSerializer(serializers.ModelSerializer):
+    badge_id = serializers.CharField(source="employee_id.badge_id", read_only=True)
+    employee_first_name = serializers.CharField(
+        source="employee_id.employee_first_name", read_only=True
+    )
+    employee_last_name = serializers.CharField(
+        source="employee_id.employee_last_name", read_only=True
+    )
+    employee_profile_url = serializers.SerializerMethodField(read_only=True)
+    attachment_urls = serializers.SerializerMethodField(read_only=True)
+    file_urls = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model = AttendanceOverTime
+        fields = [
+            "id",
+            "employee_first_name",
+            "employee_last_name",
+            "employee_profile_url",
+            "badge_id",
+            "employee_id",
+            "month",
+            "year",
+            "worked_hours",
+            "pending_hours",
+            "overtime",
+        ]
+
+    def get_attachment_urls(self, obj):
+        try:
+            from attendance.services.attendance_request_access import iter_request_attachments
+            urls = []
+            seen = set()
+            for f in iter_request_attachments(obj):
+                try:
+                    u = getattr(getattr(f, "file", None), "url", None)
+                    if u and u not in seen:
+                        seen.add(u)
+                        urls.append(u)
+                except Exception:
+                    continue
+            return urls
+        except Exception:
+            return []
+
+    def get_file_urls(self, obj):
+        return self.get_attachment_urls(obj)
+
+    def get_employee_profile_url(self, obj):
+        try:
+            employee_profile = obj.employee_id.employee_profile
+            return employee_profile.url
+        except Exception:
+            return None
+
+
+class AttendanceLateComeEarlyOutSerializer(serializers.ModelSerializer):
+    employee_first_name = serializers.CharField(
+        source="employee_id.employee_first_name", read_only=True
+    )
+    employee_last_name = serializers.CharField(
+        source="employee_id.employee_last_name", read_only=True
+    )
+
+    class Meta:
+        model = AttendanceLateComeEarlyOut
+        fields = "__all__"
+
+
+class AttendanceActivitySerializer(serializers.ModelSerializer):
+    employee_first_name = serializers.CharField(
+        source="employee_id.employee_first_name", read_only=True
+    )
+    employee_last_name = serializers.CharField(
+        source="employee_id.employee_last_name", read_only=True
+    )
+    clock_in_channel_display = serializers.SerializerMethodField(read_only=True)
+    clock_out_channel_display = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model = AttendanceActivity
+        fields = "__all__"
+
+    def get_clock_in_channel_display(self, obj):
+        try:
+            return obj.get_clock_in_channel_display()
+        except Exception:
+            return getattr(obj, "clock_in_channel", None)
+
+    def get_clock_out_channel_display(self, obj):
+        try:
+            return obj.get_clock_out_channel_display()
+        except Exception:
+            return getattr(obj, "clock_out_channel", None)
+
+
 class WorkModeRequestSerializer(serializers.ModelSerializer):
     employee_first_name = serializers.CharField(
         source="employee_id.employee_first_name", read_only=True
