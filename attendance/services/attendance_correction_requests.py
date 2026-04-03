@@ -125,22 +125,6 @@ def user_can_approve_request(user, request_obj: AttendanceCorrectionRequest) -> 
 
 def build_permission_flags(request_obj: AttendanceCorrectionRequest, user) -> dict:
     status_value = getattr(request_obj, "status", None)
-    if status_value is None:
-        try:
-            from attendance.services.attendance_request_access import user_is_request_owner as legacy_owner, user_can_approve_request as legacy_approve
-            is_owner = legacy_owner(user, request_obj)
-            waiting = bool(getattr(request_obj, "is_validate_request", False))
-            approved = bool(getattr(request_obj, "is_validate_request_approved", False))
-            can_approve = legacy_approve(user, request_obj) and waiting
-            return {
-                "can_edit": bool(is_owner and waiting and not approved),
-                "can_cancel": bool(is_owner and waiting and not approved),
-                "can_approve": bool(can_approve),
-                "can_reject": bool(can_approve),
-                "can_revoke": bool(legacy_approve(user, request_obj) and approved and not is_owner),
-            }
-        except Exception:
-            return {"can_edit": False, "can_cancel": False, "can_approve": False, "can_reject": False, "can_revoke": False}
     is_owner = user_is_request_owner(user, request_obj)
     can_approve = user_can_approve_request(user, request_obj) and status_value == AttendanceCorrectionRequestStatus.WAITING
     can_reject = can_approve
@@ -225,7 +209,7 @@ def _create_attachment_links(request_obj: AttendanceCorrectionRequest, uploaded_
 def create_request(*, employee: Employee, actor_user, payload: dict, uploaded_files: Optional[Iterable] = None) -> AttendanceCorrectionRequest:
     scope = _normalize_scope(payload.get("scope"))
     attendance_date = _coerce_date(payload.get("attendance_date"))
-    reason = (payload.get("reason") or payload.get("request_description") or "").strip()
+    reason = (payload.get("reason") or "").strip()
     if not reason:
         raise AttendanceCorrectionError({"reason": "Reason is required."})
     _validate_payload(
@@ -267,7 +251,7 @@ def update_request(*, request_obj: AttendanceCorrectionRequest, actor_user, payl
         raise AttendanceCorrectionError({"status": "Only waiting requests can be edited."})
     scope = _normalize_scope(payload.get("scope") or request_obj.scope)
     attendance_date = _coerce_date(payload.get("attendance_date")) or request_obj.attendance_date
-    reason = (payload.get("reason") or payload.get("request_description") or request_obj.reason or "").strip()
+    reason = (payload.get("reason") or request_obj.reason or "").strip()
     if not reason:
         raise AttendanceCorrectionError({"reason": "Reason is required."})
     _validate_payload(
