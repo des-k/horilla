@@ -601,6 +601,170 @@ def _locked_correction_request(pk):
     except Exception:
         return None
 
+
+def _locked_legacy_attendance(pk):
+    try:
+        return Attendance.objects.select_for_update().get(id=pk)
+    except Exception:
+        return None
+
+
+def _legacy_web_approve_attendance_request(request, attendance_id):
+    attendance = Attendance.objects.select_for_update().get(id=attendance_id)
+    try:
+        if attendance.employee_id.employee_user_id == request.user:
+            messages.error(request, _("You cannot approve your own request."))
+            return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+    except Exception:
+        pass
+    if not getattr(attendance, "is_validate_request", False):
+        messages.error(request, _("Request is not waiting for approval."))
+        return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+    old_status = attendance.request_type or "waiting_request"
+    is_valid_request, validation_error = validate_requested_data_with_windows(attendance)
+    if not is_valid_request:
+        messages.error(request, validation_error or _("Requested attendance cannot be approved because required shift context is missing."))
+        return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+    if validation_error:
+        messages.warning(request, validation_error)
+    wants_in, wants_out = get_requested_sessions(attendance)
+    _apply_request_override_snapshot(attendance, include_in=wants_in, include_out=wants_out)
+    attendance.attendance_validated = True
+    attendance.is_validate_request_approved = True
+    attendance.is_validate_request = False
+    try:
+        attendance.action_by = request.user.employee_get
+    except Exception:
+        attendance.action_by = None
+    attendance.action_type = AttendanceRequestActionType.APPROVED
+    attendance.action_at = timezone.now()
+    attendance.save()
+    _log_attendance_request_action(attendance, request, action_type=AttendanceRequestActionType.APPROVED, old_status=old_status, new_status="approved")
+    requested_data = _normalize_requested_data(load_requested_data(getattr(attendance, "requested_data", None)))
+    if requested_data:
+        Attendance.objects.filter(id=attendance_id).update(**requested_data)
+        try:
+            attendance.refresh_from_db()
+        except Exception:
+            pass
+    _mark_approved_request_channels(attendance)
+    _detach_request_overridden_raw_links(attendance, include_in=wants_in, include_out=wants_out)
+    result = recompute_attendance(attendance.employee_id, attendance.attendance_date)
+    if result is not None:
+        attendance = result.attendance
+    messages.success(request, _("Attendance request has been approved"))
+    try:
+        notify.send(request.user, recipient=attendance.employee_id.employee_user_id, verb=f"Your attendance request for {attendance.attendance_date} is validated", redirect=reverse("request-attendance-view") + f"?id={attendance.id}", icon="checkmark-circle-outline")
+    except Exception:
+        pass
+    return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+
+
+def _legacy_web_revoke_attendance_request(request, attendance_id):
+    qs = Attendance.objects.filter(id=attendance_id, is_validate_request_approved=True)
+    try:
+        qs = filtersubordinates(request=request, perm="attendance.change_attendance", queryset=qs)
+    except Exception:
+        pass
+    attendance = qs.select_for_update().get() if hasattr(qs, "select_for_update") else qs.get()
+    try:
+        if attendance.employee_id.employee_user_id == request.user:
+            messages.error(request, _("You cannot revoke your own approved request."))
+            return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+    except Exception:
+        pass
+    wants_in, wants_out = get_requested_sessions(attendance)
+    _restore_request_back_to_raw(attendance, include_in=wants_in, include_out=wants_out, prev_attendance_date=attendance.attendance_date)
+    try:
+        attendance.refresh_from_db()
+    except Exception:
+        pass
+    attendance.is_validate_request_approved = False
+    attendance.is_validate_request = False
+    attendance.request_type = "revoke_request"
+    attendance.action_type = AttendanceRequestActionType.REVOKED
+    attendance.action_at = timezone.now()
+    try:
+        attendance.action_by = request.user.employee_get
+    except Exception:
+        attendance.action_by = None
+    attendance.save()
+    _log_attendance_request_action(attendance, request, action_type=AttendanceRequestActionType.REVOKED, old_status="approved", new_status="revoke_request")
+    recompute_attendance(attendance.employee_id, attendance.attendance_date)
+    messages.success(request, _("Attendance request approval revoked."))
+    return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+
+
+def _legacy_web_cancel_attendance_request(request, attendance_id):
+    attendance = Attendance.objects.select_for_update().get(id=attendance_id)
+    try:
+        if attendance.employee_id.employee_user_id != request.user:
+            messages.error(request, _("Only the requester can cancel this request."))
+            return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+    except Exception:
+        messages.error(request, _("You do not have permission to perform this action."))
+        return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+    if not getattr(attendance, "is_validate_request", False) or getattr(attendance, "is_validate_request_approved", False):
+        messages.error(request, _("Only waiting requests can be canceled."))
+        return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+    req_type = attendance.request_type
+    old_status = attendance.request_type or "waiting_request"
+    wants_in, wants_out = get_requested_sessions(attendance)
+    attendance.is_validate_request_approved = False
+    attendance.is_validate_request = False
+    attendance.request_type = "cancel_request"
+    try:
+        attendance.action_by = request.user.employee_get
+    except Exception:
+        attendance.action_by = None
+    attendance.action_type = AttendanceRequestActionType.CANCELED
+    attendance.action_at = timezone.now()
+    attendance.save()
+    _log_attendance_request_action(attendance, request, action_type=AttendanceRequestActionType.CANCELED, old_status=old_status, new_status="cancel_request")
+    if req_type == "create_request":
+        clear_request_override_and_recompute(attendance, include_in=wants_in, include_out=wants_out)
+    messages.success(request, _("Attendance request canceled."))
+    return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+
+
+def _legacy_web_reject_attendance_request(request, attendance_id):
+    if request.method != "POST":
+        attendance = Attendance.objects.filter(id=attendance_id, is_validate_request=True).first()
+        if not attendance or not user_can_approve_request(request.user, attendance):
+            return HttpResponseForbidden("Permission denied")
+        return render(request, "attendance/attendance_requests/reject_form.html", {"attendance": attendance})
+    attendance = Attendance.objects.select_for_update().get(id=attendance_id, is_validate_request=True)
+    if not user_can_approve_request(request.user, attendance):
+        messages.error(request, _("You do not have permission to perform this action."))
+        return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+    try:
+        if attendance.employee_id.employee_user_id == request.user:
+            messages.error(request, _("Use cancel for your own request."))
+            return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+    except Exception:
+        pass
+    req_type = attendance.request_type
+    wants_in, wants_out = get_requested_sessions(attendance)
+    comment_text = (request.POST.get("comment") or request.POST.get("reason") or "").strip()
+    if not comment_text:
+        messages.error(request, _("Reject reason is required."))
+        return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+    attendance.is_validate_request_approved = False
+    attendance.is_validate_request = False
+    attendance.request_type = "reject_request"
+    attendance.action_type = AttendanceRequestActionType.REJECTED
+    attendance.action_at = timezone.now()
+    try:
+        attendance.action_by = request.user.employee_get
+    except Exception:
+        attendance.action_by = None
+    attendance.save()
+    _log_attendance_request_action(attendance, request, action_type=AttendanceRequestActionType.REJECTED, old_status=req_type or "waiting_request", new_status="reject_request", remark=comment_text)
+    if req_type == "create_request":
+        clear_request_override_and_recompute(attendance, include_in=wants_in, include_out=wants_out)
+    messages.success(request, _("Attendance request rejected."))
+    return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+
     attendance = Attendance.objects.select_for_update().get(id=attendance_id)
     try:
         if attendance.employee_id.employee_user_id == request.user:
@@ -886,7 +1050,8 @@ def request_attendance_view(request):
         ("revoked", _("REVOKED")),
     ]
 
-    history_employees = Employee.objects.filter(id__in=subordinate_ids).order_by("employee_first_name", "employee_last_name") if subordinate_ids else Employee.objects.none()
+    history_employees = Employee.objects.all()
+    history_employees = history_employees.filter(id__in=subordinate_ids).order_by("employee_first_name", "employee_last_name") if subordinate_ids else Employee.objects.none()
 
     try:
         q_my = request.GET.copy(); q_my.pop("page_my", None); pd_my = q_my.urlencode()
@@ -1103,6 +1268,7 @@ def edit_validate_attendance(request, attendance_id):
 @login_required
 @hx_request_required
 def attendance_request_attachments(request, attendance_id):
+    "HTMX modal: show Attendance Request direct attachments."
     req_obj = get_object_or_404(AttendanceCorrectionRequest, id=attendance_id)
     flags = build_permission_flags(req_obj, request.user)
     if not any(flags.values()) and not user_is_request_owner(request.user, req_obj) and not getattr(request.user, "is_superuser", False):
@@ -1137,4 +1303,27 @@ def delete_attendance_request_attachment(request, attendance_id, file_id):
             except Exception:
                 pass
     messages.success(request, _("Attachment deleted."))
+    return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
+
+
+@login_required
+@manager_can_enter("attendance.change_attendance")
+@transaction.atomic
+def bulk_reject_attendance_request(request):
+    """Compatibility shim for legacy bulk reject endpoint."""
+    ids = request.POST.getlist("ids") or request.GET.getlist("ids")
+    if not ids:
+        raw_ids = request.POST.get("attendance_ids") or request.GET.get("attendance_ids") or ""
+        ids = [v for v in raw_ids.split(",") if v]
+    reason = (request.POST.get("comment") or request.POST.get("reason") or "").strip() or _("Rejected")
+    for att_id in ids:
+        try:
+            fake_post = request.POST.copy() if hasattr(request, "POST") else {}
+            if hasattr(fake_post, "__setitem__"):
+                fake_post["comment"] = reason
+                request.POST = fake_post
+            _legacy_web_reject_attendance_request(request, att_id)
+        except Exception:
+            continue
+    messages.success(request, _("Selected attendance requests processed."))
     return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
