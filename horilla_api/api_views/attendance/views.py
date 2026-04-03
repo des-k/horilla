@@ -164,6 +164,7 @@ from ...api_serializers.attendance.serializers import (
     AttendanceOverTimeSerializer,
     AttendancePunchingHistorySerializer,
     AttendanceRequestSerializer,
+    AttendanceCorrectionRequestSerializer,
     AttendanceSerializer,
     MailTemplateSerializer,
     UserAttendanceDetailedSerializer,
@@ -2132,7 +2133,7 @@ class AttendanceRequestView(APIView):
             flags = build_attendance_correction_permission_flags(req_obj, request.user)
             if not any([flags.get("can_edit"), flags.get("can_cancel"), flags.get("can_approve"), flags.get("can_reject"), flags.get("can_revoke")]) and not correction_user_is_request_owner(request.user, req_obj) and not getattr(request.user, "is_superuser", False):
                 return Response({"error": "You do not have permission to view this request."}, status=status.HTTP_403_FORBIDDEN)
-            return Response(self.serializer_class(req_obj, context={"request": request}).data, status=200)
+            return Response(AttendanceCorrectionRequestSerializer(req_obj, context={"request": request}).data, status=200)
 
         approval_view = (request.GET.get("approval_view") or "").strip().lower()
         month_range = _parse_filter_month_range(request.GET.get("month") or request.GET.get("date")) or _parse_filter_month_range(dj_timezone.localdate().strftime("%Y-%m"))
@@ -2200,7 +2201,9 @@ class AttendanceRequestView(APIView):
                 requests = AttendanceFilters(request.GET, queryset=requests).qs
         pagenation = PageNumberPagination()
         page = pagenation.paginate_queryset(requests.order_by("-attendance_date", "-action_at", "-id"), request)
-        serializer = self.serializer_class(page, many=True, context={"request": request})
+        serializer_source = page
+        serializer_class = AttendanceCorrectionRequestSerializer if getattr(getattr(page, "paginator", None), "object_list", getattr(requests, "model", None)) is AttendanceCorrectionRequest or getattr(requests, "model", None) is AttendanceCorrectionRequest else self.serializer_class
+        serializer = serializer_class(page, many=True, context={"request": request})
         response = pagenation.get_paginated_response(serializer.data)
         if approval_view == "history":
             response.data["employee_options"] = _approval_scope_employee_options(request, work_type=False)

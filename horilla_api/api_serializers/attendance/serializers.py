@@ -461,6 +461,22 @@ class AttendanceLateComeEarlyOutSerializer(serializers.ModelSerializer):
         fields = "__all__"
 
 
+
+
+class AttendanceCorrectionRequestSerializer(AttendanceRequestSerializer):
+    """Primary serializer for the new AttendanceCorrectionRequest entity.
+
+    Keep this separate from AttendanceRequestSerializer so API callers can
+    explicitly choose the correction-request contract while older endpoints/tests
+    may still use the broader compatibility serializer.
+    """
+
+    class Meta(AttendanceRequestSerializer.Meta):
+        model = AttendanceCorrectionRequest
+
+    def _is_legacy_attendance(self, obj):
+        return False
+
 class AttendanceActivitySerializer(serializers.ModelSerializer):
     employee_first_name = serializers.CharField(
         source="employee_id.employee_first_name", read_only=True
