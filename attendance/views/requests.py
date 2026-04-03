@@ -788,6 +788,11 @@ def _web_history_status_filter(qs, status_value):
 
 
 @login_required
+def request_attendance(request):
+    return request_attendance_view(request)
+
+
+@login_required
 def request_attendance_view(request):
     employee = getattr(request.user, "employee_get", None)
     is_super = bool(getattr(request.user, "is_superuser", False))
