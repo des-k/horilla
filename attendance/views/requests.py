@@ -286,7 +286,7 @@ def _log_attendance_request_action(attendance: Attendance, request, *, action_ty
 
 
 @login_required
-def request_attendance(request):
+def _legacy_request_attendance_form(request):
     """
     This method is used to render template to register new attendance for a normal user
     """
@@ -1273,7 +1273,7 @@ def validate_attendance_request(request, attendance_id):
 @login_required
 @manager_can_enter("attendance.change_attendance")
 @transaction.atomic
-def approve_validate_attendance_request(request, attendance_id):
+def _legacy_approve_validate_attendance_request_view(request, attendance_id):
     """
     This method is used to validate the attendance requests
     """
@@ -1407,7 +1407,7 @@ def approve_validate_attendance_request(request, attendance_id):
 @login_required
 @manager_can_enter("attendance.change_attendance")
 @transaction.atomic
-def revoke_validate_attendance_request(request, attendance_id):
+def _legacy_revoke_validate_attendance_request_view(request, attendance_id):
     """Revoke an already approved attendance request and restore the pre-request raw state."""
 
     try:
@@ -1464,7 +1464,7 @@ def revoke_validate_attendance_request(request, attendance_id):
 
 @login_required
 @transaction.atomic
-def cancel_attendance_request(request, attendance_id):
+def _legacy_cancel_attendance_request_view(request, attendance_id):
     """Cancel an attendance request (owner action).
 
     Aligned with mobile Attendance Correction Request:
@@ -1541,7 +1541,7 @@ def cancel_attendance_request(request, attendance_id):
 @login_required
 @manager_can_enter("attendance.change_attendance")
 @transaction.atomic
-def reject_validate_attendance_request(request, attendance_id):
+def _legacy_reject_validate_attendance_request_view(request, attendance_id):
     """Reject an attendance request (approver action) with mandatory reason."""
     if request.method != "POST":
         attendance = Attendance.objects.filter(id=attendance_id, is_validate_request=True).first()
@@ -1809,7 +1809,7 @@ def bulk_approve_attendance_request(request):
 @login_required
 @manager_can_enter("attendance.change_attendance")
 @transaction.atomic
-def bulk_reject_attendance_request(request):
+def _legacy_bulk_reject_attendance_request(request):
     """Bulk reject pending attendance requests (approver action).
 
     This keeps the Attendance row for history (status=REJECTED), aligned with the
@@ -2075,7 +2075,7 @@ def _web_history_status_filter(qs, status_value):
 
 
 @login_required
-def request_attendance_view(request):
+def _legacy_request_attendance_view(request):
     employee = getattr(request.user, "employee_get", None)
     is_super = bool(getattr(request.user, "is_superuser", False))
     can_approve = bool(employee and get_subordinate_employee_ids(type("R", (), {"user": request.user})())) or is_super
