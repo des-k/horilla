@@ -15,7 +15,7 @@
       <small class="text-muted">
         <strong>{% trans "Employee" %}:</strong> {{ req.employee_id.get_full_name }}<br />
         <strong>{% trans "Date" %}:</strong> {{ req.attendance_date }}<br />
-        <strong>{% trans "Type" %}:</strong> {{ req.request_type|default:"-" }}
+        <strong>{% trans "Type" %}:</strong> {{ req.scope|default:"-" }}
       </small>
     </div>
   {% endif %}
