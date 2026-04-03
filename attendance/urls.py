@@ -268,13 +268,12 @@ urlpatterns = [
         attendance.views.dashboard.dashboard_attendance,
         name="dashboard-attendance",
     ),
-    # Legacy alias retained for compatibility; active page is request-attendance-view/.
+    # Legacy alias retained for compatibility; the canonical page is request-attendance-view/.
     path(
         "request-attendance",
         attendance.views.requests.request_attendance,
         name="request-attendance",
     ),
-    # Canonical attendance correction request page.
     path(
         "request-attendance-view/",
         attendance.views.requests.request_attendance_view,
@@ -331,11 +330,13 @@ urlpatterns = [
         attendance.views.work_type_requests.work_type_request_attachment_download,
         name="attendance-work-type-request-attachment-download",
     ),
+    # Legacy attendance-row diff modal kept during staged cleanup.
     path(
         "request-attendance/<int:attendance_id>/",
         attendance.views.requests.attendance_request_changes,
         name="attendance-change",
     ),
+    # Canonical correction-request actions below still accept legacy IDs via compat wrappers where needed.
     path(
         "validate-attendance-request/<int:attendance_id>/",
         attendance.views.requests.validate_attendance_request,
