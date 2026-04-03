@@ -303,12 +303,13 @@ def request_attendance(request):
 
 
 @login_required
-def request_attendance_view(request):
-    """Attendance Requests page aligned with mobile Attendance Correction Request.
+def _legacy_request_attendance_view_deprecated(request):
+    """Deprecated duplicate implementation kept only for reference during cleanup.
 
-    Tabs:
-      - My Requests: current user's requests (pending + history)
-      - Approvals: actionable queue + approval history for subordinate requests
+    The active request-attendance page is the later ``request_attendance_view``
+    definition in this module. This older block is intentionally renamed so the
+    runtime uses exactly one canonical implementation while preserving git-blame
+    friendly history during staged cleanup.
     """
     employee = getattr(request.user, "employee_get", None)
     is_super = bool(getattr(request.user, "is_superuser", False))

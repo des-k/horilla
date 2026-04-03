@@ -268,11 +268,13 @@ urlpatterns = [
         attendance.views.dashboard.dashboard_attendance,
         name="dashboard-attendance",
     ),
+    # Legacy alias retained for compatibility; active page is request-attendance-view/.
     path(
         "request-attendance",
         attendance.views.requests.request_attendance,
         name="request-attendance",
     ),
+    # Canonical attendance correction request page.
     path(
         "request-attendance-view/",
         attendance.views.requests.request_attendance_view,
