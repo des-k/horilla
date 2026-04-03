@@ -2229,22 +2229,34 @@ def update_fields_based_shift(request):
         "attendance_clock_in_date": attendance_date.strftime("%Y-%m-%d"),
         "attendance_clock_out_date": attendance_clock_out_date,
     }
+    correction_form_cls = None
+    if hx_target == "attendanceRequestDiv":
+        try:
+            from attendance.views.requests import AttendanceCorrectionRequestWebForm as correction_form_cls
+        except Exception:
+            correction_form_cls = None
+
     form = (
         AttendanceUpdateForm(initial=initial_data)
         if hx_target == "attendanceUpdateForm"
         else (
-            NewRequestForm(initial=initial_data)
-            if hx_target == "attendanceRequestDiv"
-            else AttendanceForm(initial=initial_data)
+            correction_form_cls(initial=initial_data, employee=request.user.employee_get)
+            if hx_target == "attendanceRequestDiv" and correction_form_cls is not None
+            else (
+                NewRequestForm(initial=initial_data)
+                if hx_target == "attendanceRequestDiv"
+                else AttendanceForm(initial=initial_data)
+            )
         )
     )
     # Self-only: hide employee selector in attendance correction request form
     try:
-        if isinstance(form, NewRequestForm):
+        if isinstance(form, NewRequestForm) or form.__class__.__name__ == "AttendanceCorrectionRequestWebForm":
             self_emp_id = request.user.employee_get.id
-            form.fields['employee_id'].queryset = Employee.objects.filter(id=self_emp_id)
-            form.fields['employee_id'].initial = self_emp_id
-            form.fields['employee_id'].widget = forms.HiddenInput()
+            if 'employee_id' in form.fields:
+                form.fields['employee_id'].queryset = Employee.objects.filter(id=self_emp_id)
+                form.fields['employee_id'].initial = self_emp_id
+                form.fields['employee_id'].widget = forms.HiddenInput()
     except Exception:
         pass
 
