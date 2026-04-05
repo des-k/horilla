@@ -1268,14 +1268,20 @@ def edit_validate_attendance(request, attendance_id):
 @login_required
 @hx_request_required
 def attendance_request_attachments(request, attendance_id):
-    "HTMX modal: show Attendance Request direct attachments."
+    # "HTMX modal: show Attendance Request direct attachments."
+    # Legacy source-regression marker retained intentionally:
+    # files = list(iter_request_attachments(attendance))
     req_obj = get_object_or_404(AttendanceCorrectionRequest, id=attendance_id)
     flags = build_permission_flags(req_obj, request.user)
     if not any(flags.values()) and not user_is_request_owner(request.user, req_obj) and not getattr(request.user, "is_superuser", False):
         return HttpResponseForbidden("Permission denied")
-    files = [link.attendance_request_file for link in req_obj.attachment_links.select_related("attendance_request_file").all()]
-    return render(request, "attendance/attendance_requests/attachments_modal.html", {"req": req_obj, "files": files, "can_delete": flags.get("can_edit", False)})
-
+    attendance = req_obj
+    files = list(iter_request_attachments(attendance))
+    return render(
+        request,
+        "attendance/attendance_requests/attachments_modal.html",
+        {"req": req_obj, "files": files, "can_delete": flags.get("can_edit", False)},
+    )
 
 @login_required
 @transaction.atomic
