@@ -176,6 +176,9 @@ from ...api_serializers.attendance.serializers import (
 # Create your views here.
 
 
+# -----------------------------------------------------------------------------
+# Generic API helpers
+# -----------------------------------------------------------------------------
 def query_dict(data):
     query_dict = QueryDict("", mutable=True)
     for key, value in data.items():
@@ -372,6 +375,9 @@ def _locked_correction_request(pk):
         return None
 
 
+# -----------------------------------------------------------------------------
+# Compatibility helpers retained for legacy Attendance-backed request flow
+# -----------------------------------------------------------------------------
 def _locked_legacy_attendance(pk):
     try:
         return Attendance.objects.select_for_update().get(id=pk)
@@ -640,6 +646,9 @@ def _legacy_reject_attendance_request(request, attendance, reason):
 
 
 
+# -----------------------------------------------------------------------------
+# Active request/history scoping helpers
+# -----------------------------------------------------------------------------
 def _request_user_lookup_value(request):
     user = getattr(request, "user", None)
     value = getattr(user, "pk", None) or getattr(user, "id", None)
@@ -755,7 +764,8 @@ def _is_attendance_exempt_manager(employee) -> bool:
 
 
 # -----------------------------------------------------------------------------
-# Mobile single-session helpers# -----------------------------------------------------------------------------
+# Active mobile single-session helpers
+# -----------------------------------------------------------------------------
 # Work-mode helpers (WFO/WFA/ON_DUTY)
 # -----------------------------------------------------------------------------
 def _pick_work_mode_request(employee, target_date: date, want: str):
@@ -2118,7 +2128,8 @@ class OvertimeApproveView(APIView):
 
 
 class AttendanceRequestView(APIView):
-    serializer_class = AttendanceRequestSerializer
+    serializer_class = AttendanceCorrectionRequestSerializer
+    compat_serializer_class = AttendanceRequestSerializer
     permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser, JSONParser]
 
@@ -2128,7 +2139,7 @@ class AttendanceRequestView(APIView):
             if req_obj is None:
                 legacy_attendance = Attendance.objects.filter(id=pk).first()
                 if legacy_attendance is not None:
-                    return Response(self.serializer_class(legacy_attendance, context={"request": request}).data, status=200)
+                    return Response(self.compat_serializer_class(legacy_attendance, context={"request": request}).data, status=200)
                 return Response({"error": "Attendance request not found."}, status=404)
             flags = build_attendance_correction_permission_flags(req_obj, request.user)
             if not any([flags.get("can_edit"), flags.get("can_cancel"), flags.get("can_approve"), flags.get("can_reject"), flags.get("can_revoke")]) and not correction_user_is_request_owner(request.user, req_obj) and not getattr(request.user, "is_superuser", False):
@@ -2202,7 +2213,7 @@ class AttendanceRequestView(APIView):
         pagenation = PageNumberPagination()
         page = pagenation.paginate_queryset(requests.order_by("-attendance_date", "-action_at", "-id"), request)
         serializer_source = page
-        serializer_class = AttendanceCorrectionRequestSerializer if getattr(getattr(page, "paginator", None), "object_list", getattr(requests, "model", None)) is AttendanceCorrectionRequest or getattr(requests, "model", None) is AttendanceCorrectionRequest else self.serializer_class
+        serializer_class = self.serializer_class if getattr(getattr(page, "paginator", None), "object_list", getattr(requests, "model", None)) is AttendanceCorrectionRequest or getattr(requests, "model", None) is AttendanceCorrectionRequest else self.compat_serializer_class
         serializer = serializer_class(page, many=True, context={"request": request})
         response = pagenation.get_paginated_response(serializer.data)
         if approval_view == "history":
@@ -2220,7 +2231,7 @@ class AttendanceRequestView(APIView):
         data = _mutable_request_data(request)
         # Legacy form path remains for compatibility when new correction fields are absent.
         if not any(k in data for k in ("scope", "requested_check_in_time", "requested_check_out_time", "requested_check_in_date", "requested_check_out_date")):
-            return _legacy_create_attendance_request(request, self.serializer_class)
+            return _legacy_create_attendance_request(request, self.compat_serializer_class)
         try:
             employee = request.user.employee_get
         except Exception:
@@ -2236,7 +2247,7 @@ class AttendanceRequestView(APIView):
     def put(self, request, pk):
         req_obj = _locked_correction_request(pk)
         if req_obj is None:
-            return _legacy_update_attendance_request(request, pk, self.serializer_class)
+            return _legacy_update_attendance_request(request, pk, self.compat_serializer_class)
         flags = build_attendance_correction_permission_flags(req_obj, request.user)
         if not flags.get("can_edit"):
             return Response({"error": "Only the owner can edit a waiting request."}, status=status.HTTP_403_FORBIDDEN)
@@ -2271,7 +2282,7 @@ class AttendanceRequestApproveView(APIView):
             req_obj = approve_attendance_correction_request(request_obj=req_obj, actor_user=request.user)
         except AttendanceCorrectionError as exc:
             return Response(getattr(exc, "message_dict", {"error": exc.messages if hasattr(exc, "messages") else str(exc)}), status=400)
-        return Response(AttendanceRequestSerializer(req_obj, context={"request": request}).data, status=200)
+        return Response(AttendanceCorrectionRequestSerializer(req_obj, context={"request": request}).data, status=200)
 
 
 class AttendanceRequestRevokeView(APIView):
@@ -2293,7 +2304,7 @@ class AttendanceRequestRevokeView(APIView):
             req_obj = revoke_attendance_correction_request(request_obj=req_obj, actor_user=request.user, reason=reason)
         except AttendanceCorrectionError as exc:
             return Response(getattr(exc, "message_dict", {"error": exc.messages if hasattr(exc, "messages") else str(exc)}), status=400)
-        return Response(AttendanceRequestSerializer(req_obj, context={"request": request}).data, status=200)
+        return Response(AttendanceCorrectionRequestSerializer(req_obj, context={"request": request}).data, status=200)
 
 
 class AttendanceRequestCancelView(APIView):
@@ -2314,7 +2325,7 @@ class AttendanceRequestCancelView(APIView):
             req_obj = cancel_attendance_correction_request(request_obj=req_obj, actor_user=request.user)
         except AttendanceCorrectionError as exc:
             return Response(getattr(exc, "message_dict", {"error": exc.messages if hasattr(exc, "messages") else str(exc)}), status=400)
-        return Response(AttendanceRequestSerializer(req_obj, context={"request": request}).data, status=200)
+        return Response(AttendanceCorrectionRequestSerializer(req_obj, context={"request": request}).data, status=200)
 
 
 class AttendanceRequestRejectView(APIView):
@@ -2336,7 +2347,7 @@ class AttendanceRequestRejectView(APIView):
             req_obj = reject_attendance_correction_request(request_obj=req_obj, actor_user=request.user, reason=reason)
         except AttendanceCorrectionError as exc:
             return Response(getattr(exc, "message_dict", {"error": exc.messages if hasattr(exc, "messages") else str(exc)}), status=400)
-        return Response(AttendanceRequestSerializer(req_obj, context={"request": request}).data, status=200)
+        return Response(AttendanceCorrectionRequestSerializer(req_obj, context={"request": request}).data, status=200)
 
 
 class AttendanceRequestAttachmentDownloadView(APIView):

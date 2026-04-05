@@ -119,6 +119,13 @@ class AttendanceSerializer(serializers.ModelSerializer):
 
 
 class AttendanceRequestSerializer(serializers.ModelSerializer):
+    """Compatibility serializer for legacy Attendance-backed request rows.
+
+    This serializer intentionally supports both the new
+    ``AttendanceCorrectionRequest`` entity and legacy ``Attendance`` request rows
+    so older endpoints/tests can keep working during cleanup. New correction
+    endpoints should prefer ``AttendanceCorrectionRequestSerializer``.
+    """
     employee_first_name = serializers.CharField(source="employee_id.employee_first_name", read_only=True)
     employee_last_name = serializers.CharField(source="employee_id.employee_last_name", read_only=True)
     badge_id = serializers.CharField(source="employee_id.badge_id", read_only=True)
@@ -464,15 +471,26 @@ class AttendanceLateComeEarlyOutSerializer(serializers.ModelSerializer):
 
 
 class AttendanceCorrectionRequestSerializer(AttendanceRequestSerializer):
-    """Primary serializer for the new AttendanceCorrectionRequest entity.
-
-    Keep this separate from AttendanceRequestSerializer so API callers can
-    explicitly choose the correction-request contract while older endpoints/tests
-    may still use the broader compatibility serializer.
-    """
+    """Active serializer for the new ``AttendanceCorrectionRequest`` contract."""
 
     class Meta(AttendanceRequestSerializer.Meta):
         model = AttendanceCorrectionRequest
+        fields = [
+            "id", "employee_id", "employee_first_name", "employee_last_name", "badge_id",
+            "employee_profile_url", "attendance_date", "scope",
+            "requested_check_in_date", "requested_check_in_time",
+            "requested_check_out_date", "requested_check_out_time",
+            "reason", "status", "request_status",
+            "action_reason", "action_type", "action_at", "approved_at", "rejected_at", "revoked_at", "canceled_at",
+            "action_by_name", "attachments", "attachment_urls", "file_urls",
+            "proposed_attendance_clock_in", "proposed_attendance_clock_out",
+            "proposed_attendance_clock_in_date", "proposed_attendance_clock_out_date",
+            "final_attendance_clock_in", "final_attendance_clock_out",
+            "final_attendance_clock_in_date", "final_attendance_clock_out_date",
+            "effective_attendance_clock_in", "effective_attendance_clock_out",
+            "effective_attendance_clock_in_date", "effective_attendance_clock_out_date",
+            "can_edit", "can_cancel", "can_approve", "can_reject", "can_revoke",
+        ]
 
     def _is_legacy_attendance(self, obj):
         return False

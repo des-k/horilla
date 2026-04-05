@@ -9,7 +9,6 @@ Pre-launch integrity rules:
 
 from __future__ import annotations
 
-import json
 from datetime import date, datetime, timedelta
 from typing import Optional, Tuple
 
@@ -19,6 +18,7 @@ from django.utils import timezone
 
 from attendance.methods.utils import shift_schedule_today
 from attendance.models import Attendance, AttendanceActivity
+from attendance.services.attendance_correction_scope_rules import load_requested_data
 from base.models import EmployeeShift, EmployeeShiftDay
 
 
@@ -33,18 +33,6 @@ def _normalize_none(value):
         return None
     return value
 
-
-def _load_requested_data(raw) -> dict:
-    if not raw:
-        return {}
-    if isinstance(raw, dict):
-        return raw
-    if isinstance(raw, str):
-        try:
-            return json.loads(raw)
-        except Exception:
-            return {}
-    return {}
 
 
 def _combine_dt(d, t):
@@ -72,7 +60,7 @@ def _approved_channel_for(attendance: Attendance) -> str:
 
 
 def _requested_sessions(attendance: Attendance) -> Tuple[bool, bool]:
-    data = _load_requested_data(getattr(attendance, "requested_data", None))
+    data = load_requested_data(getattr(attendance, "requested_data", None))
 
     in_present = _normalize_none(data.get("attendance_clock_in")) not in (None, "None")
     out_present = _normalize_none(data.get("attendance_clock_out")) not in (None, "None")
@@ -252,7 +240,7 @@ def validate_requested_data_with_windows(attendance: Attendance) -> Tuple[bool, 
     the request can still proceed with manual approver judgement.
     """
 
-    data = _load_requested_data(getattr(attendance, "requested_data", None))
+    data = load_requested_data(getattr(attendance, "requested_data", None))
     if not data:
         return True, None
 

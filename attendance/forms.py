@@ -564,8 +564,11 @@ class AttendanceValidationConditionForm(forms.ModelForm):
 
 
 class AttendanceRequestForm(BaseModelForm):
-    """
-    AttendanceRequestForm
+    """Compatibility edit form for legacy Attendance-backed request rows.
+
+    Active correction-request web flow now uses ``AttendanceCorrectionRequestWebForm``
+    in ``attendance.views.requests``. This form remains in place because legacy API
+    routes and older edit paths still call it directly.
     """
 
     def update_worked_hour_hx_fields(self, field_name):
@@ -778,7 +781,8 @@ class MultipleFileField(forms.FileField):
 
 class NewRequestForm(AttendanceRequestForm):
     """
-    NewRequestForm (Web + API)
+    Compatibility create form for legacy Attendance-backed request flow.
+
     Aligned with Mobile "Attendance Correction Request" create flow:
       - Employee, Date
       - Scope: IN / OUT / BOTH (hidden field set by UI)
@@ -1441,9 +1445,7 @@ def get_date_list(employee_id, from_date, to_date):
 
 
 class BulkAttendanceRequestForm(BaseModelForm):
-    """
-    Bulk attendance request create form
-    """
+    """Legacy bulk request form kept for compatibility-only routes."""
 
     employee_id = forms.ModelChoiceField(
         queryset=Employee.objects.filter(is_active=True),
