@@ -95,7 +95,7 @@
     {# Attachments (always available) #}
     <a data-toggle="oh-modal-toggle" data-target="#attendanceRequestAttachmentsModal"
        hx-get="{% url 'attendance-request-attachments' attendance.id %}"
-       hx-target="#attendanceRequestAttachmentsModalBody"
+       hx-target="#attendanceRequestAttachmentsModalTarget"
        class="oh-btn oh-btn--light-bkg w-100" onclick="event.preventDefault()">
       <ion-icon name="attach-outline"></ion-icon>
       {% trans "Attachments" %}{% if attachment_count %} ({{ attachment_count }}){% endif %}
@@ -104,7 +104,7 @@
     {% if attendance.is_validate_request %}
       {% if attendance.employee_id.employee_user_id == request.user %}
         <a hx-get="{% url 'edit-validate-attendance' attendance.id %}"
-           hx-target="#editValidateAttendanceRequestModalBody"
+           hx-target="#editValidateAttendanceRequestModalTarget"
            data-target="#editValidateAttendanceRequest"
            data-toggle="oh-modal-toggle"
            class="oh-btn oh-btn--info w-100"

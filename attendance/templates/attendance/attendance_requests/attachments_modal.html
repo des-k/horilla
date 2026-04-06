@@ -1,54 +1,97 @@
 {% load i18n %}
 
-<div class="oh-modal__dialog-header">
-  <h2 class="oh-modal__dialog-title">
-    {% trans "Attachments" %} — {% trans "Attendance Request" %}{% if req %} (#{{ req.id }}){% endif %}
-  </h2>
-  <button class="oh-modal__close" aria-label="Close">
-    <ion-icon name="close-outline"></ion-icon>
-  </button>
-</div>
+<style>
+  #attendanceRequestAttachmentsModalContent .attendance-attachment-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+    padding: 10px 0;
+    border-bottom: 1px solid rgba(0,0,0,.06);
+  }
 
-<div class="oh-modal__dialog-body">
-  {% if req %}
-    <div class="mb-2">
-      <small class="text-muted">
-        <strong>{% trans "Employee" %}:</strong> {{ req.employee_id.get_full_name }}<br />
-        <strong>{% trans "Date" %}:</strong> {{ req.attendance_date }}<br />
-        <strong>{% trans "Type" %}:</strong> {{ req.scope|default:"-" }}
-      </small>
-    </div>
-  {% endif %}
+  #attendanceRequestAttachmentsModalContent .attendance-attachment-row:last-child {
+    border-bottom: 0;
+  }
 
-  {% if files %}
-    <div class="oh-card">
-      <div class="oh-card__body">
-        <ul class="list-unstyled mb-0">
-          {% for f in files %}
-            <li class="d-flex align-items-center justify-content-between py-2" style="border-bottom: 1px solid rgba(0,0,0,.06);">
-              <div class="d-flex align-items-center gap-2">
-                <ion-icon name="document-attach-outline"></ion-icon>
-                <span class="text-truncate" style="max-width: 360px;">{{ f.file.name|default:_('Attachment') }}</span>
-              </div>
-              <div class="d-flex" style="gap:6px;">
-                <a class="oh-btn oh-btn--light-bkg" href="{{ f.file.url }}" target="_blank" rel="noopener">
-                  <ion-icon name="open-outline" class="me-1"></ion-icon>{% trans "Open" %}
-                </a>
-                {% if can_delete %}
-                <form method="post" action="{% url 'attendance-request-delete-attachment' req.id f.id %}">
-                  {% csrf_token %}
-                  <button type="submit" class="oh-btn oh-btn--danger" onclick="return confirm('{% trans "Delete this attachment?" %}');">
-                    <ion-icon name="trash-outline"></ion-icon>
-                  </button>
-                </form>
-                {% endif %}
-              </div>
-            </li>
-          {% endfor %}
-        </ul>
+  #attendanceRequestAttachmentsModalContent .attendance-attachment-main {
+    min-width: 0;
+    flex: 1 1 220px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  #attendanceRequestAttachmentsModalContent .attendance-attachment-name {
+    min-width: 0;
+    word-break: break-word;
+  }
+
+  #attendanceRequestAttachmentsModalContent .attendance-attachment-actions {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    margin-left: auto;
+  }
+
+  #attendanceRequestAttachmentsModalContent .attendance-attachment-actions form {
+    margin: 0;
+  }
+</style>
+
+<div id="attendanceRequestAttachmentsModalContent">
+  <div class="oh-modal__dialog-header">
+    <h2 class="oh-modal__dialog-title">
+      {% trans "Attachments" %} — {% trans "Attendance Request" %}{% if req %} (#{{ req.id }}){% endif %}
+    </h2>
+    <button class="oh-modal__close" aria-label="Close">
+      <ion-icon name="close-outline"></ion-icon>
+    </button>
+  </div>
+
+  <div class="oh-modal__dialog-body">
+    {% if req %}
+      <div class="mb-2">
+        <small class="text-muted">
+          <strong>{% trans "Employee" %}:</strong> {{ req.employee_id.get_full_name }}<br />
+          <strong>{% trans "Date" %}:</strong> {{ req.attendance_date }}<br />
+          <strong>{% trans "Type" %}:</strong> {{ req.scope|default:"-" }}
+        </small>
       </div>
-    </div>
-  {% else %}
-    <div class="text-muted">{% trans "No attachments." %}</div>
-  {% endif %}
+    {% endif %}
+
+    {% if files %}
+      <div class="oh-card">
+        <div class="oh-card__body">
+          <ul class="list-unstyled mb-0">
+            {% for f in files %}
+              <li class="attendance-attachment-row">
+                <div class="attendance-attachment-main">
+                  <ion-icon name="document-attach-outline"></ion-icon>
+                  <span class="attendance-attachment-name">{{ f.file.name|default:_('Attachment') }}</span>
+                </div>
+                <div class="attendance-attachment-actions">
+                  <a class="oh-btn oh-btn--light-bkg" href="{{ f.file.url }}" target="_blank" rel="noopener">
+                    <ion-icon name="open-outline" class="me-1"></ion-icon>{% trans "Open" %}
+                  </a>
+                  {% if can_delete %}
+                  <form method="post" action="{% url 'attendance-request-delete-attachment' req.id f.id %}">
+                    {% csrf_token %}
+                    <button type="submit" class="oh-btn oh-btn--danger" onclick="return confirm('{% trans "Delete this attachment?" %}');">
+                      <ion-icon name="trash-outline"></ion-icon>
+                    </button>
+                  </form>
+                  {% endif %}
+                </div>
+              </li>
+            {% endfor %}
+          </ul>
+        </div>
+      </div>
+    {% else %}
+      <div class="text-muted">{% trans "No attachments." %}</div>
+    {% endif %}
+  </div>
 </div>

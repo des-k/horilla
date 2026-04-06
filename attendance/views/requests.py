@@ -1248,6 +1248,15 @@ def edit_validate_attendance(request, attendance_id):
         return HttpResponseForbidden("Permission denied")
     employee = req_obj.employee_id
     form = AttendanceCorrectionRequestWebForm(request.POST or None, request.FILES or None, employee=employee, instance=req_obj)
+
+    def _edit_form_context(form_obj):
+        return {
+            "form": form_obj,
+            "bulk": False,
+            "form_action": reverse("edit-validate-attendance", args=[req_obj.id]),
+            "current_attachments": list(iter_request_attachments(req_obj)),
+        }
+
     if request.method == "POST" and form.is_valid():
         payload = {
             "attendance_date": form.cleaned_data["attendance_date"],
@@ -1266,8 +1275,8 @@ def edit_validate_attendance(request, attendance_id):
                     form.add_error(None if field == "error" else field, message)
         else:
             messages.success(request, _("Attendance correction request updated."))
-            return HttpResponse(render(request, "requests/attendance/request_new_form.html", {"form": AttendanceCorrectionRequestWebForm(employee=employee, instance=req_obj), "bulk": False, "form_action": reverse("edit-validate-attendance", args=[req_obj.id])}).content.decode("utf-8") + "<script>location.reload();</script>")
-    return render(request, "requests/attendance/request_new_form.html", {"form": form, "bulk": False, "form_action": reverse("edit-validate-attendance", args=[req_obj.id])})
+            return HttpResponse(render(request, "requests/attendance/request_new_form.html", _edit_form_context(AttendanceCorrectionRequestWebForm(employee=employee, instance=req_obj))).content.decode("utf-8") + "<script>location.reload();</script>")
+    return render(request, "requests/attendance/request_new_form.html", _edit_form_context(form))
 
 
 @login_required

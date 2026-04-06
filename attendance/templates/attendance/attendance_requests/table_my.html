@@ -66,7 +66,7 @@
                   <button class="oh-btn oh-btn--light-bkg"
                     data-toggle="oh-modal-toggle" data-target="#attendanceRequestAttachmentsModal"
                     hx-get="{% url 'attendance-request-attachments' r.id %}"
-                    hx-target="#attendanceRequestAttachmentsModalBody"
+                    hx-target="#attendanceRequestAttachmentsModalTarget"
                     onclick="event.preventDefault()">
                     <ion-icon name="attach-outline" class="mr-1"></ion-icon>
                     <span class="oh-badge oh-badge--secondary oh-badge--small oh-badge--round mr-1">{{ my_attach_counts|get_item:r.id|default:"0" }}</span>
@@ -94,7 +94,7 @@
                       <button class="oh-btn oh-btn--light-bkg" title="{% trans 'Edit Request' %}"
                         data-toggle="oh-modal-toggle" data-target="#editValidateAttendanceRequest"
                         hx-get="{% url 'edit-validate-attendance' r.id %}"
-                        hx-target="#editValidateAttendanceRequestModalBody"
+                        hx-target="#editValidateAttendanceRequestModalTarget"
                         onclick="event.preventDefault()">
                         <ion-icon name="create-outline"></ion-icon>
                       </button>
