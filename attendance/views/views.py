@@ -94,6 +94,8 @@ from attendance.methods.utils import (
 from attendance.models import (
     Attendance,
     AttendanceActivity,
+    AttendanceCorrectionRequest,
+    AttendanceCorrectionRequestStatus,
     AttendanceGeneralSetting,
     AttendancePunchingHistory,
     AttendanceLateComeEarlyOut,
