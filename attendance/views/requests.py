@@ -1238,7 +1238,12 @@ def reject_validate_attendance_request(request, attendance_id):
 @hx_request_required
 @transaction.atomic
 def edit_validate_attendance(request, attendance_id):
-    req_obj = get_object_or_404(AttendanceCorrectionRequest.objects.select_for_update(), id=attendance_id)
+    if request.method == "POST":
+        req_obj = _locked_correction_request(attendance_id)
+        if req_obj is None:
+            raise Http404
+    else:
+        req_obj = get_object_or_404(AttendanceCorrectionRequest, id=attendance_id)
     if not build_permission_flags(req_obj, request.user).get("can_edit"):
         return HttpResponseForbidden("Permission denied")
     employee = req_obj.employee_id
@@ -1288,7 +1293,9 @@ def attendance_request_attachments(request, attendance_id):
 def delete_attendance_request_attachment(request, attendance_id, file_id):
     if request.method != "POST":
         return HttpResponseForbidden("Method not allowed")
-    req_obj = get_object_or_404(AttendanceCorrectionRequest.objects.select_for_update(), id=attendance_id)
+    req_obj = _locked_correction_request(attendance_id)
+    if req_obj is None:
+        raise Http404
     if not build_permission_flags(req_obj, request.user).get("can_edit"):
         messages.error(request, _("You do not have permission to delete this attachment."))
         return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
