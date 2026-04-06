@@ -97,34 +97,25 @@
 		</div>
 
 		<div class="oh-card mt-3 p-3">
-			<h4>{% trans "WFH Home Location" %}</h4>
-			{% if wfh_profile_data.face_image_url %}
-			<p><strong>{% trans "Active Face Photo" %}:</strong></p>
-			<img src="{{ wfh_profile_data.face_image_url }}" alt="{% trans 'Face Photo' %}" style="max-width:120px;max-height:120px;border-radius:8px;object-fit:cover;">
-			{% endif %}
-			<p><strong>{% trans "Latitude" %}:</strong> {{ wfh_profile_data.home_latitude|default:"-" }}</p>
-			<p><strong>{% trans "Longitude" %}:</strong> {{ wfh_profile_data.home_longitude|default:"-" }}</p>
-			<p><strong>{% trans "Radius" %}:</strong> {{ wfh_profile_data.home_radius_in_meters|default:"-" }} m</p>
-			<p><strong>{% trans "Home Configured" %}:</strong> {{ wfh_profile_data.is_home_configured|yesno:"Yes,No" }}</p>
-			{% if wfh_profile_data.google_maps_link %}
-			<p><a href="{{ wfh_profile_data.google_maps_link }}" target="_blank">{% trans "Open in Google Maps" %}</a></p>
-			{% endif %}
-			<p><strong>{% trans "Requires Home Reconfiguration" %}:</strong> {{ wfh_profile_data.requires_home_reconfiguration|yesno:"Yes,No" }}</p>
-			<p><strong>{% trans "Requires Face Reenrollment" %}:</strong> {{ wfh_profile_data.requires_face_reenrollment|yesno:"Yes,No" }}</p>
-			<hr>
-			<h5>{% trans "WFH History" %}</h5>
-			{% for item in wfh_profile_data.history %}
-			<div class="mb-2">
-				<strong>{{ item.action_type }}</strong> • {{ item.acted_at|default:"-" }}
-				{% if item.old_home_latitude or item.old_home_longitude %}<div>{% trans "Old Home" %}: {{ item.old_home_latitude|default:"-" }}, {{ item.old_home_longitude|default:"-" }}</div>{% endif %}
-				{% if item.new_home_latitude or item.new_home_longitude %}<div>{% trans "New Home" %}: {{ item.new_home_latitude|default:"-" }}, {{ item.new_home_longitude|default:"-" }}</div>{% endif %}
-				{% if item.old_face_image %}<div class="mb-1"><strong>{% trans "Old Face Photo" %}:</strong><br><img src="{{ item.old_face_image }}" alt="{% trans 'Old Face Photo' %}" style="max-width:100px;max-height:100px;border-radius:8px;object-fit:cover;"></div>{% endif %}
-				{% if item.new_face_image %}<div class="mb-1"><strong>{% trans "New Face Photo" %}:</strong><br><img src="{{ item.new_face_image }}" alt="{% trans 'New Face Photo' %}" style="max-width:100px;max-height:100px;border-radius:8px;object-fit:cover;"></div>{% endif %}
-				{% if item.notes %}<div>{% trans "Notes" %}: {{ item.notes }}</div>{% endif %}
+			<h4>{% trans "Geo & Face Info" %}</h4>
+			<div class="row">
+				<div class="col-12 col-md-4 mb-3">
+					<p class="mb-2"><strong>{% trans "Active Face Photo" %}:</strong></p>
+					{% if wfh_profile_data.face_image_url %}
+					<img src="{{ wfh_profile_data.face_image_url }}" alt="{% trans 'Face Photo' %}" style="max-width:140px;max-height:140px;border-radius:8px;object-fit:cover;">
+					{% else %}
+					<p>-</p>
+					{% endif %}
+				</div>
+				<div class="col-12 col-md-8">
+					<p><strong>{% trans "Latitude" %}:</strong> {{ wfh_profile_data.home_latitude|default:"-" }}</p>
+					<p><strong>{% trans "Longitude" %}:</strong> {{ wfh_profile_data.home_longitude|default:"-" }}</p>
+					<p><strong>{% trans "Radius" %}:</strong> {{ wfh_profile_data.home_radius_in_meters|default:"-" }} m</p>
+					{% if wfh_profile_data.google_maps_link %}
+					<p><a href="{{ wfh_profile_data.google_maps_link }}" target="_blank">{% trans "Open in Google Maps" %}</a></p>
+					{% endif %}
+				</div>
 			</div>
-			{% empty %}
-			<p>{% trans "No WFH history" %}</p>
-			{% endfor %}
 		</div>
 
 		<div class="oh-table_sticky--wrapper">

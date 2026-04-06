@@ -233,14 +233,16 @@ class WfhSpecRegressionTests(SimpleTestCase):
 
 
 class WfhTemplateSourceRegressionTests(SimpleTestCase):
-    def test_employee_profile_template_contains_wfh_section_and_face_images(self):
+    def test_employee_profile_template_matches_geo_face_info_card(self):
         backend_root = Path(__file__).resolve().parents[1]
         text = (backend_root / "employee" / "templates" / "employee" / "profile" / "profile_view.html").read_text()
-        self.assertIn("WFH Home Location", text)
-        self.assertIn("wfh_profile_data", text)
-        self.assertIn("old_face_image", text)
-        self.assertIn("new_face_image", text)
-        self.assertIn("No WFH history", text)
+        self.assertIn("Geo & Face Info", text)
+        self.assertIn("wfh_profile_data.face_image_url", text)
+        self.assertIn("Open in Google Maps", text)
+        self.assertNotIn("WFH Home Location", text)
+        self.assertNotIn("WFH History", text)
+        self.assertNotIn("Requires Home Reconfiguration", text)
+        self.assertNotIn("Requires Face Reenrollment", text)
 
     def test_employee_individual_template_contains_geo_face_info_card(self):
         backend_root = Path(__file__).resolve().parents[1]
