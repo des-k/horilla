@@ -1,5 +1,22 @@
 <div id="attendanceRequestDiv">
     {% load i18n widget_tweaks attendancefilters %}
+    <style>
+        #attendanceRequestDiv textarea.form-control {
+            width: 100%;
+            min-height: 96px;
+            height: 96px;
+            resize: vertical;
+            box-sizing: border-box;
+        }
+
+        #attendanceRequestDiv input[type="date"].form-control,
+        #attendanceRequestDiv input[type="time"].form-control {
+            min-height: 46px;
+            height: 46px;
+            padding-top: 0.625rem;
+            padding-bottom: 0.625rem;
+        }
+    </style>
     <div class="oh-modal__dialog-header">
         <h2 class="oh-modal__dialog-title" id="addEmployeeModalLabel">
             {% trans "Attendance Correction Request" %}

@@ -876,7 +876,7 @@ class AttendanceCorrectionRequestWebForm(forms.Form):
     attendance_date = forms.DateField(widget=forms.DateInput(attrs={"type": "date"}), required=True)
     attendance_clock_in = forms.TimeField(widget=forms.TimeInput(attrs={"type": "time"}), required=False)
     attendance_clock_out = forms.TimeField(widget=forms.TimeInput(attrs={"type": "time"}), required=False)
-    reason = forms.CharField(widget=forms.Textarea, required=True, label=_("Reason / Note"))
+    reason = forms.CharField(widget=forms.Textarea(attrs={"rows": 3}), required=True, label=_("Reason / Note"))
     scope = forms.ChoiceField(
         choices=[("IN", _("IN")), ("OUT", _("OUT")), ("FULL", _("IN & OUT"))],
         required=False,
