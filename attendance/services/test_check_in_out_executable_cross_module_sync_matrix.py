@@ -311,6 +311,54 @@ class CrossModuleSyncRegressionTests(SimpleTestCase):
         self.assertEqual(activity.clock_in_channel, AttendanceChannel.CORRECTION_REQUEST)
         self.assertEqual(activity.clock_in_mode, AttendanceWorkMode.WFA)
 
+    def test_approved_request_override_out_uses_computed_final_mode_not_stale_existing_mode(self):
+        final_out_dt = timezone.make_aware(datetime(2026, 3, 19, 17, 10))
+        attendance = _FakeRecord(
+            attendance_clock_in_channel=AttendanceChannel.BIOMETRIC,
+            attendance_clock_in_mode=AttendanceWorkMode.WFH,
+            attendance_clock_in_image=None,
+            attendance_clock_in_location={"device": "gate-a"},
+            attendance_clock_out_channel=AttendanceChannel.CORRECTION_REQUEST,
+            attendance_clock_out_mode=AttendanceWorkMode.WFO,
+            attendance_clock_out_image="stale.png",
+            attendance_clock_out_location={"from": "old-default"},
+            in_attendance_status=None,
+            in_attendance_reject_reason_code=None,
+            out_attendance_status=None,
+            out_attendance_reject_reason_code=None,
+            reconciliation_source=None,
+            reconciliation_note=None,
+            late_minutes=None,
+            early_out_minutes=None,
+        )
+        activity = _FakeRecord(reconciliation_source=None, reconciliation_note=None, late_minutes=None, early_out_minutes=None)
+
+        reconciliation._sync_attendance_and_activity(
+            attendance,
+            activity,
+            final_in_dt=timezone.make_aware(datetime(2026, 3, 19, 8, 5)),
+            final_out_dt=final_out_dt,
+            final_in_punch=FakePunchLog(320, AttendancePunchDirection.IN, timezone.make_aware(datetime(2026, 3, 19, 8, 5)), source="biometric"),
+            final_out_punch=None,
+            source=reconciliation.SOURCE_ATTENDANCE_REQUEST,
+            note=reconciliation.NOTE_APPROVED_ATTENDANCE_REQUEST,
+            final_in_mode=AttendanceWorkMode.WFH,
+            final_out_mode=AttendanceWorkMode.WFH,
+            final_in_request=None,
+            final_out_request=None,
+            ctx=self._ctx(),
+            minimum_hour="08:00",
+            is_presence_only=False,
+            late_minutes=0,
+            early_minutes=0,
+        )
+
+        self.assertEqual(attendance.attendance_clock_out_channel, AttendanceChannel.CORRECTION_REQUEST)
+        self.assertEqual(attendance.attendance_clock_out_mode, AttendanceWorkMode.WFH)
+        self.assertIsNone(attendance.attendance_clock_out_punch)
+        self.assertEqual(activity.clock_out_channel, AttendanceChannel.CORRECTION_REQUEST)
+        self.assertEqual(activity.clock_out_mode, AttendanceWorkMode.WFH)
+
     def test_apply_punch_decisions_preserves_final_and_invalid_history_rows(self):
         attendance = SimpleNamespace(attendance_date=date(2026, 3, 19))
         final_in = FakePunchLog(311, AttendancePunchDirection.IN, timezone.make_aware(datetime(2026, 3, 19, 8, 0)), source="mobile")

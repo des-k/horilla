@@ -815,7 +815,7 @@ def _sync_attendance_and_activity(attendance: Attendance, activity: AttendanceAc
     elif correction_in_override or _request_is_approved_request_override(attendance, AttendancePunchDirection.IN):
         attendance.attendance_clock_in_punch = None
         attendance.attendance_clock_in_channel = AttendanceChannel.CORRECTION_REQUEST
-        attendance.attendance_clock_in_mode = existing_in_mode or final_in_mode
+        attendance.attendance_clock_in_mode = final_in_mode
         attendance.attendance_clock_in_image = None
         attendance.attendance_clock_in_location = None
     else:
@@ -837,7 +837,7 @@ def _sync_attendance_and_activity(attendance: Attendance, activity: AttendanceAc
     elif correction_out_override or _request_is_approved_request_override(attendance, AttendancePunchDirection.OUT):
         attendance.attendance_clock_out_punch = None
         attendance.attendance_clock_out_channel = AttendanceChannel.CORRECTION_REQUEST
-        attendance.attendance_clock_out_mode = existing_out_mode or final_out_mode
+        attendance.attendance_clock_out_mode = final_out_mode
         attendance.attendance_clock_out_image = None
         attendance.attendance_clock_out_location = None
     else:

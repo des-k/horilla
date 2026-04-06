@@ -1,6 +1,8 @@
 from datetime import date, time
 
 from django.test import override_settings
+
+from base.models import WorkType
 from rest_framework.test import APITestCase
 
 from attendance.models import (
@@ -225,6 +227,59 @@ class RequestLifecycleFullChainEndpointTests(AttendanceApiIntegrationMixin, APIT
         self.assertTrue(in_punch.accepted_to_attendance)
         self.assertTrue(out_punch.accepted_to_attendance)
         self.assertEqual(AttendancePunchingHistory.objects.filter(employee_id=self.employee).count(), 2)
+
+    def test_split_attendance_corrections_use_scheduled_work_mode_for_both_sessions(self):
+        wfh = WorkType.objects.create(work_type='WFH')
+        wfh.company_id.add(self.company)
+        work_info = self.employee.employee_work_info
+        work_info.work_type_id = wfh
+        work_info.save(update_fields=['work_type_id'])
+
+        request_in = AttendanceCorrectionRequest.objects.create(
+            employee_id=self.employee,
+            attendance_date=self.target_date,
+            scope='IN',
+            requested_check_in_date=self.target_date,
+            requested_check_in_time=time(8, 45),
+            reason='Adjusted WFH check in',
+            status=AttendanceCorrectionRequestStatus.WAITING,
+        )
+        request_out = AttendanceCorrectionRequest.objects.create(
+            employee_id=self.employee,
+            attendance_date=self.target_date,
+            scope='OUT',
+            requested_check_out_date=self.target_date,
+            requested_check_out_time=time(17, 15),
+            reason='Adjusted WFH check out',
+            status=AttendanceCorrectionRequestStatus.WAITING,
+        )
+
+        with self.shift_ctx:
+            approve_in = self.auth_client(self.admin_user).put(
+                f'/api/attendance/attendance-request-approve/{request_in.id}',
+                {},
+                format='json',
+            )
+        self.assertEqual(approve_in.status_code, 200)
+
+        with self.shift_ctx:
+            approve_out = self.auth_client(self.admin_user).put(
+                f'/api/attendance/attendance-request-approve/{request_out.id}',
+                {},
+                format='json',
+            )
+        self.assertEqual(approve_out.status_code, 200)
+
+        attendance = self._attendance()
+        activity = self._activity()
+        self.assertEqual(attendance.attendance_clock_in, time(8, 45))
+        self.assertEqual(attendance.attendance_clock_out, time(17, 15))
+        self.assertEqual(attendance.attendance_clock_in_channel, AttendanceChannel.CORRECTION_REQUEST)
+        self.assertEqual(attendance.attendance_clock_out_channel, AttendanceChannel.CORRECTION_REQUEST)
+        self.assertEqual(attendance.attendance_clock_in_mode, AttendanceWorkMode.WFH)
+        self.assertEqual(attendance.attendance_clock_out_mode, AttendanceWorkMode.WFH)
+        self.assertEqual(activity.clock_in_mode, AttendanceWorkMode.WFH)
+        self.assertEqual(activity.clock_out_mode, AttendanceWorkMode.WFH)
 
     def test_attendance_correction_revoke_twice_is_blocked_or_idempotent_without_data_corruption(self):
         in_punch, out_punch = self._create_raw_punches()
