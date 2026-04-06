@@ -731,6 +731,37 @@ class MonthlyRecapIntegrationTests(SimpleTestCase):
         self.assertEqual(row.display_out_mode, monthly_recap.AttendanceWorkMode.WFH)
         self.assertIn("WFH", row.work_type)
 
+    def test_incomplete_approved_correction_uses_scheduled_mode_for_missing_session_not_stale_attendance_work_type(self):
+        attendance = SimpleNamespace(
+            id=111,
+            employee_id=self.employee,
+            attendance_date=self.target_date,
+            attendance_clock_in_date=self.target_date,
+            attendance_clock_in=time(8, 0),
+            attendance_clock_out_date=None,
+            attendance_clock_out=None,
+            attendance_clock_in_mode=monthly_recap.AttendanceWorkMode.WFH,
+            attendance_clock_out_mode=None,
+            reconciliation_note='Approved Attendance Request Override',
+            reconciliation_source='Attendance Request Override',
+            late_minutes=0,
+            early_out_minutes=0,
+            attendance_validated=True,
+            is_validate_request_approved=False,
+            is_validate_request=False,
+            request_type=None,
+            shift_id='SHIFT-A',
+            work_type_id=SimpleNamespace(work_type='WFO'),
+        )
+
+        with patch.object(monthly_recap, 'scheduled_attendance_mode', lambda employee, target_date: monthly_recap.AttendanceWorkMode.WFH):
+            recap, row = self._get_recap(attendances=[attendance])
+
+        self.assertEqual(row.display_in_mode, monthly_recap.AttendanceWorkMode.WFH)
+        self.assertEqual(row.display_out_mode, monthly_recap.AttendanceWorkMode.WFH)
+        self.assertNotIn('WFO', row.work_type)
+        self.assertIn('WFH', row.work_type)
+
     def test_monthly_recap_does_not_normalize_legacy_remote_to_wfh(self):
         with patch.object(monthly_recap, 'scheduled_attendance_mode', lambda employee, target_date: monthly_recap.AttendanceWorkMode.WFA):
             recap, row = self._get_recap(attendances=[])

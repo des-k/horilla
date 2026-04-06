@@ -657,7 +657,7 @@ def _canonical_row_from_attendance(
         in_request_obj = requests_by_id.get(in_req_id)
         out_request_obj = requests_by_id.get(out_req_id)
 
-    baseline_mode = _attendance_level_mode(best_att) or AttendanceWorkMode.WFO
+    baseline_mode = scheduled_attendance_mode(getattr(best_att, "employee_id", None), attendance_date) or _attendance_level_mode(best_att) or AttendanceWorkMode.WFO
     display_in_mode = (
         _session_mode(best_att, "IN")
         or _linked_approved_request_mode(in_request_obj)
@@ -1751,7 +1751,7 @@ def build_employee_monthly_recap(*, employee: Employee, month_yyyy_mm: str, lang
         final_in_dt = _normalize_dt(final_in_dt, tzinfo)
         final_out_dt = _normalize_dt(final_out_dt, tzinfo)
 
-        baseline_mode = _attendance_level_mode(best_att) or scheduled_attendance_mode(employee, d)
+        baseline_mode = scheduled_attendance_mode(employee, d) or _attendance_level_mode(best_att) or AttendanceWorkMode.WFO
 
         eff_in_request = _resolve_effective_request_approved(
             requests=requests,
