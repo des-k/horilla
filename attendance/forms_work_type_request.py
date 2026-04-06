@@ -2,7 +2,7 @@
 
 Django (templates) forms for Attendance **Work Type Requests**.
 
-UI terminology: *Work Type* (WFA / ON DUTY)
+UI terminology: *Work Type* (WFA / WFH / ON DUTY)
 DB model: attendance.WorkModeRequest (kept for backward compatibility).
 """
 
@@ -57,6 +57,7 @@ class WorkTypeRequestCreateForm(forms.ModelForm):
         label="Work Type",
         choices=(
             (AttendanceWorkMode.WFA, "WFA"),
+            (AttendanceWorkMode.WFH, "WFH"),
             (AttendanceWorkMode.ON_DUTY, "ON DUTY"),
         ),
         widget=forms.Select(attrs={"class": "oh-select w-100"}),
@@ -94,7 +95,7 @@ class WorkTypeRequestCreateForm(forms.ModelForm):
     files = MultipleFileField(
         label="Supporting Documents",
         required=False,
-        help_text="WFA attachments are optional supporting history only. ON DUTY attachments are required at create and enter document review workflow after approval.",
+        help_text="WFA/WFH attachments are optional supporting history only. ON DUTY attachments are required at create and enter document review workflow after approval.",
         widget=MultipleClearableFileInput(attrs={"multiple": True, "class": "oh-input w-100"}),
     )
 
@@ -192,17 +193,17 @@ class WorkTypeRequestUpdateForm(forms.Form):
     files = MultipleFileField(
         label="Documents",
         required=False,
-        help_text="WFA uploads stay as supporting history. ON DUTY uploads create a new reviewable document version and preserve prior history.",
+        help_text="WFA/WFH uploads stay as supporting history. ON DUTY uploads create a new reviewable document version and preserve prior history.",
         widget=MultipleClearableFileInput(attrs={"multiple": True, "class": "oh-input w-100"}),
     )
 
     def __init__(self, *args, request_obj: WorkModeRequest | None = None, **kwargs):
         super().__init__(*args, **kwargs)
         self._request_obj = request_obj
-        if request_obj is not None and request_obj.mode == AttendanceWorkMode.WFA:
+        if request_obj is not None and request_obj.mode in {AttendanceWorkMode.WFA, AttendanceWorkMode.WFH}:
             self.fields["files"].label = "Supporting Documents"
             self.fields["files"].help_text = (
-                "WFA documents are optional supporting history only. Uploading more files creates a new version but does not trigger verify/reject/reopen workflow."
+                "WFA/WFH documents are optional supporting history only. Uploading more files creates a new version but does not trigger verify/reject/reopen workflow."
             )
         elif request_obj is not None and request_obj.mode == AttendanceWorkMode.ON_DUTY:
             self.fields["files"].label = "On Duty Documents"

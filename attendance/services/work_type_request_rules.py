@@ -14,7 +14,7 @@ This module enforces the FINAL spec:
   - ON_DUTY requires attachment at create and goes to WAITING_FOR_APPROVAL once submitted.
   - WFA goes directly to WAITING_FOR_APPROVAL.
 - Punch permission:
-  - Schedule WFA/ON_DUTY => mobile punch allowed without request.
+  - Schedule WFA/WFH/ON_DUTY => mobile punch allowed without request.
   - Schedule WFO => punch allowed only via relevant request:
     - WFA => only if APPROVED
     - ON_DUTY => only if APPROVED
@@ -92,12 +92,14 @@ def _scheduled_attendance_mode_or_none(employee, target_date: date) -> Optional[
 
     if "on duty" in n or "onduty" in n:
         return AttendanceWorkMode.ON_DUTY
+    if "wfh" in n or "work from home" in n:
+        return AttendanceWorkMode.WFH
     if "wfa" in n or "work from anywhere" in n or "remote" in n:
         return AttendanceWorkMode.WFA
     if "wfo" in n or "office" in n:
         return AttendanceWorkMode.WFO
 
-    if n in (AttendanceWorkMode.WFO, AttendanceWorkMode.WFA, AttendanceWorkMode.ON_DUTY):
+    if n in (AttendanceWorkMode.WFO, AttendanceWorkMode.WFA, AttendanceWorkMode.WFH, AttendanceWorkMode.ON_DUTY):
         return n
 
     return None
@@ -339,7 +341,7 @@ def punch_allowed(eff: EffectiveWorkType) -> bool:
         return False
 
     if eff.source == "schedule":
-        return eff.mode in (AttendanceWorkMode.WFA, AttendanceWorkMode.ON_DUTY)
+        return eff.mode in (AttendanceWorkMode.WFA, AttendanceWorkMode.WFH, AttendanceWorkMode.ON_DUTY)
 
     req = eff.request
     if not req:
@@ -348,8 +350,8 @@ def punch_allowed(eff: EffectiveWorkType) -> bool:
     if not _is_active_status(req.status):
         return False
 
-    # WFA requires APPROVED
-    if req.mode == AttendanceWorkMode.WFA:
+    # WFA/WFH require APPROVED
+    if req.mode in {AttendanceWorkMode.WFA, AttendanceWorkMode.WFH}:
         return req.status == WorkModeRequestStatus.APPROVED
 
     # ON_DUTY request requires approval before punch.
@@ -386,8 +388,8 @@ def validate_work_type_request(
         if start_date < today:
             raise ValidationError("Start date cannot be in the past.")
 
-    if mode not in (AttendanceWorkMode.WFA, AttendanceWorkMode.ON_DUTY):
-        raise ValidationError("Work Type Request only supports WFA and ON DUTY.")
+    if mode not in (AttendanceWorkMode.WFA, AttendanceWorkMode.WFH, AttendanceWorkMode.ON_DUTY):
+        raise ValidationError("Work Type Request only supports WFA, WFH and ON DUTY.")
 
     if scope in (WorkModeRequestScope.IN, WorkModeRequestScope.OUT) and start_date != end_date:
         raise ValidationError("Scope IN/OUT must be a single day (end_date = start_date).")
@@ -405,6 +407,8 @@ def validate_work_type_request(
             )
         if sched == AttendanceWorkMode.WFA and mode == AttendanceWorkMode.WFA:
             raise ValidationError("Default schedule is already WFA for this date.")
+        if sched == AttendanceWorkMode.WFH and mode == AttendanceWorkMode.WFH:
+            raise ValidationError("Default schedule is already WFH for this date.")
         # sched WFO: WFA/ON_DUTY allowed
         # sched WFA: ON_DUTY allowed for any scope (IN/OUT/FULL)
         d += timedelta(days=1)

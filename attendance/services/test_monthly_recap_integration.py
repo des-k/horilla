@@ -703,3 +703,35 @@ class MonthlyRecapIntegrationTests(SimpleTestCase):
         row2 = self._find_row(recap2["rows"], self.target_date)
         self.assertEqual(row2.early_out, "00:00")
         self.assertEqual(row2.early_out_minutes, 0)
+
+
+    def test_monthly_recap_preserves_wfh_label(self):
+        attendance = SimpleNamespace(
+            id=99,
+            employee_id=self.employee,
+            attendance_date=self.target_date,
+            attendance_clock_in_date=self.target_date,
+            attendance_clock_in=time(8, 0),
+            attendance_clock_out_date=self.target_date,
+            attendance_clock_out=time(17, 0),
+            attendance_clock_in_mode=monthly_recap.AttendanceWorkMode.WFH,
+            attendance_clock_out_mode=monthly_recap.AttendanceWorkMode.WFH,
+            reconciliation_note='WFH reconciled under normal attendance rules',
+            reconciliation_source='SOURCE_WFH',
+            late_minutes=0,
+            early_out_minutes=0,
+            attendance_validated=True,
+            is_validate_request_approved=False,
+            is_validate_request=False,
+            request_type=None,
+            shift_id='SHIFT-A',
+        )
+        recap, row = self._get_recap(attendances=[attendance])
+        self.assertEqual(row.attendance_clock_in_mode, monthly_recap.AttendanceWorkMode.WFH)
+        self.assertEqual(row.attendance_clock_out_mode, monthly_recap.AttendanceWorkMode.WFH)
+        self.assertEqual(recap['summary']['present'], 1)
+
+    def test_monthly_recap_does_not_normalize_legacy_remote_to_wfh(self):
+        with patch.object(monthly_recap, 'scheduled_attendance_mode', lambda employee, target_date: monthly_recap.AttendanceWorkMode.WFA):
+            recap, row = self._get_recap(attendances=[])
+        self.assertNotEqual(getattr(row, 'scheduled_mode', monthly_recap.AttendanceWorkMode.WFA), monthly_recap.AttendanceWorkMode.WFH)

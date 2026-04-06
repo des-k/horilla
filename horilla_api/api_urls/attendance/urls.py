@@ -14,6 +14,9 @@ from horilla_api.api_views.attendance.views import *
 urlpatterns = [
     path("clock-in/", ClockInAPIView.as_view(), name="api-check-in"),
     path("clock-out/", ClockOutAPIView.as_view(), name="api-check-out"),
+    path("wfh/home-setup/", EmployeeWfhHomeSetupAPIView.as_view(), name="api-wfh-home-setup"),
+    path("wfh/reset-home/", AdminResetWfhHomeAPIView.as_view(), name="api-wfh-reset-home"),
+    path("wfh/reset-face/", AdminResetWfhFaceAPIView.as_view(), name="api-wfh-reset-face"),
     path("attendance/", AttendanceView.as_view(), name="api-attendance-list"),
     path("attendance/<int:pk>", AttendanceView.as_view(), name="api-attendance-detail"),
     path(

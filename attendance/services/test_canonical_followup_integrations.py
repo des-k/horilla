@@ -1063,7 +1063,12 @@ class WorkModeDocumentActionReasonParityTests(TestCase):
 class WorkTypeRequestFocusedParityTests(TestCase):
     def test_wfa_create_request_is_set_to_waiting_for_approval(self):
         source = Path('attendance/services/work_type_request_actions.py').read_text()
-        self.assertIn('if mode == AttendanceWorkMode.WFA:', source)
+        self.assertIn('AttendanceWorkMode.WFA', source)
+        self.assertIn('req.status = WorkModeRequestStatus.WAITING_FOR_APPROVAL', source)
+
+    def test_wfh_create_request_is_set_to_waiting_for_approval(self):
+        source = Path('attendance/services/work_type_request_actions.py').read_text()
+        self.assertIn('AttendanceWorkMode.WFH', source)
         self.assertIn('req.status = WorkModeRequestStatus.WAITING_FOR_APPROVAL', source)
 
     def test_api_rejects_wfa_upload_after_approval_via_action_service_guard(self):

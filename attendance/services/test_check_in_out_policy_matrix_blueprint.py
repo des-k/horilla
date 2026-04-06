@@ -33,9 +33,23 @@ class CheckInOutPolicyMatrixBlueprintTests(SimpleTestCase):
         request.status = WorkModeRequestStatus.APPROVED
         self.assertTrue(punch_allowed(eff))
 
-    def test_scheduled_wfa_and_scheduled_on_duty_allow_mobile_punch(self):
+    def test_wfh_request_only_unlocks_mobile_when_approved(self):
+        request = SimpleNamespace(mode=AttendanceWorkMode.WFH, status=WorkModeRequestStatus.PENDING)
+        eff = EffectiveWorkType(mode=AttendanceWorkMode.WFH, source="request", request=request)
+        self.assertFalse(punch_allowed(eff))
+
+        request.status = WorkModeRequestStatus.WAITING_FOR_APPROVAL
+        self.assertFalse(punch_allowed(eff))
+
+        request.status = WorkModeRequestStatus.APPROVED
+        self.assertTrue(punch_allowed(eff))
+
+    def test_scheduled_wfa_wfh_and_scheduled_on_duty_allow_mobile_punch(self):
         self.assertTrue(
             punch_allowed(EffectiveWorkType(mode=AttendanceWorkMode.WFA, source="schedule", request=None))
+        )
+        self.assertTrue(
+            punch_allowed(EffectiveWorkType(mode=AttendanceWorkMode.WFH, source="schedule", request=None))
         )
         self.assertTrue(
             punch_allowed(EffectiveWorkType(mode=AttendanceWorkMode.ON_DUTY, source="schedule", request=None))

@@ -736,3 +736,35 @@ class ReconciliationCanonicalTests(SimpleTestCase):
         self.assertEqual(first_state, second_state)
         self.assertEqual(superseded.decision_status, "superseded")
         self.assertEqual(len(superseded.saved_update_fields), 2)
+
+
+    def test_reconciliation_keeps_wfh_final_mode_when_non_mobile_raw_exists(self):
+        attendance = SimpleNamespace(attendance_date=date(2026, 3, 14))
+        accepted = FakePunchLog(10, AttendancePunchDirection.IN, timezone.make_aware(datetime(2026, 3, 14, 8, 0)), source='mobile')
+        invalid = FakePunchLog(11, AttendancePunchDirection.IN, timezone.make_aware(datetime(2026, 3, 14, 8, 5)), source='biometric')
+        reconciliation._apply_punch_decisions(
+            attendance,
+            [accepted, invalid],
+            {
+                accepted.id: (True, reconciliation.NOTE_PRIMARY_CHECKIN),
+                invalid.id: (False, 'invalid_for_wfh_non_mobile_source'),
+            },
+            reconciliation.SOURCE_WFH,
+        )
+        self.assertTrue(accepted.accepted_to_attendance)
+        self.assertFalse(invalid.accepted_to_attendance)
+        self.assertEqual(invalid.reason, 'invalid_for_wfh_non_mobile_source')
+        self.assertEqual(invalid.decision_source, reconciliation.SOURCE_WFH)
+
+    def test_reconciliation_marks_non_mobile_raw_invalid_for_wfh(self):
+        attendance = SimpleNamespace(attendance_date=date(2026, 3, 14))
+        invalid = FakePunchLog(12, AttendancePunchDirection.OUT, timezone.make_aware(datetime(2026, 3, 14, 17, 0)), source='api')
+        reconciliation._apply_punch_decisions(
+            attendance,
+            [invalid],
+            {invalid.id: (False, 'invalid_for_wfh_non_mobile_source')},
+            reconciliation.SOURCE_WFH,
+        )
+        self.assertFalse(invalid.accepted_to_attendance)
+        self.assertEqual(invalid.reason, 'invalid_for_wfh_non_mobile_source')
+        self.assertEqual(invalid.decision_status, 'not_accepted')

@@ -457,6 +457,8 @@ def _work_mode_label(mode: str) -> str:
         return "On Duty"
     if mode == AttendanceWorkMode.WFA:
         return "WFA"
+    if mode == AttendanceWorkMode.WFH:
+        return "WFH"
     return "WFO"
 
 
@@ -466,6 +468,8 @@ def _normalize_work_mode(mode: Optional[str]) -> Optional[str]:
         return None
     if raw in {"on duty", "onduty"}:
         return AttendanceWorkMode.ON_DUTY
+    if raw in {"wfh", "work from home", "home"}:
+        return AttendanceWorkMode.WFH
     if raw in {"wfa", "work from anywhere", "remote"}:
         return AttendanceWorkMode.WFA
     if raw in {"wfo", "office"}:

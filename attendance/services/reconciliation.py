@@ -502,6 +502,12 @@ def _pick_raw_sessions(logs: list[AttendancePunchingHistory], ctx: ShiftContext)
     valid_out = []
     invalid_out = []
     for log in logs:
+        if getattr(log, "work_mode", None) == AttendanceWorkMode.WFH and getattr(log, "source", None) != "mobile":
+            if log.punch_direction == AttendancePunchDirection.IN:
+                invalid_in.append(log)
+            elif log.punch_direction == AttendancePunchDirection.OUT:
+                invalid_out.append(log)
+            continue
         log_dt = _localize(log.punch_timestamp)
         if log.punch_direction == AttendancePunchDirection.IN:
             all_in.append(log)

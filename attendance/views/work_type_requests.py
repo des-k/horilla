@@ -209,7 +209,7 @@ def work_type_request_view(request):
         request.GET.get("my_month")
     )
 
-    allowed_mode_filter = {"": None, "all": None, "wfa": AttendanceWorkMode.WFA, "on_duty": AttendanceWorkMode.ON_DUTY}
+    allowed_mode_filter = {"": None, "all": None, "wfa": AttendanceWorkMode.WFA, "wfh": AttendanceWorkMode.WFH, "on_duty": AttendanceWorkMode.ON_DUTY}
     allowed_scope_filter = {"": None, "all": None, "in": "in", "out": "out", "full": "full"}
     if mode_filter not in allowed_mode_filter:
         mode_filter = ""
@@ -390,7 +390,7 @@ def work_type_request_view(request):
         "show_approval_tab": show_approval_tab,
         "mode_filter": mode_filter,
         "scope_filter": scope_filter,
-        "mode_filter_options": [("", _("All")), ("wfa", _("WFA")), ("on_duty", _("ON DUTY"))],
+        "mode_filter_options": [("", _("All")), ("wfa", _("WFA")), ("wfh", _("WFH")), ("on_duty", _("ON DUTY"))],
         "scope_filter_options": [("", _("All")), ("in", _("IN")), ("out", _("OUT")), ("full", _("FULL"))],
         "status_my_options": [("", _("All")), ("pending", _("Pending")), ("waiting", _("Waiting for approval")), ("approved", _("Approved")), ("rejected", _("Rejected")), ("revoked", _("Revoked")), ("canceled", _("Canceled"))],
         "history_status_options": [("all", _("All")), ("approved", _("Approved")), ("rejected", _("Rejected")), ("revoked", _("Revoked")), ("canceled", _("Canceled"))],
@@ -646,7 +646,7 @@ def work_type_request_approve(request, obj_id: int):
         messages.error(request, str(exc))
     else:
         if result.auto_rejected:
-            messages.error(request, _("WFA request passed its approval cutoff and was auto-rejected."))
+            messages.error(request, _("Work Type request passed its approval cutoff and was auto-rejected."))
         else:
             messages.success(request, _("Request approved."))
     return HttpResponse("<script>location.reload();</script>")

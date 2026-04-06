@@ -126,7 +126,7 @@ def can_upload_document(request, req: WorkModeRequest) -> bool:
         return False
     if req.status in TERMINAL_STATUSES:
         return False
-    if req.mode == AttendanceWorkMode.WFA:
+    if req.mode in {AttendanceWorkMode.WFA, AttendanceWorkMode.WFH}:
         return req.status == WorkModeRequestStatus.WAITING_FOR_APPROVAL
     return update_allowed(req)
 

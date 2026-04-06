@@ -25,8 +25,10 @@ from xhtml2pdf import pisa
 
 import logging
 
-from facedetection.models import FaceDetection
+from facedetection.models import FaceDetection, EmployeeFaceDetection
+from geofencing.models import GeoFencing
 from geofencing.policy import geofencing_is_effectively_enabled
+from geopy.distance import geodesic
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +48,8 @@ from attendance.models import (
     EmployeeShiftDay,
     WorkModeRequest,
     AttendanceWorkMode,
+    EmployeeWfhProfile,
+    EmployeeWfhProfileHistory,
     WorkModeRequestDocumentStatus,
     WorkModeRequestScope,
     WorkModeRequestStatus,
@@ -793,7 +797,131 @@ def _is_punch_allowed(mode: str, req, source: str):
     return punch_allowed(EffectiveWorkType(mode=mode, source=source, request=req))
 
 def _requires_proof(mode: str) -> bool:
-    return mode in (AttendanceWorkMode.WFA, AttendanceWorkMode.ON_DUTY)
+    return mode in (AttendanceWorkMode.WFA, AttendanceWorkMode.WFH, AttendanceWorkMode.ON_DUTY)
+
+
+def _get_company_geofencing(employee):
+    company = None
+    try:
+        company = employee.get_company()
+    except Exception:
+        company = getattr(getattr(employee, "employee_work_info", None), "company_id", None)
+    if company is None:
+        return None
+    config, _ = GeoFencing.objects.get_or_create(company_id=company)
+    if not getattr(config, "wfh_radius_in_meters", None) or int(config.wfh_radius_in_meters or 0) <= 0:
+        config.wfh_radius_in_meters = 250
+        config.save(update_fields=["wfh_radius_in_meters"])
+    return config
+
+
+def _get_wfh_profile(employee):
+    defaults = {"home_radius_in_meters": 250}
+    return EmployeeWfhProfile.objects.get_or_create(employee=employee, defaults=defaults)[0]
+
+
+def _maps_link(lat, lng):
+    if lat is None or lng is None:
+        return None
+    return f"https://maps.google.com/?q={lat},{lng}"
+
+
+def _serialize_wfh_history(history_qs):
+    items = []
+    for item in history_qs.order_by("-acted_at", "-id")[:20]:
+        items.append({
+            "id": item.id,
+            "action_type": item.action_type,
+            "old_home_latitude": item.old_home_latitude,
+            "old_home_longitude": item.old_home_longitude,
+            "old_radius_in_meters": item.old_radius_in_meters,
+            "new_home_latitude": item.new_home_latitude,
+            "new_home_longitude": item.new_home_longitude,
+            "new_radius_in_meters": item.new_radius_in_meters,
+            "old_face_image": item.old_face_image,
+            "new_face_image": item.new_face_image,
+            "acted_at": item.acted_at.isoformat() if item.acted_at else None,
+            "acted_by": getattr(item.acted_by, "id", None),
+            "acted_by_name": str(item.acted_by) if getattr(item, "acted_by", None) else None,
+            "notes": item.notes,
+        })
+    return items
+
+
+def _has_wfh_home_reset_permission(user):
+    return bool(
+        user
+        and (
+            getattr(user, "is_superuser", False)
+            or user.has_perm("attendance.reset_wfh_home_geofence")
+        )
+    )
+
+
+def _has_wfh_face_reset_permission(user):
+    return bool(
+        user
+        and (
+            getattr(user, "is_superuser", False)
+            or user.has_perm("attendance.reset_wfh_face_detection")
+        )
+    )
+
+
+def _serialize_wfh_profile(employee):
+    profile = _get_wfh_profile(employee)
+    face = EmployeeFaceDetection.objects.filter(employee_id=employee).first()
+    return {
+        "home_latitude": profile.home_latitude,
+        "home_longitude": profile.home_longitude,
+        "google_maps_link": _maps_link(profile.home_latitude, profile.home_longitude),
+        "radius_in_meters": profile.home_radius_in_meters,
+        "is_home_configured": bool(profile.is_home_configured and profile.home_latitude is not None and profile.home_longitude is not None),
+        "requires_home_reconfiguration": bool(profile.requires_home_reconfiguration),
+        "requires_face_reenrollment": bool(profile.requires_face_reenrollment),
+        "face_image": getattr(face.image, "url", None) if face and getattr(face, "image", None) else None,
+        "history": _serialize_wfh_history(profile.employee.wfh_profile_history.all()),
+    }
+
+
+def _log_wfh_history(*, employee, action_type, acted_by=None, old_lat=None, old_lng=None, old_radius=None, new_lat=None, new_lng=None, new_radius=None, old_face_image=None, new_face_image=None, notes=None):
+    EmployeeWfhProfileHistory.objects.create(
+        employee=employee,
+        action_type=action_type,
+        acted_by=acted_by,
+        old_home_latitude=old_lat,
+        old_home_longitude=old_lng,
+        old_radius_in_meters=old_radius,
+        new_home_latitude=new_lat,
+        new_home_longitude=new_lng,
+        new_radius_in_meters=new_radius,
+        old_face_image=old_face_image,
+        new_face_image=new_face_image,
+        notes=notes,
+    )
+
+
+def _validate_wfh_punch(employee, mode, location, *, direction, actor=None):
+    if mode != AttendanceWorkMode.WFH:
+        return None
+    profile = _get_wfh_profile(employee)
+    config = _get_company_geofencing(employee)
+    if location is None:
+        return "Location is required for WFH attendance."
+    if profile.requires_face_reenrollment:
+        return "Face detection Anda telah di-reset. Silakan lakukan konfigurasi ulang foto wajah sebelum check-in atau check-out."
+    if profile.requires_home_reconfiguration or not profile.is_home_configured or profile.home_latitude is None or profile.home_longitude is None:
+        return "Lokasi rumah WFH Anda telah di-reset. Silakan setup ulang lokasi rumah sebelum check-in atau check-out."
+    if config and getattr(config, "wfh_start", True):
+        try:
+            lat = float(location.get("lat") if isinstance(location, dict) else location["lat"])
+            lng = float(location.get("lng") if isinstance(location, dict) else location["lng"])
+            meters = geodesic((profile.home_latitude, profile.home_longitude), (lat, lng)).meters
+        except Exception:
+            return "Location is required for WFH attendance."
+        if meters > float(profile.home_radius_in_meters or config.wfh_radius_in_meters or 250):
+            return "Anda berada di luar radius lokasi rumah yang diizinkan untuk WFH."
+    return None
 
 def _effective_document_status_or_none(req) -> str | None:
     if not req:
@@ -1449,13 +1577,16 @@ class ClockInAPIView(APIView):
         in_mode, in_source, in_req = _resolve_effective_work_type(employee, attendance_date, "in")
         if in_mode == AttendanceWorkMode.WFO:
             return _reject("WFO attendance must be recorded via biometric device.", status.HTTP_403_FORBIDDEN)
+        wfh_error = _validate_wfh_punch(employee, in_mode, location, direction="in", actor=employee)
+        if wfh_error:
+            return _reject(wfh_error, status.HTTP_403_FORBIDDEN)
 
         if not _is_punch_allowed(in_mode, in_req, in_source):
             msg = "Request is required." if not in_req else "Request is not approved yet."
             if in_mode == AttendanceWorkMode.ON_DUTY and in_req:
                 msg = "On Duty request is not active."
-            if in_mode == AttendanceWorkMode.WFA and in_req and in_req.status != WorkModeRequestStatus.APPROVED:
-                msg = "WFA requires an approved request before clock-in."
+            if in_mode in {AttendanceWorkMode.WFA, AttendanceWorkMode.WFH} and in_req and in_req.status != WorkModeRequestStatus.APPROVED:
+                msg = f"{in_mode.upper()} requires an approved request before clock-in."
             return _reject(msg, status.HTTP_403_FORBIDDEN)
 
         existing = Attendance.objects.filter(employee_id=employee, attendance_date=attendance_date).first()
@@ -1626,8 +1757,10 @@ class ClockInAPIView(APIView):
             "out_work_type_source": out_source,
             "in_work_type_request_id": getattr(in_req, "id", None),
             "out_work_type_request_id": getattr(out_req, "id", None),
+            "wfh_profile": _serialize_wfh_profile(employee),
             "in_work_type_request_status": getattr(in_req, "status", None),
             "out_work_type_request_status": getattr(out_req, "status", None),
+            "wfh_profile": _serialize_wfh_profile(employee),
             "in_attendance_status": getattr(attendance, "in_attendance_status", None) if attendance else None,
             "out_attendance_status": getattr(attendance, "out_attendance_status", None) if attendance else None,
             "in_attendance_reject_reason_code": getattr(attendance, "in_attendance_reject_reason_code", None) if attendance else None,
@@ -1695,12 +1828,15 @@ class ClockOutAPIView(APIView):
 
         if out_mode == AttendanceWorkMode.WFO:
             return _reject("WFO attendance must be recorded via biometric device.", status.HTTP_403_FORBIDDEN)
+        wfh_error = _validate_wfh_punch(employee, out_mode, location, direction="out", actor=employee)
+        if wfh_error:
+            return _reject(wfh_error, status.HTTP_403_FORBIDDEN, attendance_date=attendance_date)
         if not _is_punch_allowed(out_mode, out_req, out_source):
             msg = "Request is required." if not out_req else "Request is not approved yet."
             if out_mode == AttendanceWorkMode.ON_DUTY and out_req:
                 msg = "On Duty request is not active."
-            if out_mode == AttendanceWorkMode.WFA and out_req and out_req.status != WorkModeRequestStatus.APPROVED:
-                msg = "WFA requires an approved request before clock-out."
+            if out_mode in {AttendanceWorkMode.WFA, AttendanceWorkMode.WFH} and out_req and out_req.status != WorkModeRequestStatus.APPROVED:
+                msg = f"{out_mode.upper()} requires an approved request before clock-out."
             return _reject(msg, status.HTTP_403_FORBIDDEN)
 
         try:
@@ -1737,7 +1873,7 @@ class ClockOutAPIView(APIView):
 
         existing_att = Attendance.objects.filter(employee_id=employee, attendance_date=attendance_date).first()
         existing_out_rejected = bool(existing_att and getattr(existing_att, "out_attendance_status", None) == "REJECTED")
-        allow_update = (out_mode in {AttendanceWorkMode.WFA, AttendanceWorkMode.ON_DUTY}) or existing_out_rejected
+        allow_update = (out_mode in {AttendanceWorkMode.WFA, AttendanceWorkMode.WFH, AttendanceWorkMode.ON_DUTY}) or existing_out_rejected
 
         try:
             attendance, missing_check_in = cio.clock_out_attendance_and_activity(
@@ -1893,6 +2029,7 @@ class ClockOutAPIView(APIView):
             "out_work_type_source": out_source,
             "in_work_type_request_id": getattr(in_req, "id", None),
             "out_work_type_request_id": getattr(out_req, "id", None),
+            "wfh_profile": _serialize_wfh_profile(employee),
             "in_work_type_request_status": getattr(in_req, "status", None),
             "out_work_type_request_status": getattr(out_req, "status", None),
             "in_attendance_status": getattr(attendance, "in_attendance_status", None) if attendance else None,
@@ -2442,7 +2579,7 @@ def _work_mode_request_text(data, *keys):
 
 
 class WorkModeRequestView(APIView):
-    """CRUD for WorkModeRequest (WFA / ON_DUTY).
+    """CRUD for WorkModeRequest (WFA / WFH / ON_DUTY).
 
     Final rules:
     - WFA allows optional supporting documents with version history only.
@@ -2790,7 +2927,7 @@ class WorkModeRequestApproveView(APIView):
             return Response({"error": exc.messages if hasattr(exc, "messages") else str(exc)}, status=400)
         data = self.serializer_class(obj, context={"request": request}).data
         if result.auto_rejected:
-            return Response({**data, "error": "WFA request passed its approval cutoff and was auto-rejected."}, status=400)
+            return Response({**data, "error": "Work Type request passed its approval cutoff and was auto-rejected."}, status=400)
         return Response(data, status=200)
 
 
@@ -2999,6 +3136,101 @@ class AttendanceActivityView(APIView):
 
 
 
+class EmployeeWfhHomeSetupAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        employee = request.user.employee_get
+        profile = _get_wfh_profile(employee)
+        location = _parse_location_payload(request)
+        if not location:
+            return Response({"error": "Location is required."}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            lat = float(location.get("lat"))
+            lng = float(location.get("lng"))
+        except Exception:
+            return Response({"error": "Invalid location payload."}, status=status.HTTP_400_BAD_REQUEST)
+        old_lat = profile.home_latitude
+        old_lng = profile.home_longitude
+        old_radius = profile.home_radius_in_meters
+        config = _get_company_geofencing(employee)
+        profile.home_latitude = lat
+        profile.home_longitude = lng
+        profile.home_radius_in_meters = int(getattr(config, "wfh_radius_in_meters", 250) or 250)
+        profile.is_home_configured = True
+        profile.requires_home_reconfiguration = False
+        profile.home_configured_at = dj_timezone.now()
+        profile.home_configured_by = employee
+        profile.save()
+        action = EmployeeWfhProfileHistory.ActionType.HOME_RECONFIGURED if old_lat is not None and old_lng is not None else EmployeeWfhProfileHistory.ActionType.HOME_INITIAL_SET
+        _log_wfh_history(
+            employee=employee,
+            action_type=action,
+            acted_by=employee,
+            old_lat=old_lat,
+            old_lng=old_lng,
+            old_radius=old_radius if old_lat is not None and old_lng is not None else None,
+            new_lat=lat,
+            new_lng=lng,
+            new_radius=profile.home_radius_in_meters,
+        )
+        return Response({"detail": "WFH home location saved.", "wfh_profile": _serialize_wfh_profile(employee)}, status=status.HTTP_200_OK)
+
+
+class AdminResetWfhHomeAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        if not _has_wfh_home_reset_permission(request.user):
+            return Response({"error": "Permission denied"}, status=status.HTTP_403_FORBIDDEN)
+        employee_id = request.data.get("employee_id")
+        if not employee_id:
+            return Response({"error": "employee_id is required"}, status=status.HTTP_400_BAD_REQUEST)
+        employee = get_object_or_404(Employee, pk=employee_id)
+        profile = _get_wfh_profile(employee)
+        _log_wfh_history(
+            employee=employee,
+            action_type=EmployeeWfhProfileHistory.ActionType.HOME_RESET,
+            acted_by=getattr(request.user, "employee_get", None),
+            old_lat=profile.home_latitude,
+            old_lng=profile.home_longitude,
+            old_radius=profile.home_radius_in_meters if profile.home_latitude is not None and profile.home_longitude is not None else None,
+            notes="Admin reset WFH home geofence",
+        )
+        profile.requires_home_reconfiguration = True
+        profile.last_home_reset_at = dj_timezone.now()
+        profile.last_home_reset_by = getattr(request.user, "employee_get", None)
+        profile.save(update_fields=["requires_home_reconfiguration", "last_home_reset_at", "last_home_reset_by"])
+        return Response({"detail": "WFH home geofence reset.", "wfh_profile": _serialize_wfh_profile(employee)}, status=status.HTTP_200_OK)
+
+
+class AdminResetWfhFaceAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        if not _has_wfh_face_reset_permission(request.user):
+            return Response({"error": "Permission denied"}, status=status.HTTP_403_FORBIDDEN)
+        employee_id = request.data.get("employee_id")
+        if not employee_id:
+            return Response({"error": "employee_id is required"}, status=status.HTTP_400_BAD_REQUEST)
+        employee = get_object_or_404(Employee, pk=employee_id)
+        profile = _get_wfh_profile(employee)
+        face = EmployeeFaceDetection.objects.filter(employee_id=employee).first()
+        old_face = getattr(face.image, "url", None) if face and getattr(face, "image", None) else None
+        _log_wfh_history(
+            employee=employee,
+            action_type=EmployeeWfhProfileHistory.ActionType.FACE_RESET,
+            acted_by=getattr(request.user, "employee_get", None),
+            old_face_image=old_face,
+            notes="Admin reset WFH face detection",
+        )
+        profile.requires_face_reenrollment = True
+        profile.last_face_reset_at = dj_timezone.now()
+        profile.last_face_reset_by = getattr(request.user, "employee_get", None)
+        profile.save(update_fields=["requires_face_reenrollment", "last_face_reset_at", "last_face_reset_by"])
+        return Response({"detail": "WFH face detection reset.", "wfh_profile": _serialize_wfh_profile(employee)}, status=status.HTTP_200_OK)
+
+
 class MobileAttendanceSettingsAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -3012,6 +3244,8 @@ class MobileAttendanceSettingsAPIView(APIView):
             face_detection.save(update_fields=["start"])
 
         geofencing_enabled = geofencing_is_effectively_enabled(company=company)
+        geo_config, _ = GeoFencing.objects.get_or_create(company_id=company)
+        profile = _get_wfh_profile(request.user.employee_get)
 
         return Response(
             {
@@ -3019,6 +3253,11 @@ class MobileAttendanceSettingsAPIView(APIView):
                 "location_enabled": True,
                 "location_capture_enabled": True,
                 "geofencing_enabled": geofencing_enabled,
+                "wfh_geofencing_enabled": bool(getattr(geo_config, "wfh_start", True)),
+                "wfh_radius_in_meters": int(getattr(geo_config, "wfh_radius_in_meters", 250) or 250),
+                "requires_home_reconfiguration": bool(profile.requires_home_reconfiguration),
+                "requires_face_reenrollment": bool(profile.requires_face_reenrollment),
+                "has_home_location_configured": bool(profile.is_home_configured and profile.home_latitude is not None and profile.home_longitude is not None),
                 "read_only": True,
             },
             status=status.HTTP_200_OK,
@@ -3259,6 +3498,7 @@ class CheckingStatus(APIView):
                 "out_work_type_source": "schedule",
                 "in_work_type_request_id": None,
                 "out_work_type_request_id": None,
+                "wfh_profile": _serialize_wfh_profile(employee),
                 "in_work_type_request_status": None,
                 "out_work_type_request_status": None,
                 "in_request_status": None,
@@ -3773,7 +4013,7 @@ class CheckingStatus(APIView):
             bool(clock_out_t)
             and out_allowed
             and out_window_ok
-            and ((out_mode in {AttendanceWorkMode.WFA, AttendanceWorkMode.ON_DUTY}) or out_rejected)
+            and ((out_mode in {AttendanceWorkMode.WFA, AttendanceWorkMode.WFH, AttendanceWorkMode.ON_DUTY}) or out_rejected)
         )
 
         # Can check-out? (FINAL spec)

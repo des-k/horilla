@@ -43,6 +43,7 @@ from attendance.methods.utils import (
 from attendance.models import (
     Attendance,
     AttendanceActivity,
+    PunchDecisionStatus,
     AttendanceGeneralSetting,
     AttendanceLateComeEarlyOut,
     AttendancePunchSource,
@@ -229,17 +230,18 @@ def _time_like_to_hhmm(time_like) -> Optional[str]:
 
 
 def _resolve_biometric_mode_context(request, employee, attendance_date: date):
-    """Resolve effective work mode for server-side biometric punches.
+    """Resolve effective work mode for server-side non-mobile raw punches.
 
-    This keeps the raw biometric punch auditable with the same work-mode context
-    that will later drive final attendance reconciliation.
+    Historical callers use the biometric name, but the policy now applies to any
+    raw punch source that is not mobile so WFH can consistently invalidate those
+    events while keeping them in punching history.
     """
 
     raw_punch_history = getattr(request, "raw_punch_history", None)
     if raw_punch_history is None:
         return None, None
 
-    if getattr(raw_punch_history, "source", None) != AttendancePunchSource.BIOMETRIC:
+    if getattr(raw_punch_history, "source", None) == AttendancePunchSource.MOBILE:
         return None, None
 
     resolved = resolve_biometric_work_mode(employee, attendance_date)
@@ -249,6 +251,16 @@ def _resolve_biometric_mode_context(request, employee, attendance_date: date):
         work_mode=resolved.mode,
         related_work_mode_request=resolved.request,
     )
+    if resolved.mode == AttendanceWorkMode.WFH:
+        update_punch_history(
+            raw_punch_history,
+            accepted=False,
+            reason="invalid_for_wfh_non_mobile_source",
+        )
+        if hasattr(raw_punch_history, "decision_status"):
+            raw_punch_history.decision_status = PunchDecisionStatus.INVALID
+            raw_punch_history.reason = "invalid_for_wfh_non_mobile_source"
+            raw_punch_history.save(update_fields=["decision_status", "reason"])
     return resolved.mode, resolved.request
 
 

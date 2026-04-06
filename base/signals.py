@@ -52,7 +52,7 @@ def _safe_m2m_add(manager, *objs, using=None):
 
 
 def _ensure_wfo_wfa_worktypes(company=None, using=None):
-    """Ensure WorkType codes WFO/WFA exist and are attached to companies.
+    """Ensure WorkType codes WFO/WFA/WFH exist and are attached to companies.
 
     Fresh installs often create the first user via `createhorillauser` without
     loading fixtures. Our employee forms intentionally filter WorkTypes to
@@ -98,6 +98,11 @@ def _ensure_wfo_wfa_worktypes(company=None, using=None):
             wfa = WorkType(work_type="WFA")
             wfa.save(using=using)
 
+        wfh = qs.filter(work_type__iexact="WFH").first()
+        if not wfh:
+            wfh = WorkType(work_type="WFH")
+            wfh.save(using=using)
+
         # Attach to companies so it appears under company-filtered UI.
         if company is not None:
             companies = [company]
@@ -107,6 +112,7 @@ def _ensure_wfo_wfa_worktypes(company=None, using=None):
         for c in companies:
             _safe_m2m_add(wfo.company_id, c, using=using)
             _safe_m2m_add(wfa.company_id, c, using=using)
+            _safe_m2m_add(wfh.company_id, c, using=using)
     except Exception:
         # DB may not be ready during early migrate phases.
         return

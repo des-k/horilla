@@ -13,6 +13,7 @@ from rest_framework.views import APIView
 from base.models import Company
 from facedetection.forms import FaceDetectionSetupForm
 from facedetection.models import EmployeeFaceDetection, FaceDetection
+from attendance.models import EmployeeWfhProfile, EmployeeWfhProfileHistory
 from horilla.decorators import hx_request_required
 
 from .serializers import EmployeeFaceDetectionSerializer, FaceDetectionSerializer
@@ -143,10 +144,22 @@ class EmployeeFaceDetectionGetPostAPIView(APIView):
 
         employee = request.user.employee_get
         obj, created = EmployeeFaceDetection.objects.get_or_create(employee_id=employee)
+        old_face = getattr(obj.image, "url", None) if getattr(obj, "image", None) else None
 
         if "image" in request.FILES:
             obj.image = request.FILES["image"]
             obj.save()
+            profile, _ = EmployeeWfhProfile.objects.get_or_create(employee=employee, defaults={"home_radius_in_meters": 250})
+            if profile.requires_face_reenrollment:
+                profile.requires_face_reenrollment = False
+                profile.save(update_fields=["requires_face_reenrollment"])
+            EmployeeWfhProfileHistory.objects.create(
+                employee=employee,
+                action_type=EmployeeWfhProfileHistory.ActionType.FACE_REENROLLED,
+                acted_by=employee,
+                old_face_image=old_face,
+                new_face_image=getattr(obj.image, "url", None),
+            )
 
         serializer = EmployeeFaceDetectionSerializer(obj)
         return Response(

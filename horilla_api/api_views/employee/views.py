@@ -103,10 +103,10 @@ class EmployeeAPIView(APIView):
     def get(self, request, pk):
         user = request.user
         try:
-            employee = Employee.objects.only(
-                "id",
-                "employee_first_name",
-                "employee_last_name",  # include only needed fields
+            employee = Employee.objects.select_related(
+                "employee_work_info",
+                "employee_bank_details",
+                "wfh_profile",
             ).get(pk=pk)
         except Employee.DoesNotExist:
             return Response(

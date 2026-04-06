@@ -47,6 +47,7 @@ class AttendanceWorkMode(models.TextChoices):
     """Work mode used for attendance punches."""
     WFO = "wfo", _("WFO")
     WFA = "wfa", _("WFA")
+    WFH = "wfh", _("WFH")
     ON_DUTY = "on_duty", _("On Duty")
 
 
@@ -784,7 +785,7 @@ class WorkModeRequest(HorillaModel):
 
     @property
     def requires_pre_approval(self) -> bool:
-        return self.mode == AttendanceWorkMode.WFA
+        return self.mode in {AttendanceWorkMode.WFA, AttendanceWorkMode.WFH}
 
     def is_active_for_date(self, target_date: date) -> bool:
         """Returns True if the request covers the date and is not in a terminal inactive state."""
@@ -851,25 +852,25 @@ class WorkModeRequest(HorillaModel):
         version = self.resolve_current_document_version()
         if version is None:
             return WorkModeRequestDocumentStatus.NOT_UPLOADED
-        if self.mode == AttendanceWorkMode.WFA:
+        if self.mode in {AttendanceWorkMode.WFA, AttendanceWorkMode.WFH}:
             return WorkModeRequestDocumentStatus.SUBMITTED
         return getattr(version, "status", None) or WorkModeRequestDocumentStatus.NOT_UPLOADED
 
     def effective_document_remark(self):
         version = self.resolve_current_document_version()
-        if version is None or self.mode == AttendanceWorkMode.WFA:
+        if version is None or self.mode in {AttendanceWorkMode.WFA, AttendanceWorkMode.WFH}:
             return None
         return getattr(version, "review_remark", None)
 
     def effective_document_reviewed_by(self):
         version = self.resolve_current_document_version()
-        if version is None or self.mode == AttendanceWorkMode.WFA:
+        if version is None or self.mode in {AttendanceWorkMode.WFA, AttendanceWorkMode.WFH}:
             return None
         return getattr(version, "reviewed_by", None)
 
     def effective_document_reviewed_at(self):
         version = self.resolve_current_document_version()
-        if version is None or self.mode == AttendanceWorkMode.WFA:
+        if version is None or self.mode in {AttendanceWorkMode.WFA, AttendanceWorkMode.WFH}:
             return None
         return getattr(version, "reviewed_at", None)
 
@@ -892,7 +893,7 @@ class WorkModeRequest(HorillaModel):
     @property
     def effective_document_status_label(self) -> str:
         raw = self.effective_document_status()
-        if self.mode == AttendanceWorkMode.WFA:
+        if self.mode in {AttendanceWorkMode.WFA, AttendanceWorkMode.WFH}:
             return _("Supporting Attachment Uploaded") if raw != WorkModeRequestDocumentStatus.NOT_UPLOADED else _("Not Uploaded")
         mapping = {
             WorkModeRequestDocumentStatus.NOT_UPLOADED: _("Not Uploaded"),
@@ -983,7 +984,7 @@ class WorkModeRequest(HorillaModel):
 
         # WFO should not be requested; keep it invalid at model level to prevent UI misuse.
         if self.mode == AttendanceWorkMode.WFO:
-            raise ValidationError({"mode": _("WFO should not be requested. Use WFA or On Duty.")})
+            raise ValidationError({"mode": _("WFO should not be requested. Use WFA, WFH or On Duty.")})
 
 
 class WorkModeRequestDocumentVersion(HorillaModel):
@@ -1094,6 +1095,110 @@ class AttendanceRequestAuditLog(HorillaModel):
     def __str__(self):
         target = self.work_mode_request or self.attendance
         return f"{self.action_type} - {target}"
+
+
+
+
+class EmployeeWfhProfile(HorillaModel):
+    """Per-employee home profile used to validate WFH mobile attendance."""
+
+    employee = models.OneToOneField(
+        Employee,
+        on_delete=models.CASCADE,
+        related_name="wfh_profile",
+        verbose_name=_("Employee"),
+    )
+    home_latitude = models.FloatField(null=True, blank=True, verbose_name=_("Home Latitude"))
+    home_longitude = models.FloatField(null=True, blank=True, verbose_name=_("Home Longitude"))
+    home_radius_in_meters = models.PositiveIntegerField(default=250, verbose_name=_("Home Radius In Meters"))
+    is_home_configured = models.BooleanField(default=False, verbose_name=_("Is Home Configured"))
+    requires_home_reconfiguration = models.BooleanField(default=False, verbose_name=_("Requires Home Reconfiguration"))
+    requires_face_reenrollment = models.BooleanField(default=False, verbose_name=_("Requires Face Reenrollment"))
+    home_configured_at = models.DateTimeField(null=True, blank=True, verbose_name=_("Home Configured At"))
+    home_configured_by = models.ForeignKey(
+        Employee,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="configured_wfh_profiles",
+        verbose_name=_("Home Configured By"),
+    )
+    last_home_reset_at = models.DateTimeField(null=True, blank=True, verbose_name=_("Last Home Reset At"))
+    last_home_reset_by = models.ForeignKey(
+        Employee,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="reset_wfh_profiles",
+        verbose_name=_("Last Home Reset By"),
+    )
+    last_face_reset_at = models.DateTimeField(null=True, blank=True, verbose_name=_("Last Face Reset At"))
+    last_face_reset_by = models.ForeignKey(
+        Employee,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="reset_wfh_faces",
+        verbose_name=_("Last Face Reset By"),
+    )
+
+    objects = HorillaCompanyManager("employee__employee_work_info__company_id")
+
+    class Meta:
+        verbose_name = _("Employee WFH Profile")
+        verbose_name_plural = _("Employee WFH Profiles")
+        permissions = (
+            ("reset_wfh_home_geofence", "Can reset WFH home geofence"),
+            ("reset_wfh_face_detection", "Can reset WFH face detection"),
+        )
+
+    def __str__(self):
+        return f"{self.employee} - WFH"
+
+
+class EmployeeWfhProfileHistory(HorillaModel):
+    class ActionType(models.TextChoices):
+        HOME_INITIAL_SET = "HOME_INITIAL_SET", _("Home Initial Set")
+        HOME_RESET = "HOME_RESET", _("Home Reset")
+        HOME_RECONFIGURED = "HOME_RECONFIGURED", _("Home Reconfigured")
+        FACE_RESET = "FACE_RESET", _("Face Reset")
+        FACE_REENROLLED = "FACE_REENROLLED", _("Face Reenrolled")
+
+    employee = models.ForeignKey(
+        Employee,
+        on_delete=models.CASCADE,
+        related_name="wfh_profile_history",
+        verbose_name=_("Employee"),
+    )
+    action_type = models.CharField(max_length=32, choices=ActionType.choices, verbose_name=_("Action Type"))
+    old_home_latitude = models.FloatField(null=True, blank=True, verbose_name=_("Old Home Latitude"))
+    old_home_longitude = models.FloatField(null=True, blank=True, verbose_name=_("Old Home Longitude"))
+    old_radius_in_meters = models.PositiveIntegerField(null=True, blank=True, verbose_name=_("Old Radius In Meters"))
+    new_home_latitude = models.FloatField(null=True, blank=True, verbose_name=_("New Home Latitude"))
+    new_home_longitude = models.FloatField(null=True, blank=True, verbose_name=_("New Home Longitude"))
+    new_radius_in_meters = models.PositiveIntegerField(null=True, blank=True, verbose_name=_("New Radius In Meters"))
+    old_face_image = models.CharField(max_length=512, null=True, blank=True, verbose_name=_("Old Face Image"))
+    new_face_image = models.CharField(max_length=512, null=True, blank=True, verbose_name=_("New Face Image"))
+    acted_by = models.ForeignKey(
+        Employee,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="acted_wfh_profile_history",
+        verbose_name=_("Acted By"),
+    )
+    acted_at = models.DateTimeField(default=timezone.now, verbose_name=_("Acted At"))
+    notes = models.TextField(null=True, blank=True, verbose_name=_("Notes"))
+
+    objects = HorillaCompanyManager("employee__employee_work_info__company_id")
+
+    class Meta:
+        verbose_name = _("Employee WFH Profile History")
+        verbose_name_plural = _("Employee WFH Profile Histories")
+        ordering = ["-acted_at", "-id"]
+
+    def __str__(self):
+        return f"{self.employee} - {self.action_type}"
 
 
 class Attendance(HorillaModel):

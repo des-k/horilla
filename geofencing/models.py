@@ -18,6 +18,8 @@ class GeoFencing(models.Model):
         null=True,
     )
     start = models.BooleanField(default=False)
+    wfh_start = models.BooleanField(default=True)
+    wfh_radius_in_meters = models.PositiveIntegerField(default=250)
 
     @property
     def effective_start(self) -> bool:
@@ -48,6 +50,8 @@ class GeoFencing(models.Model):
 
     def save(self, *args, **kwargs):
         self.start = coerce_geofencing_start(self.start)
+        if int(self.wfh_radius_in_meters or 0) <= 0:
+            raise ValidationError("WFH radius must be greater than 0.")
         self.full_clean()  # Run clean before save
         super().save(*args, **kwargs)
 

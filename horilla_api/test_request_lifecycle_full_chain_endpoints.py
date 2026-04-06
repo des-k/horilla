@@ -335,6 +335,51 @@ class RequestLifecycleFullChainEndpointTests(AttendanceApiIntegrationMixin, APIT
         self.assertTrue(out_punch.accepted_to_attendance)
         self.assertEqual(AttendancePunchingHistory.objects.filter(employee_id=self.employee).count(), 2)
 
+    def test_wfh_work_mode_approve_and_revoke_endpoints_update_modes_without_orphaning_raw_trail(self):
+        in_punch, out_punch = self._create_raw_punches(work_mode=AttendanceWorkMode.WFO, in_time_value=time(8, 20), out_time_value=time(16, 40))
+        with self.shift_ctx:
+            recompute_attendance(self.employee, self.target_date)
+
+        request = WorkModeRequest.objects.create(
+            employee_id=self.employee,
+            mode=AttendanceWorkMode.WFH,
+            scope=WorkModeRequestScope.FULL,
+            start_date=self.target_date,
+            end_date=self.target_date,
+            status=WorkModeRequestStatus.WAITING_FOR_APPROVAL,
+            reason='WFH approved by manager',
+        )
+
+        with self.shift_ctx:
+            approve = self.auth_client(self.admin_user).put(
+                f'/api/attendance/work-mode-request-approve/{request.id}',
+                {},
+                format='json',
+            )
+        self.assertEqual(approve.status_code, 200)
+        attendance = self._attendance()
+        activity = self._activity()
+        self.assertEqual(attendance.attendance_clock_in_mode, AttendanceWorkMode.WFH)
+        self.assertEqual(attendance.attendance_clock_out_mode, AttendanceWorkMode.WFH)
+        self.assertEqual(activity.clock_in_mode, AttendanceWorkMode.WFH)
+        self.assertEqual(activity.clock_out_mode, AttendanceWorkMode.WFH)
+
+        with self.shift_ctx:
+            revoke = self.auth_client(self.admin_user).put(
+                f'/api/attendance/work-mode-request-revoke/{request.id}',
+                {'remark': 'WFH day revoked'},
+                format='json',
+            )
+        self.assertEqual(revoke.status_code, 200)
+        attendance = self._attendance()
+        activity = self._activity()
+        request.refresh_from_db()
+        self.assertEqual(request.status, WorkModeRequestStatus.REVOKED)
+        self.assertEqual(attendance.attendance_clock_in_mode, AttendanceWorkMode.WFO)
+        self.assertEqual(attendance.attendance_clock_out_mode, AttendanceWorkMode.WFO)
+        self.assertEqual(activity.clock_in_mode, AttendanceWorkMode.WFO)
+        self.assertEqual(activity.clock_out_mode, AttendanceWorkMode.WFO)
+
     def test_work_mode_reject_after_final_state_is_cleanly_blocked(self):
         in_punch, out_punch = self._create_raw_punches(work_mode=AttendanceWorkMode.WFO, in_time_value=time(8, 20), out_time_value=time(16, 40))
         with self.shift_ctx:

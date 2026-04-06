@@ -107,7 +107,7 @@ class WorkModeRequestActions:
 
     @staticmethod
     def _version_status_for_upload(req: WorkModeRequest) -> str:
-        if req.mode == AttendanceWorkMode.WFA:
+        if req.mode in {AttendanceWorkMode.WFA, AttendanceWorkMode.WFH}:
             return WorkModeRequestDocumentStatus.SUBMITTED
         return (
             WorkModeRequestDocumentStatus.PENDING_VERIFICATION
@@ -139,7 +139,7 @@ class WorkModeRequestActions:
                 req.status = WorkModeRequestStatus.PENDING
             return
 
-        if req.mode == AttendanceWorkMode.WFA:
+        if req.mode in {AttendanceWorkMode.WFA, AttendanceWorkMode.WFH}:
             req.sync_root_document_fields_from_current_version()
             return
 
@@ -233,7 +233,7 @@ class WorkModeRequestActions:
 
     @staticmethod
     def _cutoff_due_datetime(req: WorkModeRequest, *, now_dt: Optional[datetime] = None) -> Optional[datetime]:
-        if req.mode != AttendanceWorkMode.WFA:
+        if req.mode not in {AttendanceWorkMode.WFA, AttendanceWorkMode.WFH}:
             return None
         now_dt = WorkModeRequestActions._now(now_dt)
         today = timezone.localdate(now_dt)
@@ -354,7 +354,7 @@ class WorkModeRequestActions:
             action_type=WorkModeRequestActionType.CREATED,
         )
         uploaded_files = list(uploaded_files or [])
-        if mode == AttendanceWorkMode.WFA:
+        if mode in {AttendanceWorkMode.WFA, AttendanceWorkMode.WFH}:
             req.status = WorkModeRequestStatus.WAITING_FOR_APPROVAL
             if uploaded_files:
                 WorkModeRequestActions._create_document_version(req, actor=actor, uploaded_files=uploaded_files)

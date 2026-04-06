@@ -10,6 +10,9 @@ from employee.models import (
     Policy,
 )
 from horilla_documents.models import Document, DocumentRequest
+from attendance.models import EmployeeWfhProfileHistory
+from geofencing.models import GeoFencing
+from facedetection.models import EmployeeFaceDetection
 
 from ...api_methods.employee.methods import get_next_badge_id
 
@@ -46,6 +49,7 @@ class EmployeeListSerializer(serializers.ModelSerializer):
 
 
 class EmployeeSerializer(serializers.ModelSerializer):
+    wfh_profile = serializers.SerializerMethodField()
     department_name = serializers.CharField(
         source="employee_work_info.department_id.department", read_only=True
     )
@@ -64,6 +68,63 @@ class EmployeeSerializer(serializers.ModelSerializer):
     employee_bank_details_id = serializers.CharField(
         source="employee_bank_details.id", read_only=True
     )
+
+    def get_wfh_profile(self, obj):
+        profile = getattr(obj, "wfh_profile", None)
+        company = None
+        try:
+            company = obj.get_company()
+        except Exception:
+            company = getattr(getattr(obj, "employee_work_info", None), "company_id", None)
+        radius = 250
+        try:
+            if company is not None:
+                config = GeoFencing.objects.filter(company_id=company).first()
+                configured = int(getattr(config, "wfh_radius_in_meters", 0) or 0)
+                if configured > 0:
+                    radius = configured
+        except Exception:
+            radius = 250
+        face = EmployeeFaceDetection.objects.filter(employee_id=obj).first()
+        history = [
+            {
+                "id": item.id,
+                "action_type": item.action_type,
+                "old_home_latitude": item.old_home_latitude,
+                "old_home_longitude": item.old_home_longitude,
+                "old_radius_in_meters": item.old_radius_in_meters,
+                "new_home_latitude": item.new_home_latitude,
+                "new_home_longitude": item.new_home_longitude,
+                "new_radius_in_meters": item.new_radius_in_meters,
+                "old_face_image": item.old_face_image,
+                "new_face_image": item.new_face_image,
+                "acted_at": item.acted_at.isoformat() if item.acted_at else None,
+                "acted_by": getattr(item.acted_by, "id", None),
+                "acted_by_name": str(item.acted_by) if getattr(item, "acted_by", None) else None,
+                "notes": item.notes,
+            }
+            for item in EmployeeWfhProfileHistory.objects.filter(employee=obj).order_by("-acted_at", "-id")[:20]
+        ]
+        home_latitude = getattr(profile, "home_latitude", None)
+        home_longitude = getattr(profile, "home_longitude", None)
+        profile_radius = getattr(profile, "home_radius_in_meters", None)
+        effective_radius = profile_radius if profile_radius not in (None, 0, "") else radius
+        is_home_configured = bool(
+            getattr(profile, "is_home_configured", False)
+            and home_latitude is not None
+            and home_longitude is not None
+        )
+        return {
+            "home_latitude": home_latitude,
+            "home_longitude": home_longitude,
+            "google_maps_link": f"https://maps.google.com/?q={home_latitude},{home_longitude}" if home_latitude is not None and home_longitude is not None else None,
+            "radius_in_meters": effective_radius,
+            "is_home_configured": is_home_configured,
+            "requires_home_reconfiguration": bool(getattr(profile, "requires_home_reconfiguration", False)),
+            "requires_face_reenrollment": bool(getattr(profile, "requires_face_reenrollment", False)),
+            "face_image": getattr(face.image, "url", None) if face and getattr(face, "image", None) else None,
+            "history": history,
+        }
 
     class Meta:
         model = Employee

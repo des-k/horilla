@@ -111,10 +111,34 @@ class WorkTypeRequestValidationMatrixTests(SimpleTestCase):
     def test_create_rejects_unknown_mode(self):
         employee = SimpleNamespace(id=10)
         with patch.object(work_type_request_rules.timezone, "localdate", return_value=date(2026, 3, 20)):
-            with self.assertRaisesMessage(ValidationError, "only supports WFA and ON DUTY"):
+            with self.assertRaisesMessage(ValidationError, "only supports WFA, WFH and ON DUTY"):
                 work_type_request_rules.validate_work_type_request(
                     employee=employee,
                     mode="hybrid",
+                    scope=WorkModeRequestScope.FULL,
+                    start_date=date(2026, 3, 20),
+                    end_date=date(2026, 3, 20),
+                )
+
+    def test_create_accepts_wfh_mode(self):
+        employee = SimpleNamespace(id=10)
+        overlap_qs = self._overlap_qs()
+        with patch.object(work_type_request_rules.timezone, "localdate", return_value=date(2026, 3, 20)),              patch.object(work_type_request_rules, "scheduled_attendance_mode", return_value=AttendanceWorkMode.WFO),              patch.object(work_type_request_rules.WorkModeRequest.objects, "filter", return_value=overlap_qs):
+            work_type_request_rules.validate_work_type_request(
+                employee=employee,
+                mode=AttendanceWorkMode.WFH,
+                scope=WorkModeRequestScope.FULL,
+                start_date=date(2026, 3, 20),
+                end_date=date(2026, 3, 20),
+            )
+
+    def test_create_rejects_when_schedule_already_same_wfh_mode(self):
+        employee = SimpleNamespace(id=10)
+        with patch.object(work_type_request_rules.timezone, "localdate", return_value=date(2026, 3, 20)),              patch.object(work_type_request_rules, "scheduled_attendance_mode", return_value=AttendanceWorkMode.WFH):
+            with self.assertRaisesMessage(ValidationError, "already WFH"):
+                work_type_request_rules.validate_work_type_request(
+                    employee=employee,
+                    mode=AttendanceWorkMode.WFH,
                     scope=WorkModeRequestScope.FULL,
                     start_date=date(2026, 3, 20),
                     end_date=date(2026, 3, 20),
