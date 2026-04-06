@@ -87,6 +87,8 @@ class FaceDetectionConfigTests(TestCase):
         self.assertIn("Reset Face Detection For", content)
         self.assertIn("Apply Face Reset", content)
         self.assertIn('name="action" value="reset_face"', content)
+        self.assertEqual(content.count('Face Detection'), 1)
+        self.assertLess(content.index('Enable Face Detection'), content.index('Reset Face Detection For'))
 
     def test_reset_face_post_sets_reenrollment_flag(self):
         request = self.factory.post("/facedetection/", {"action": "reset_face", "employee_id": str(self.target.id)}, HTTP_HX_REQUEST="true")
