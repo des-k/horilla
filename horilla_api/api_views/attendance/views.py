@@ -817,27 +817,38 @@ def _object_id(value):
     return value if isinstance(value, int) else None
 
 
+def _default_geo_config():
+    return SimpleNamespace(wfh_start=True, wfh_radius_in_meters=250)
+
+
 def _company_obj_and_id(employee):
     company = None
     try:
         company = employee.get_company()
     except Exception:
         company = getattr(getattr(employee, "employee_work_info", None), "company_id", None)
-    return company, _object_id(company)
+    company_id = _object_id(company)
+    if company_id is None:
+        nested_company_id = getattr(getattr(employee, "employee_work_info", None), "company_id_id", None)
+        if nested_company_id not in (None, ""):
+            company_id = nested_company_id
+    return company, company_id
 
 
 def _company_wfh_radius(employee):
     config = _get_company_geofencing(employee)
-    return int(getattr(config, "wfh_radius_in_meters", 250) or 250) if config else 250
+    return int(getattr(config, "wfh_radius_in_meters", 250) or 250)
 
 
 def _get_company_geofencing(employee):
     company, company_id = _company_obj_and_id(employee)
     if company_id is None:
-        return None
+        return _default_geo_config()
     if company is not None and not _is_model_instance(company):
-        return SimpleNamespace(wfh_start=False, wfh_radius_in_meters=250)
-    config, created_geo = GeoFencing.objects.get_or_create(company_id=company_id)
+        return _default_geo_config()
+    config = GeoFencing.objects.filter(company_id_id=company_id).first()
+    if config is None:
+        return _default_geo_config()
     if not getattr(config, "wfh_radius_in_meters", None) or int(config.wfh_radius_in_meters or 0) <= 0:
         config.wfh_radius_in_meters = 250
         config.save(update_fields=["wfh_radius_in_meters"])
@@ -903,7 +914,9 @@ def _has_wfh_face_reset_permission(user):
 def _serialize_wfh_profile(employee):
     profile = _get_wfh_profile(employee)
     employee_id = _object_id(employee)
-    face = EmployeeFaceDetection.objects.filter(employee_id=employee_id).first() if employee_id is not None else None
+    face = None
+    if employee_id is not None and _is_model_instance(employee):
+        face = EmployeeFaceDetection.objects.filter(employee_id_id=employee_id).first()
     if profile is None:
         return {
             "home_latitude": None,
@@ -925,7 +938,7 @@ def _serialize_wfh_profile(employee):
         "requires_home_reconfiguration": bool(profile.requires_home_reconfiguration),
         "requires_face_reenrollment": bool(profile.requires_face_reenrollment),
         "face_image": getattr(face.image, "url", None) if face and getattr(face, "image", None) else None,
-        "history": _serialize_wfh_history(profile.employee.wfh_profile_history.all()),
+        "history": _serialize_wfh_history(profile.employee.wfh_profile_history.all()) if _is_model_instance(employee) else [],
     }
 
 
@@ -3280,22 +3293,26 @@ class MobileAttendanceSettingsAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        company = request.user.employee_get.get_company()
-        company_id = _object_id(company)
-        face_detection, created_face_detection = FaceDetection.objects.get_or_create(
-            company_id=company_id, defaults={"start": True}
-        )
-        if not face_detection.start:
-            face_detection.start = True
-            face_detection.save(update_fields=["start"])
+        employee = request.user.employee_get
+        company, company_id = _company_obj_and_id(employee)
 
-        geofencing_enabled = geofencing_is_effectively_enabled(company=company)
-        geo_config = _get_company_geofencing(request.user.employee_get) or SimpleNamespace(wfh_start=False, wfh_radius_in_meters=250)
-        profile = _get_wfh_profile(request.user.employee_get)
+        if company_id is None or (company is not None and not _is_model_instance(company)):
+            face_detection = SimpleNamespace(start=True)
+        else:
+            face_detection = FaceDetection.objects.filter(company_id_id=company_id).first()
+            if face_detection is None:
+                face_detection = SimpleNamespace(start=True)
+            elif not face_detection.start:
+                face_detection.start = True
+                face_detection.save(update_fields=["start"])
+
+        geofencing_enabled = geofencing_is_effectively_enabled(company=company) if company_id is not None else False
+        geo_config = _get_company_geofencing(employee)
+        profile = _get_wfh_profile(employee)
 
         return Response(
             {
-                "face_detection_enabled": bool(face_detection.start),
+                "face_detection_enabled": bool(getattr(face_detection, "start", True)),
                 "location_enabled": True,
                 "location_capture_enabled": True,
                 "geofencing_enabled": geofencing_enabled,

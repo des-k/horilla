@@ -48,11 +48,11 @@ class WfhSpecTests(SimpleTestCase):
         self.assertEqual(normalize_work_type_label("work from home"), "WFH")
 
     @patch("horilla_api.api_views.attendance.views._get_wfh_profile")
-    @patch("horilla_api.api_views.attendance.views.GeoFencing.objects.get_or_create")
-    @patch("horilla_api.api_views.attendance.views.FaceDetection.objects.get_or_create")
-    def test_mobile_attendance_settings_include_wfh_fields(self, mock_face, mock_geo, mock_profile):
-        mock_face.return_value = (SimpleNamespace(start=True, save=lambda **kwargs: None), True)
-        mock_geo.return_value = (SimpleNamespace(wfh_start=True, wfh_radius_in_meters=250), True)
+    @patch("horilla_api.api_views.attendance.views._get_company_geofencing")
+    @patch("horilla_api.api_views.attendance.views.FaceDetection.objects.filter")
+    def test_mobile_attendance_settings_include_wfh_fields(self, mock_face_filter, mock_geo, mock_profile):
+        mock_face_filter.return_value.first.return_value = SimpleNamespace(start=True)
+        mock_geo.return_value = SimpleNamespace(wfh_start=True, wfh_radius_in_meters=250)
         mock_profile.return_value = SimpleNamespace(
             requires_home_reconfiguration=False,
             requires_face_reenrollment=True,
