@@ -12,7 +12,7 @@
     <div class="oh-modal__dialog-body">
         <div class="oh-general__tab-target oh-profile-section" id="personal">
             <form
-                hx-post="{{ form_action|default:(request_new_url|default:'/attendance/request-new-attendance') }}?bulk={{bulk|default:False}}"
+                hx-post="{{ form_action|default:request_new_url|default:'/attendance/request-new-attendance' }}?bulk={{ bulk|default:False }}"
                 hx-target="#objectCreateModalTarget"
                 hx-encoding="multipart/form-data"
                 enctype="multipart/form-data"
