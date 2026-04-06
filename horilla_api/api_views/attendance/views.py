@@ -8,7 +8,7 @@ from django.conf import settings
 from django.core.mail import EmailMessage
 from django.core.exceptions import ValidationError
 from django.db import transaction
-from django.db.models import Case, CharField, F, Value, When, Q
+from django.db.models import Case, CharField, F, Value, When, Q, Model
 from django.http import FileResponse, HttpResponse, QueryDict
 from django.shortcuts import get_object_or_404
 from django.template.loader import render_to_string
@@ -24,6 +24,7 @@ from rest_framework.renderers import JSONRenderer, BaseRenderer
 from xhtml2pdf import pisa
 
 import logging
+from types import SimpleNamespace
 
 from facedetection.models import FaceDetection, EmployeeFaceDetection
 from geofencing.models import GeoFencing
@@ -800,15 +801,43 @@ def _requires_proof(mode: str) -> bool:
     return mode in (AttendanceWorkMode.WFA, AttendanceWorkMode.WFH, AttendanceWorkMode.ON_DUTY)
 
 
-def _get_company_geofencing(employee):
+def _is_model_instance(value):
+    return isinstance(value, Model)
+
+
+def _object_id(value):
+    if value is None:
+        return None
+    pk = getattr(value, "pk", None)
+    if pk not in (None, ""):
+        return pk
+    obj_id = getattr(value, "id", None)
+    if obj_id not in (None, ""):
+        return obj_id
+    return value if isinstance(value, int) else None
+
+
+def _company_obj_and_id(employee):
     company = None
     try:
         company = employee.get_company()
     except Exception:
         company = getattr(getattr(employee, "employee_work_info", None), "company_id", None)
-    if company is None:
+    return company, _object_id(company)
+
+
+def _company_wfh_radius(employee):
+    config = _get_company_geofencing(employee)
+    return int(getattr(config, "wfh_radius_in_meters", 250) or 250) if config else 250
+
+
+def _get_company_geofencing(employee):
+    company, company_id = _company_obj_and_id(employee)
+    if company_id is None:
         return None
-    config, _ = GeoFencing.objects.get_or_create(company_id=company)
+    if company is not None and not _is_model_instance(company):
+        return SimpleNamespace(wfh_start=False, wfh_radius_in_meters=250)
+    config, created_geo = GeoFencing.objects.get_or_create(company_id=company_id)
     if not getattr(config, "wfh_radius_in_meters", None) or int(config.wfh_radius_in_meters or 0) <= 0:
         config.wfh_radius_in_meters = 250
         config.save(update_fields=["wfh_radius_in_meters"])
@@ -816,8 +845,11 @@ def _get_company_geofencing(employee):
 
 
 def _get_wfh_profile(employee):
-    defaults = {"home_radius_in_meters": 250}
-    return EmployeeWfhProfile.objects.get_or_create(employee=employee, defaults=defaults)[0]
+    employee_id = _object_id(employee)
+    if employee_id is None or not _is_model_instance(employee):
+        return None
+    defaults = {"home_radius_in_meters": _company_wfh_radius(employee)}
+    return EmployeeWfhProfile.objects.get_or_create(employee_id=employee_id, defaults=defaults)[0]
 
 
 def _maps_link(lat, lng):
@@ -870,7 +902,20 @@ def _has_wfh_face_reset_permission(user):
 
 def _serialize_wfh_profile(employee):
     profile = _get_wfh_profile(employee)
-    face = EmployeeFaceDetection.objects.filter(employee_id=employee).first()
+    employee_id = _object_id(employee)
+    face = EmployeeFaceDetection.objects.filter(employee_id=employee_id).first() if employee_id is not None else None
+    if profile is None:
+        return {
+            "home_latitude": None,
+            "home_longitude": None,
+            "google_maps_link": None,
+            "radius_in_meters": _company_wfh_radius(employee),
+            "is_home_configured": False,
+            "requires_home_reconfiguration": False,
+            "requires_face_reenrollment": False,
+            "face_image": getattr(face.image, "url", None) if face and getattr(face, "image", None) else None,
+            "history": [],
+        }
     return {
         "home_latitude": profile.home_latitude,
         "home_longitude": profile.home_longitude,
@@ -3236,15 +3281,16 @@ class MobileAttendanceSettingsAPIView(APIView):
 
     def get(self, request):
         company = request.user.employee_get.get_company()
-        face_detection, _ = FaceDetection.objects.get_or_create(
-            company_id=company, defaults={"start": True}
+        company_id = _object_id(company)
+        face_detection, created_face_detection = FaceDetection.objects.get_or_create(
+            company_id=company_id, defaults={"start": True}
         )
         if not face_detection.start:
             face_detection.start = True
             face_detection.save(update_fields=["start"])
 
         geofencing_enabled = geofencing_is_effectively_enabled(company=company)
-        geo_config, _ = GeoFencing.objects.get_or_create(company_id=company)
+        geo_config = _get_company_geofencing(request.user.employee_get) or SimpleNamespace(wfh_start=False, wfh_radius_in_meters=250)
         profile = _get_wfh_profile(request.user.employee_get)
 
         return Response(
@@ -3255,9 +3301,9 @@ class MobileAttendanceSettingsAPIView(APIView):
                 "geofencing_enabled": geofencing_enabled,
                 "wfh_geofencing_enabled": bool(getattr(geo_config, "wfh_start", True)),
                 "wfh_radius_in_meters": int(getattr(geo_config, "wfh_radius_in_meters", 250) or 250),
-                "requires_home_reconfiguration": bool(profile.requires_home_reconfiguration),
-                "requires_face_reenrollment": bool(profile.requires_face_reenrollment),
-                "has_home_location_configured": bool(profile.is_home_configured and profile.home_latitude is not None and profile.home_longitude is not None),
+                "requires_home_reconfiguration": bool(getattr(profile, "requires_home_reconfiguration", False)),
+                "requires_face_reenrollment": bool(getattr(profile, "requires_face_reenrollment", False)),
+                "has_home_location_configured": bool(getattr(profile, "is_home_configured", False) and getattr(profile, "home_latitude", None) is not None and getattr(profile, "home_longitude", None) is not None),
                 "read_only": True,
             },
             status=status.HTTP_200_OK,

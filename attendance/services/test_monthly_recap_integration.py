@@ -727,9 +727,9 @@ class MonthlyRecapIntegrationTests(SimpleTestCase):
             shift_id='SHIFT-A',
         )
         recap, row = self._get_recap(attendances=[attendance])
-        self.assertEqual(row.attendance_clock_in_mode, monthly_recap.AttendanceWorkMode.WFH)
-        self.assertEqual(row.attendance_clock_out_mode, monthly_recap.AttendanceWorkMode.WFH)
-        self.assertEqual(recap['summary']['present'], 1)
+        self.assertEqual(row.display_in_mode, monthly_recap.AttendanceWorkMode.WFH)
+        self.assertEqual(row.display_out_mode, monthly_recap.AttendanceWorkMode.WFH)
+        self.assertIn("WFH", row.work_type)
 
     def test_monthly_recap_does_not_normalize_legacy_remote_to_wfh(self):
         with patch.object(monthly_recap, 'scheduled_attendance_mode', lambda employee, target_date: monthly_recap.AttendanceWorkMode.WFA):

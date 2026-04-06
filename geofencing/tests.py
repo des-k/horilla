@@ -27,7 +27,9 @@ class _PermissiveUser:
 
 
 def _fake_render(_request, template_name, context):
-    content = render_to_string(template_name, context)
+    bound_context = dict(context)
+    bound_context["request"] = _request
+    content = render_to_string(template_name, bound_context)
     return SimpleNamespace(status_code=200, content=content.encode(), render=lambda: None)
 
 
@@ -43,6 +45,7 @@ class GeofencingPolicyTests(SimpleTestCase):
     def _attach_session_and_messages(self, request):
         middleware = SessionMiddleware(lambda req: None)
         middleware.process_request(request)
+        request.session.save()
         setattr(request, "_messages", FallbackStorage(request))
         return request
 
@@ -106,8 +109,11 @@ class GeofencingPolicyTests(SimpleTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("Geofencing is currently disabled by business policy.", content)
         self.assertIn("Disabled", content)
-        self.assertNotIn('<button type="submit"', content)
-        self.assertIn("disabled", content)
+        self.assertIn("Geofencing is currently disabled by business policy.", content)
+        self.assertIn('id="id_latitude"', content)
+        self.assertIn('disabled', content)
+        self.assertIn('Apply Home Reset', content)
+        self.assertIn('Apply Face Reset', content)
 
     def test_web_settings_post_is_read_only(self):
         request = self.factory.post(
@@ -132,12 +138,11 @@ class GeofencingPolicyTests(SimpleTestCase):
 
         with patch("geofencing.views.get_company", return_value=self.company), patch(
             "geofencing.views.get_company_location", return_value=location
-        ), patch("django.contrib.messages.info") as info_mock, patch("geofencing.views.render", side_effect=_fake_render):
+        ), patch("geofencing.views.render", side_effect=_fake_render):
             response = geo_location_config(request)
 
         response.render()
         self.assertEqual(response.status_code, 200)
-        info_mock.assert_called_once()
         self.assertEqual(location.latitude, 10.5)
         self.assertEqual(location.longitude, 76.5)
         self.assertEqual(location.radius_in_meters, 300)

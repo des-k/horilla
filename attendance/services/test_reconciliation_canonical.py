@@ -746,15 +746,15 @@ class ReconciliationCanonicalTests(SimpleTestCase):
             attendance,
             [accepted, invalid],
             {
-                accepted.id: (True, reconciliation.NOTE_PRIMARY_CHECKIN),
+                accepted.id: (True, reconciliation.NOTE_FINAL_IN),
                 invalid.id: (False, 'invalid_for_wfh_non_mobile_source'),
             },
-            reconciliation.SOURCE_WFH,
+            reconciliation.SOURCE_WFA,
         )
         self.assertTrue(accepted.accepted_to_attendance)
         self.assertFalse(invalid.accepted_to_attendance)
         self.assertEqual(invalid.reason, 'invalid_for_wfh_non_mobile_source')
-        self.assertEqual(invalid.decision_source, reconciliation.SOURCE_WFH)
+        self.assertEqual(invalid.decision_source, reconciliation.SOURCE_WFA)
 
     def test_reconciliation_marks_non_mobile_raw_invalid_for_wfh(self):
         attendance = SimpleNamespace(attendance_date=date(2026, 3, 14))
@@ -763,8 +763,8 @@ class ReconciliationCanonicalTests(SimpleTestCase):
             attendance,
             [invalid],
             {invalid.id: (False, 'invalid_for_wfh_non_mobile_source')},
-            reconciliation.SOURCE_WFH,
+            reconciliation.SOURCE_WFA,
         )
         self.assertFalse(invalid.accepted_to_attendance)
         self.assertEqual(invalid.reason, 'invalid_for_wfh_non_mobile_source')
-        self.assertEqual(invalid.decision_status, 'not_accepted')
+        self.assertEqual(invalid.decision_status, 'invalid')

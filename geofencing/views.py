@@ -5,6 +5,7 @@ from django.shortcuts import get_object_or_404, render
 from django.utils import timezone
 from django.utils.decorators import method_decorator
 from django.utils.translation import gettext_lazy as _
+from django.db.models import Model
 from geopy.distance import geodesic
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
@@ -20,6 +21,22 @@ from geofencing.forms import GeoFencingSetupForm
 from .models import GeoFencing
 from .policy import GEOFENCING_DISABLED_HELP_TEXT, GEOFENCING_DISABLED_NOTE, geofencing_is_effectively_enabled
 from .serializers import *
+
+
+def _is_model_instance(value):
+    return isinstance(value, Model)
+
+
+def _object_id(value):
+    if value is None:
+        return None
+    pk = getattr(value, "pk", None)
+    if pk not in (None, ""):
+        return pk
+    obj_id = getattr(value, "id", None)
+    if obj_id not in (None, ""):
+        return obj_id
+    return value if isinstance(value, int) else None
 
 
 def _can_reset_wfh_home(user):
@@ -123,7 +140,7 @@ class GeoFencingEmployeeLocationCheckAPIView(APIView):
     def get_company_location(self, request):
         company = self.get_company(request)
         try:
-            location = GeoFencing.objects.get(company_id=company)
+            location = GeoFencing.objects.get(company_id=_object_id(company))
             return location
         except Exception as e:
             raise serializers.ValidationError(e)
@@ -185,8 +202,11 @@ def get_company(request):
 
 def get_company_location(request):
     company = get_company(request)
+    company_id = _object_id(company)
+    if company_id is None or (company is not None and not _is_model_instance(company)):
+        raise serializers.ValidationError("Company geofencing not available")
     try:
-        location = GeoFencing.objects.get(company_id=company)
+        location = GeoFencing.objects.get(company_id=company_id)
         return location
     except Exception as e:
         raise serializers.ValidationError(e)
@@ -197,6 +217,7 @@ def get_company_location(request):
 def geo_location_config(request):
     location_obj = None
     company = get_company(request)
+    company_id = _object_id(company)
 
     try:
         location_obj = get_company_location(request)
@@ -210,12 +231,15 @@ def geo_location_config(request):
             if not allowed:
                 messages.error(request, _("Permission denied."))
             else:
-                employee_id = request.POST.get("employee_id")
-                employee = Employee.objects.filter(pk=employee_id).first()
+                employee_pk = request.POST.get("employee_id")
+                employee = Employee.objects.filter(pk=employee_pk).first()
                 if employee is None:
                     messages.error(request, _("Please choose a valid employee."))
                 else:
-                    profile, _ = EmployeeWfhProfile.objects.get_or_create(employee=employee, defaults={"home_radius_in_meters": 250})
+                    profile, created_profile = EmployeeWfhProfile.objects.get_or_create(
+                        employee_id=_object_id(employee),
+                        defaults={"home_radius_in_meters": 250},
+                    )
                     actor = getattr(request.user, "employee_get", None)
                     if action == "reset_home":
                         EmployeeWfhProfileHistory.objects.create(
@@ -233,7 +257,7 @@ def geo_location_config(request):
                         profile.save(update_fields=["requires_home_reconfiguration", "last_home_reset_at", "last_home_reset_by"])
                         messages.success(request, _("WFH home geofence reset."))
                     else:
-                        face = EmployeeFaceDetection.objects.filter(employee_id=employee).first()
+                        face = EmployeeFaceDetection.objects.filter(employee_id=_object_id(employee)).first()
                         old_face = getattr(face.image, "url", None) if face and getattr(face, "image", None) else None
                         EmployeeWfhProfileHistory.objects.create(
                             employee=employee,
@@ -251,7 +275,7 @@ def geo_location_config(request):
             form = GeoFencingSetupForm(request.POST, instance=location_obj, read_only=True)
             if form.is_valid():
                 obj = form.save(commit=False)
-                obj.company_id = company
+                obj.company_id = company_id
                 if int(getattr(obj, "wfh_radius_in_meters", 0) or 0) <= 0:
                     form.add_error("wfh_radius_in_meters", _("WFH radius must be greater than 0."))
                 else:
@@ -262,21 +286,19 @@ def geo_location_config(request):
     elif location_obj is not None:
         form = GeoFencingSetupForm(instance=location_obj, read_only=True)
     else:
-        initial = {"start": False, "wfh_start": True, "wfh_radius_in_meters": 250}
-        if company is None:
-            initial["company_id"] = None
-        else:
-            initial["company_id"] = company.id
-        form = GeoFencingSetupForm(initial=initial, read_only=True)
+        form = GeoFencingSetupForm(
+            initial={"start": False, "wfh_start": True, "wfh_radius_in_meters": 250, "company_id": company_id},
+            read_only=True,
+        )
 
     if request.method == "POST" and 'form' not in locals():
         try:
             location_obj = get_company_location(request)
         except Exception:
             location_obj = None
-        form = GeoFencingSetupForm(instance=location_obj, read_only=True) if location_obj is not None else GeoFencingSetupForm(initial={"start": False, "wfh_start": True, "wfh_radius_in_meters": 250, "company_id": company.id if company else None}, read_only=True)
+        form = GeoFencingSetupForm(instance=location_obj, read_only=True) if location_obj is not None else GeoFencingSetupForm(initial={"start": False, "wfh_start": True, "wfh_radius_in_meters": 250, "company_id": company_id}, read_only=True)
 
-    employees = Employee.objects.filter(employee_work_info__company_id=company).order_by("employee_first_name", "employee_last_name") if company else Employee.objects.none()
+    employees = Employee.objects.filter(employee_work_info__company_id=company_id).order_by("employee_first_name", "employee_last_name") if company_id and _is_model_instance(company) else Employee.objects.none()
 
     return render(
         request,
