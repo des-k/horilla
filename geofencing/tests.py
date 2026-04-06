@@ -113,7 +113,7 @@ class GeofencingPolicyTests(SimpleTestCase):
         self.assertIn('id="id_latitude"', content)
         self.assertIn('disabled', content)
         self.assertIn('Apply Home Reset', content)
-        self.assertIn('Apply Face Reset', content)
+        self.assertNotIn('Apply Face Reset', content)
 
     def test_web_settings_post_is_read_only(self):
         request = self.factory.post(

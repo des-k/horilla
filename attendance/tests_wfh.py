@@ -242,12 +242,18 @@ class WfhTemplateSourceRegressionTests(SimpleTestCase):
         self.assertIn("new_face_image", text)
         self.assertIn("No WFH history", text)
 
-    def test_geofencing_template_contains_wfh_controls(self):
+    def test_geofencing_template_contains_only_wfh_home_reset_controls(self):
         backend_root = Path(__file__).resolve().parents[1]
         text = (backend_root / "geofencing" / "templates" / "geo_config.html").read_text()
         self.assertIn("WFH Reset Actions", text)
         self.assertIn("{{ form.as_p }}", text)
         self.assertIn("reset_home", text)
+        self.assertNotIn("reset_face", text)
+
+    def test_face_detection_template_contains_face_reset_controls(self):
+        backend_root = Path(__file__).resolve().parents[1]
+        text = (backend_root / "facedetection" / "templates" / "face_config.html").read_text()
+        self.assertIn("Reset Face Detection For", text)
         self.assertIn("reset_face", text)
 
 

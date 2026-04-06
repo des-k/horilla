@@ -2,6 +2,7 @@ from django.contrib import messages
 from django.contrib.auth.decorators import login_required, permission_required
 from django.http import HttpResponseNotAllowed, QueryDict
 from django.shortcuts import render
+from django.utils import timezone
 from django.utils.decorators import method_decorator
 from django.utils.translation import gettext_lazy as _
 from django.views.decorators.csrf import csrf_exempt
@@ -11,12 +12,23 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from base.models import Company
+from employee.models import Employee
 from facedetection.forms import FaceDetectionSetupForm
 from facedetection.models import EmployeeFaceDetection, FaceDetection
 from attendance.models import EmployeeWfhProfile, EmployeeWfhProfileHistory
 from horilla.decorators import hx_request_required
 
 from .serializers import EmployeeFaceDetectionSerializer, FaceDetectionSerializer
+
+
+def _can_reset_face_detection(user):
+    return bool(
+        user
+        and (
+            getattr(user, "is_superuser", False)
+            or user.has_perm("attendance.reset_wfh_face_detection")
+        )
+    )
 
 
 def ensure_face_detection_enabled(company):
@@ -194,8 +206,37 @@ def get_facedetection(request):
 def face_detection_config(request):
     company = get_company(request)
     facedetection = ensure_face_detection_enabled(company)
+    company_id = getattr(company, "id", None)
 
-    if request.method == "POST":
+    if request.method == "POST" and request.POST.get("action") == "reset_face":
+        if not _can_reset_face_detection(request.user):
+            messages.error(request, _("Permission denied."))
+        else:
+            employee_pk = request.POST.get("employee_id")
+            employee = Employee.objects.filter(pk=employee_pk).first()
+            if employee is None:
+                messages.error(request, _("Please choose a valid employee."))
+            else:
+                profile, created_profile = EmployeeWfhProfile.objects.get_or_create(
+                    employee=employee,
+                    defaults={"home_radius_in_meters": 250},
+                )
+                actor = getattr(request.user, "employee_get", None)
+                face = EmployeeFaceDetection.objects.filter(employee_id=employee).first()
+                old_face = getattr(face.image, "url", None) if face and getattr(face, "image", None) else None
+                EmployeeWfhProfileHistory.objects.create(
+                    employee=employee,
+                    action_type=EmployeeWfhProfileHistory.ActionType.FACE_RESET,
+                    acted_by=actor,
+                    old_face_image=old_face,
+                    notes="Admin reset face detection",
+                )
+                profile.requires_face_reenrollment = True
+                profile.last_face_reset_at = timezone.now()
+                profile.last_face_reset_by = actor
+                profile.save(update_fields=["requires_face_reenrollment", "last_face_reset_at", "last_face_reset_by"])
+                messages.success(request, _("Face detection reset."))
+    elif request.method == "POST":
         form = FaceDetectionSetupForm(request.POST, instance=facedetection)
         if form.is_valid():
             facedetection = form.save(commit=False)
@@ -207,8 +248,15 @@ def face_detection_config(request):
     else:
         form = FaceDetectionSetupForm(instance=facedetection)
 
+    if request.method == "POST" and 'form' not in locals():
+        form = FaceDetectionSetupForm(instance=facedetection)
+
+    employees = Employee.objects.filter(employee_work_info__company_id=company_id).order_by(
+        "employee_first_name", "employee_last_name"
+    ) if company_id else Employee.objects.none()
+
     return render(
         request,
         "face_config.html",
-        {"form": form, "facedetection": facedetection},
+        {"form": form, "facedetection": facedetection, "employees": employees},
     )

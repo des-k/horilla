@@ -76,20 +76,6 @@
                     <button class="oh-btn oh-btn--secondary mt-2" type="submit">{% trans "Apply Home Reset" %}</button>
                 </form>
             </div>
-            <div class="col-md-6">
-                <form method="post">
-                    {% csrf_token %}
-                    <input type="hidden" name="action" value="reset_face">
-                    <label class="oh-input__label" for="resetFaceEmployee">{% trans "Reset Face Detection For" %}</label>
-                    <select class="oh-input w-100" id="resetFaceEmployee" name="employee_id" required>
-                        <option value="">{% trans "Select employee" %}</option>
-                        {% for emp in employees %}
-                        <option value="{{ emp.id }}">{{ emp }}</option>
-                        {% endfor %}
-                    </select>
-                    <button class="oh-btn oh-btn--secondary mt-2" type="submit">{% trans "Apply Face Reset" %}</button>
-                </form>
-            </div>
         </div>
     </div>
 </div>
