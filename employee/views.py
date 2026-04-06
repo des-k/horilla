@@ -107,6 +107,9 @@ from employee.models import (
     EmployeeWorkInformation,
     NoteFiles,
 )
+from attendance.models import EmployeeWfhProfileHistory
+from facedetection.models import EmployeeFaceDetection
+from geofencing.models import GeoFencing
 from horilla.decorators import (
     hx_request_required,
     logger,
@@ -215,6 +218,45 @@ def get_language_code(request):
     return JsonResponse({"language_code": language_code})
 
 
+
+
+def _build_wfh_profile_data(employee):
+    try:
+        wfh_profile = employee.wfh_profile
+    except Exception:
+        wfh_profile = None
+    company = getattr(getattr(employee, "employee_work_info", None), "company_id", None)
+    radius = 250
+    try:
+        if company is not None:
+            config = GeoFencing.objects.filter(company_id=company).first()
+            configured = int(getattr(config, "wfh_radius_in_meters", 0) or 0)
+            if configured > 0:
+                radius = configured
+    except Exception:
+        radius = 250
+    face = EmployeeFaceDetection.objects.filter(employee_id=employee).first()
+    data = {
+        "home_latitude": getattr(wfh_profile, "home_latitude", None),
+        "home_longitude": getattr(wfh_profile, "home_longitude", None),
+        "home_radius_in_meters": getattr(wfh_profile, "home_radius_in_meters", None) or radius,
+        "requires_home_reconfiguration": bool(getattr(wfh_profile, "requires_home_reconfiguration", False)),
+        "requires_face_reenrollment": bool(getattr(wfh_profile, "requires_face_reenrollment", False)),
+        "is_home_configured": bool(
+            getattr(wfh_profile, "is_home_configured", False)
+            and getattr(wfh_profile, "home_latitude", None) is not None
+            and getattr(wfh_profile, "home_longitude", None) is not None
+        ),
+        "face_image_url": getattr(getattr(face, "image", None), "url", None) if face else None,
+        "history": EmployeeWfhProfileHistory.objects.filter(employee=employee).order_by("-acted_at", "-id")[:10],
+    }
+    if data["home_latitude"] is not None and data["home_longitude"] is not None:
+        data["google_maps_link"] = f"https://maps.google.com/?q={data['home_latitude']},{data['home_longitude']}"
+    else:
+        data["google_maps_link"] = None
+    return data
+
+
 @login_required
 def employee_profile(request):
     """
@@ -235,39 +277,7 @@ def employee_profile(request):
 
     today = datetime.today()
     now = timezone.now()
-    try:
-        wfh_profile = employee.wfh_profile
-    except Exception:
-        wfh_profile = None
-    company = getattr(getattr(employee, "employee_work_info", None), "company_id", None)
-    radius = 250
-    try:
-        if company is not None:
-            config = GeoFencing.objects.filter(company_id=company).first()
-            configured = int(getattr(config, "wfh_radius_in_meters", 0) or 0)
-            if configured > 0:
-                radius = configured
-    except Exception:
-        radius = 250
-    face = EmployeeFaceDetection.objects.filter(employee_id=employee).first()
-    wfh_profile_data = {
-        "home_latitude": getattr(wfh_profile, "home_latitude", None),
-        "home_longitude": getattr(wfh_profile, "home_longitude", None),
-        "home_radius_in_meters": getattr(wfh_profile, "home_radius_in_meters", None) or radius,
-        "requires_home_reconfiguration": bool(getattr(wfh_profile, "requires_home_reconfiguration", False)),
-        "requires_face_reenrollment": bool(getattr(wfh_profile, "requires_face_reenrollment", False)),
-        "is_home_configured": bool(
-            getattr(wfh_profile, "is_home_configured", False)
-            and getattr(wfh_profile, "home_latitude", None) is not None
-            and getattr(wfh_profile, "home_longitude", None) is not None
-        ),
-        "face_image_url": getattr(getattr(face, "image", None), "url", None) if face else None,
-        "history": EmployeeWfhProfileHistory.objects.filter(employee=employee).order_by("-acted_at", "-id")[:10],
-    }
-    if wfh_profile_data["home_latitude"] is not None and wfh_profile_data["home_longitude"] is not None:
-        wfh_profile_data["google_maps_link"] = f"https://maps.google.com/?q={wfh_profile_data['home_latitude']},{wfh_profile_data['home_longitude']}"
-    else:
-        wfh_profile_data["google_maps_link"] = None
+    wfh_profile_data = _build_wfh_profile_data(employee)
     return render(
         request,
         "employee/profile/profile_view.html",
@@ -426,6 +436,7 @@ def employee_view_individual(request, obj_id, **kwargs):
         "current_date": date.today(),
         "leave_request_ids": json.dumps([]),
         "enabled_block_unblock": enabled_block_unblock,
+        "wfh_profile_data": _build_wfh_profile_data(employee),
     }
     # if the requesting user opens own data
     if request.user.employee_get == employee:

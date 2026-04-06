@@ -242,6 +242,13 @@ class WfhTemplateSourceRegressionTests(SimpleTestCase):
         self.assertIn("new_face_image", text)
         self.assertIn("No WFH history", text)
 
+    def test_employee_individual_template_contains_geo_face_info_card(self):
+        backend_root = Path(__file__).resolve().parents[1]
+        text = (backend_root / "employee" / "templates" / "employee" / "view" / "individual.html").read_text()
+        self.assertIn("Geo & Face Info", text)
+        self.assertIn("wfh_profile_data.face_image_url", text)
+        self.assertIn("Open in Google Maps", text)
+
     def test_geofencing_template_contains_only_wfh_home_reset_controls(self):
         backend_root = Path(__file__).resolve().parents[1]
         text = (backend_root / "geofencing" / "templates" / "geo_config.html").read_text()

@@ -292,6 +292,28 @@
 			</div>
 		</div>
 
+		<div class="oh-card mt-3 p-3">
+			<h4>{% trans "Geo & Face Info" %}</h4>
+			<div class="row">
+				<div class="col-12 col-md-4 mb-3">
+					<p class="mb-2"><strong>{% trans "Active Face Photo" %}:</strong></p>
+					{% if wfh_profile_data.face_image_url %}
+					<img src="{{ wfh_profile_data.face_image_url }}" alt="{% trans 'Face Photo' %}" style="max-width:140px;max-height:140px;border-radius:8px;object-fit:cover;">
+					{% else %}
+					<p>-</p>
+					{% endif %}
+				</div>
+				<div class="col-12 col-md-8">
+					<p><strong>{% trans "Latitude" %}:</strong> {{ wfh_profile_data.home_latitude|default:"-" }}</p>
+					<p><strong>{% trans "Longitude" %}:</strong> {{ wfh_profile_data.home_longitude|default:"-" }}</p>
+					<p><strong>{% trans "Radius" %}:</strong> {{ wfh_profile_data.home_radius_in_meters|default:"-" }} m</p>
+					{% if wfh_profile_data.google_maps_link %}
+					<p><a href="{{ wfh_profile_data.google_maps_link }}" target="_blank">{% trans "Open in Google Maps" %}</a></p>
+					{% endif %}
+				</div>
+			</div>
+		</div>
+
 		<div class="oh-table_sticky--wrapper">
 			{% if request.user.is_superuser or request.user|check_manager:employee or request.user == employee.employee_user_id %}
 				<div class="oh-sticky-dropdown--header" style="border:none;">
