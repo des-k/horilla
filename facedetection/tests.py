@@ -6,6 +6,7 @@ from django.contrib.sessions.middleware import SessionMiddleware
 from django.http import HttpResponse
 from django.template import engines
 from django.test import RequestFactory, TestCase
+from horilla.horilla_middlewares import _thread_locals
 
 from attendance.models import EmployeeWfhProfile
 from base.models import Company
@@ -22,8 +23,27 @@ def _fake_render(_request, template_name, context):
 class FaceDetectionConfigTests(TestCase):
     def setUp(self):
         self.factory = RequestFactory()
-        self.company = Company.objects.create(company="Face Co")
+
+        # Clear any stale request user that HorillaModel.save() could reuse.
+        if hasattr(_thread_locals, "request"):
+            _thread_locals.request = None
+
         self.user = User.objects.create_user(username="face-admin", password="pwd")
+
+        self.company = Company.objects.create(
+            company="Face Co",
+            address="Face Street",
+            country="ID",
+            state="DKI Jakarta",
+            city="Jakarta",
+            zip="12345",
+        )
+        Company.objects.filter(pk=self.company.pk).update(
+            created_by=self.user,
+            modified_by=self.user,
+        )
+        self.company.refresh_from_db()
+
         perms = Permission.objects.filter(codename__in=["add_localbackup", "reset_wfh_face_detection"])
         self.user.user_permissions.set(perms)
         self.user.has_perm = lambda perm, obj=None: perm in {"geofencing.add_localbackup", "attendance.reset_wfh_face_detection"}
