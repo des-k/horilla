@@ -346,8 +346,7 @@ def committed_work_type(employee, target_date: date, want: str) -> EffectiveWork
     3. legacy WFO fallback when the schedule cannot be resolved
 
     This is distinct from :func:`effective_work_type`, which intentionally exposes
-    waiting requests so the API can communicate request state and gate punch
-    permissions.
+    waiting requests for request-management surfaces.
     """
 
     req = pick_committed_request(employee, target_date, want)
@@ -356,6 +355,20 @@ def committed_work_type(employee, target_date: date, want: str) -> EffectiveWork
 
     sched = scheduled_attendance_mode(employee, target_date)
     return EffectiveWorkType(mode=sched, source="schedule", request=None)
+
+
+def punch_effective_work_type(employee, target_date: date, want: str) -> EffectiveWorkType:
+    """Resolve the work mode that controls punch truth for mobile/web punch flows.
+
+    FINAL rule:
+    - Pending or waiting work type requests must never affect punch truth.
+    - Only approved requests may override the scheduled/default work type.
+
+    This helper therefore mirrors :func:`committed_work_type` and is used by
+    check-in/check-out status surfaces and punch submission endpoints.
+    """
+
+    return committed_work_type(employee, target_date, want)
 
 def resolve_biometric_work_mode(employee, target_date: date) -> EffectiveWorkType:
     """Resolve work mode for biometric punches.

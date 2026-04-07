@@ -75,6 +75,27 @@ class WorkTypeRequestRuleTests(SimpleTestCase):
         self.assertEqual(eff.source, "approved_request")
         self.assertIs(eff.request, approved_req)
 
+    def test_punch_effective_work_type_ignores_waiting_request_and_keeps_schedule(self):
+        employee = SimpleNamespace(id=10)
+
+        with patch.object(work_type_request_rules, "pick_committed_request", return_value=None),              patch.object(work_type_request_rules, "scheduled_attendance_mode", return_value=AttendanceWorkMode.WFH):
+            eff = work_type_request_rules.punch_effective_work_type(employee, date(2026, 4, 7), "out")
+
+        self.assertEqual(eff.mode, AttendanceWorkMode.WFH)
+        self.assertEqual(eff.source, "schedule")
+        self.assertIsNone(eff.request)
+
+    def test_punch_effective_work_type_prefers_approved_request(self):
+        employee = SimpleNamespace(id=10)
+        approved_req = SimpleNamespace(mode=AttendanceWorkMode.WFA, status=WorkModeRequestStatus.APPROVED)
+
+        with patch.object(work_type_request_rules, "pick_committed_request", return_value=approved_req):
+            eff = work_type_request_rules.punch_effective_work_type(employee, date(2026, 4, 7), "out")
+
+        self.assertEqual(eff.mode, AttendanceWorkMode.WFA)
+        self.assertEqual(eff.source, "approved_request")
+        self.assertIs(eff.request, approved_req)
+
 
 class WorkTypeRequestValidationMatrixTests(SimpleTestCase):
     def _overlap_qs(self, *, range_exists=False, full_exists=False, same_scope_exists=False, capture=None):

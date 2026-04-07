@@ -72,6 +72,7 @@ from attendance.services.wfh_profile import (
 from attendance.services.work_type_request_rules import (
     effective_work_type,
     committed_work_type,
+    punch_effective_work_type,
     punch_allowed,
     auto_reject_wfa_waiting_for_date,
     apply_rejection_to_attendance,
@@ -796,13 +797,18 @@ def _resolve_effective_work_type(employee, target_date: date, want: str):
 
 
 def _resolve_committed_work_type(employee, target_date: date, want: str):
-    """Return the committed/read-model work mode for display surfaces.
-
-    Pending or waiting requests must not change the visible IN/OUT work mode on the
-    Check In / Check Out screen before approval. Request state still flows through
-    the dedicated request-status fields.
-    """
+    """Return the committed/read-model work mode for display surfaces."""
     eff = committed_work_type(employee, target_date, want)
+    return eff.mode, eff.source, eff.request
+
+
+def _resolve_punch_work_type(employee, target_date: date, want: str):
+    """Return the punch-truth work mode for gating and submission flows.
+
+    Pending/waiting requests must not affect punch truth. Only approved requests or
+    the scheduled/default work type may control check-in/check-out availability.
+    """
+    eff = punch_effective_work_type(employee, target_date, want)
     return eff.mode, eff.source, eff.request
 
 
@@ -1649,7 +1655,7 @@ class ClockInAPIView(APIView):
         attendance_date, day, minimum_hour, start_time_sec, end_time_sec, now_hhmm, _ = _api_resolve_attendance_date_and_day(shift, dt_now)
         update_punch_history(punch_log, attendance_date=attendance_date)
 
-        in_mode, in_source, in_req = _resolve_effective_work_type(employee, attendance_date, "in")
+        in_mode, in_source, in_req = _resolve_punch_work_type(employee, attendance_date, "in")
         if in_mode == AttendanceWorkMode.WFO:
             return _reject("WFO attendance must be recorded via biometric device.", status.HTTP_403_FORBIDDEN)
         wfh_error = _validate_wfh_punch(employee, in_mode, location, direction="in", actor=employee)
@@ -1717,7 +1723,7 @@ class ClockInAPIView(APIView):
 
         try:
             auto_reject_wfa_waiting_for_date(employee=employee, target_date=attendance_date, now_dt=dt_now, cutoff_in_dt=cutoff_in_dt, cutoff_out_dt=None)
-            in_mode, in_source, in_req = _resolve_effective_work_type(employee, attendance_date, "in")
+            in_mode, in_source, in_req = _resolve_punch_work_type(employee, attendance_date, "in")
         except Exception:
             pass
 
@@ -1755,7 +1761,7 @@ class ClockInAPIView(APIView):
         except ValidationError as error:
             return _reject(_extract_error_message(error), status.HTTP_400_BAD_REQUEST)
 
-        out_mode, out_source, out_req = _resolve_effective_work_type(employee, attendance_date, "out")
+        out_mode, out_source, out_req = _resolve_punch_work_type(employee, attendance_date, "out")
         attendance = Attendance.objects.filter(employee_id=employee, attendance_date=attendance_date).first()
         update_punch_history(punch_log, attendance=attendance, attendance_date=attendance_date, work_mode=in_mode, related_work_mode_request=in_req, decision_source=getattr(attendance, "reconciliation_source", None) if attendance else None)
         reconcile_attendance_punches(employee=employee, attendance_date=attendance_date)
@@ -1899,7 +1905,7 @@ class ClockOutAPIView(APIView):
         shift = work_info.shift_id
         attendance_date, day, minimum_hour, start_time_sec, end_time_sec, _, now_sec = _api_resolve_attendance_date_and_day(shift, dt_now)
         update_punch_history(punch_log, attendance_date=attendance_date)
-        out_mode, out_source, out_req = _resolve_effective_work_type(employee, attendance_date, "out")
+        out_mode, out_source, out_req = _resolve_punch_work_type(employee, attendance_date, "out")
 
         if out_mode == AttendanceWorkMode.WFO:
             return _reject("WFO attendance must be recorded via biometric device.", status.HTTP_403_FORBIDDEN)
@@ -1933,7 +1939,7 @@ class ClockOutAPIView(APIView):
             _cutoff_in_tmp = rules.get("cutoff_in_dt")
             _cutoff_in_tmp = _coerce_datetime_like(_cutoff_in_tmp, dt_now) if _cutoff_in_tmp else None
             auto_reject_wfa_waiting_for_date(employee=employee, target_date=attendance_date, now_dt=dt_now, cutoff_in_dt=_cutoff_in_tmp, cutoff_out_dt=window_end_dt)
-            out_mode, out_source, out_req = _resolve_effective_work_type(employee, attendance_date, "out")
+            out_mode, out_source, out_req = _resolve_punch_work_type(employee, attendance_date, "out")
         except Exception:
             pass
 
@@ -1974,7 +1980,7 @@ class ClockOutAPIView(APIView):
             logger.exception("clock_out_attendance_and_activity failed")
             return _reject(str(error), status.HTTP_400_BAD_REQUEST, attendance=existing_att, attendance_date=attendance_date)
 
-        in_mode, in_source, in_req = _resolve_effective_work_type(employee, attendance_date, "in")
+        in_mode, in_source, in_req = _resolve_punch_work_type(employee, attendance_date, "in")
         update_punch_history(punch_log, attendance=attendance, attendance_date=attendance_date, work_mode=out_mode, related_work_mode_request=out_req, decision_source=getattr(attendance, "reconciliation_source", None) if attendance else None)
         reconcile_attendance_punches(employee=employee, attendance_date=attendance_date)
 
@@ -3598,8 +3604,8 @@ class CheckingStatus(APIView):
             attendance_date = dt_now.date()
 
             try:
-                in_mode, in_source, in_req = _resolve_effective_work_type(employee, attendance_date, "in")
-                out_mode, out_source, out_req = _resolve_effective_work_type(employee, attendance_date, "out")
+                in_mode, in_source, in_req = _resolve_punch_work_type(employee, attendance_date, "in")
+                out_mode, out_source, out_req = _resolve_punch_work_type(employee, attendance_date, "out")
                 display_in_mode, display_in_source, _display_in_req = _resolve_committed_work_type(employee, attendance_date, "in")
                 display_out_mode, display_out_source, _display_out_req = _resolve_committed_work_type(employee, attendance_date, "out")
             except Exception:
@@ -3827,8 +3833,8 @@ class CheckingStatus(APIView):
             pass
 
         # Resolve punch-gating work type (pending requests can still block punch).
-        in_mode, in_source, in_req = _resolve_effective_work_type(employee, attendance_date, "in")
-        out_mode, out_source, out_req = _resolve_effective_work_type(employee, attendance_date, "out")
+        in_mode, in_source, in_req = _resolve_punch_work_type(employee, attendance_date, "in")
+        out_mode, out_source, out_req = _resolve_punch_work_type(employee, attendance_date, "out")
 
         # Resolve committed/display work type separately so pending requests do not
         # change the visible IN/OUT mode before approval.
