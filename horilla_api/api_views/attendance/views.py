@@ -63,6 +63,12 @@ import attendance.views.clock_in_out as cio  # Access underscore helpers exclude
 
 from attendance.services.attachment_validation import validate_uploaded_files
 from attendance.services.image_compression import _extract_error_message
+from attendance.services.wfh_profile import (
+    apply_wfh_face_reset,
+    apply_wfh_home_reset,
+    company_wfh_radius_for,
+    effective_wfh_radius_for,
+)
 from attendance.services.work_type_request_rules import (
     effective_work_type,
     committed_work_type,
@@ -848,8 +854,7 @@ def _company_obj_and_id(employee):
 
 
 def _company_wfh_radius(employee):
-    config = _get_company_geofencing(employee)
-    return int(getattr(config, "wfh_radius_in_meters", 250) or 250)
+    return company_wfh_radius_for(employee=employee)
 
 
 def _get_company_geofencing(employee):
@@ -945,7 +950,7 @@ def _serialize_wfh_profile(employee):
         "home_latitude": profile.home_latitude,
         "home_longitude": profile.home_longitude,
         "google_maps_link": _maps_link(profile.home_latitude, profile.home_longitude),
-        "radius_in_meters": profile.home_radius_in_meters,
+        "radius_in_meters": effective_wfh_radius_for(employee=employee, profile=profile),
         "is_home_configured": bool(profile.is_home_configured and profile.home_latitude is not None and profile.home_longitude is not None),
         "requires_home_reconfiguration": bool(profile.requires_home_reconfiguration),
         "requires_face_reenrollment": bool(profile.requires_face_reenrollment),
@@ -989,7 +994,7 @@ def _validate_wfh_punch(employee, mode, location, *, direction, actor=None):
             meters = geodesic((profile.home_latitude, profile.home_longitude), (lat, lng)).meters
         except Exception:
             return "Location is required for WFH attendance."
-        if meters > float(profile.home_radius_in_meters or config.wfh_radius_in_meters or 250):
+        if meters > float(effective_wfh_radius_for(employee=employee, profile=profile)):
             return "Anda berada di luar radius lokasi rumah yang diizinkan untuk WFH."
     return None
 
@@ -3257,20 +3262,7 @@ class AdminResetWfhHomeAPIView(APIView):
         if not employee_id:
             return Response({"error": "employee_id is required"}, status=status.HTTP_400_BAD_REQUEST)
         employee = get_object_or_404(Employee, pk=employee_id)
-        profile = _get_wfh_profile(employee)
-        _log_wfh_history(
-            employee=employee,
-            action_type=EmployeeWfhProfileHistory.ActionType.HOME_RESET,
-            acted_by=getattr(request.user, "employee_get", None),
-            old_lat=profile.home_latitude,
-            old_lng=profile.home_longitude,
-            old_radius=profile.home_radius_in_meters if profile.home_latitude is not None and profile.home_longitude is not None else None,
-            notes="Admin reset WFH home geofence",
-        )
-        profile.requires_home_reconfiguration = True
-        profile.last_home_reset_at = dj_timezone.now()
-        profile.last_home_reset_by = getattr(request.user, "employee_get", None)
-        profile.save(update_fields=["requires_home_reconfiguration", "last_home_reset_at", "last_home_reset_by"])
+        apply_wfh_home_reset(employee=employee, acted_by=getattr(request.user, "employee_get", None))
         return Response({"detail": "WFH home geofence reset.", "wfh_profile": _serialize_wfh_profile(employee)}, status=status.HTTP_200_OK)
 
 
@@ -3284,20 +3276,7 @@ class AdminResetWfhFaceAPIView(APIView):
         if not employee_id:
             return Response({"error": "employee_id is required"}, status=status.HTTP_400_BAD_REQUEST)
         employee = get_object_or_404(Employee, pk=employee_id)
-        profile = _get_wfh_profile(employee)
-        face = EmployeeFaceDetection.objects.filter(employee_id=employee).first()
-        old_face = getattr(face.image, "url", None) if face and getattr(face, "image", None) else None
-        _log_wfh_history(
-            employee=employee,
-            action_type=EmployeeWfhProfileHistory.ActionType.FACE_RESET,
-            acted_by=getattr(request.user, "employee_get", None),
-            old_face_image=old_face,
-            notes="Admin reset WFH face detection",
-        )
-        profile.requires_face_reenrollment = True
-        profile.last_face_reset_at = dj_timezone.now()
-        profile.last_face_reset_by = getattr(request.user, "employee_get", None)
-        profile.save(update_fields=["requires_face_reenrollment", "last_face_reset_at", "last_face_reset_by"])
+        apply_wfh_face_reset(employee=employee, acted_by=getattr(request.user, "employee_get", None))
         return Response({"detail": "WFH face detection reset.", "wfh_profile": _serialize_wfh_profile(employee)}, status=status.HTTP_200_OK)
 
 

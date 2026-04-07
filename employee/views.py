@@ -107,6 +107,7 @@ from employee.models import (
     EmployeeWorkInformation,
     NoteFiles,
 )
+from attendance.services.wfh_profile import effective_wfh_radius_for
 from attendance.models import EmployeeWfhProfileHistory
 from facedetection.models import EmployeeFaceDetection
 from geofencing.models import GeoFencing
@@ -225,21 +226,12 @@ def _build_wfh_profile_data(employee):
         wfh_profile = employee.wfh_profile
     except Exception:
         wfh_profile = None
-    company = getattr(getattr(employee, "employee_work_info", None), "company_id", None)
-    radius = 250
-    try:
-        if company is not None:
-            config = GeoFencing.objects.filter(company_id=company).first()
-            configured = int(getattr(config, "wfh_radius_in_meters", 0) or 0)
-            if configured > 0:
-                radius = configured
-    except Exception:
-        radius = 250
+    radius = effective_wfh_radius_for(employee=employee, profile=wfh_profile)
     face = EmployeeFaceDetection.objects.filter(employee_id=employee).first()
     data = {
         "home_latitude": getattr(wfh_profile, "home_latitude", None),
         "home_longitude": getattr(wfh_profile, "home_longitude", None),
-        "home_radius_in_meters": getattr(wfh_profile, "home_radius_in_meters", None) or radius,
+        "home_radius_in_meters": radius,
         "requires_home_reconfiguration": bool(getattr(wfh_profile, "requires_home_reconfiguration", False)),
         "requires_face_reenrollment": bool(getattr(wfh_profile, "requires_face_reenrollment", False)),
         "is_home_configured": bool(

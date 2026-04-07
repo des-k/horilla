@@ -15,8 +15,9 @@ from rest_framework.views import APIView
 from base.models import Company
 from employee.models import Employee
 from attendance.models import EmployeeWfhProfile, EmployeeWfhProfileHistory
+from attendance.services.wfh_profile import apply_wfh_face_reset, apply_wfh_home_reset
 from facedetection.models import EmployeeFaceDetection
-from geofencing.forms import GeoFencingSetupForm
+from geofencing.forms import GeoFencingSetupForm, WfhGeoFencingConfigForm
 
 from .models import GeoFencing
 from .policy import GEOFENCING_DISABLED_HELP_TEXT, GEOFENCING_DISABLED_NOTE, geofencing_is_effectively_enabled
@@ -224,6 +225,9 @@ def geo_location_config(request):
     except Exception:
         location_obj = None
 
+    main_form = None
+    wfh_form = None
+
     if request.method == "POST":
         action = request.POST.get("action")
         if action in {"reset_home", "reset_face"}:
@@ -236,67 +240,56 @@ def geo_location_config(request):
                 if employee is None:
                     messages.error(request, _("Please choose a valid employee."))
                 else:
-                    profile, created_profile = EmployeeWfhProfile.objects.get_or_create(
-                        employee_id=_object_id(employee),
-                        defaults={"home_radius_in_meters": 250},
-                    )
                     actor = getattr(request.user, "employee_get", None)
                     if action == "reset_home":
-                        EmployeeWfhProfileHistory.objects.create(
-                            employee=employee,
-                            action_type=EmployeeWfhProfileHistory.ActionType.HOME_RESET,
-                            acted_by=actor,
-                            old_home_latitude=profile.home_latitude,
-                            old_home_longitude=profile.home_longitude,
-                            old_radius_in_meters=profile.home_radius_in_meters if profile.home_latitude is not None and profile.home_longitude is not None else None,
-                            notes="Admin reset WFH home geofence",
-                        )
-                        profile.requires_home_reconfiguration = True
-                        profile.last_home_reset_at = timezone.now()
-                        profile.last_home_reset_by = actor
-                        profile.save(update_fields=["requires_home_reconfiguration", "last_home_reset_at", "last_home_reset_by"])
+                        apply_wfh_home_reset(employee=employee, acted_by=actor)
                         messages.success(request, _("WFH home geofence reset."))
                     else:
-                        face = EmployeeFaceDetection.objects.filter(employee_id=_object_id(employee)).first()
-                        old_face = getattr(face.image, "url", None) if face and getattr(face, "image", None) else None
-                        EmployeeWfhProfileHistory.objects.create(
-                            employee=employee,
-                            action_type=EmployeeWfhProfileHistory.ActionType.FACE_RESET,
-                            acted_by=actor,
-                            old_face_image=old_face,
-                            notes="Admin reset WFH face detection",
-                        )
-                        profile.requires_face_reenrollment = True
-                        profile.last_face_reset_at = timezone.now()
-                        profile.last_face_reset_by = actor
-                        profile.save(update_fields=["requires_face_reenrollment", "last_face_reset_at", "last_face_reset_by"])
+                        apply_wfh_face_reset(employee=employee, acted_by=actor)
                         messages.success(request, _("WFH face detection reset."))
-        else:
-            form = GeoFencingSetupForm(request.POST, instance=location_obj, read_only=True)
-            if form.is_valid():
-                obj = form.save(commit=False)
-                obj.company_id = company_id
-                if int(getattr(obj, "wfh_radius_in_meters", 0) or 0) <= 0:
-                    form.add_error("wfh_radius_in_meters", _("WFH radius must be greater than 0."))
-                else:
-                    obj.save()
-                    messages.success(request, _("WFH geofencing settings updated."))
+        elif action == "update_wfh_config":
+            if location_obj is not None:
+                wfh_form = WfhGeoFencingConfigForm(request.POST, instance=location_obj)
+            else:
+                initial_instance = GeoFencing(
+                    company_id=company,
+                    latitude=0.0,
+                    longitude=0.0,
+                    radius_in_meters=0,
+                    start=False,
+                    wfh_start=True,
+                    wfh_radius_in_meters=250,
+                )
+                wfh_form = WfhGeoFencingConfigForm(request.POST, instance=initial_instance)
+            if wfh_form.is_valid():
+                obj = wfh_form.save(commit=False)
+                obj.company_id = company
+                if location_obj is None:
+                    obj.start = False
+                    obj.latitude = getattr(obj, "latitude", 0.0) or 0.0
+                    obj.longitude = getattr(obj, "longitude", 0.0) or 0.0
+                    obj.radius_in_meters = getattr(obj, "radius_in_meters", 0) or 0
+                obj.save()
+                location_obj = obj
+                messages.success(request, _("WFH geofencing settings updated."))
             else:
                 messages.error(request, _("Please correct the errors below."))
-    elif location_obj is not None:
-        form = GeoFencingSetupForm(instance=location_obj, read_only=True)
-    else:
-        form = GeoFencingSetupForm(
-            initial={"start": False, "wfh_start": True, "wfh_radius_in_meters": 250, "company_id": company_id},
-            read_only=True,
-        )
 
-    if request.method == "POST" and 'form' not in locals():
-        try:
-            location_obj = get_company_location(request)
-        except Exception:
-            location_obj = None
-        form = GeoFencingSetupForm(instance=location_obj, read_only=True) if location_obj is not None else GeoFencingSetupForm(initial={"start": False, "wfh_start": True, "wfh_radius_in_meters": 250, "company_id": company_id}, read_only=True)
+    if main_form is None:
+        if location_obj is not None:
+            main_form = GeoFencingSetupForm(instance=location_obj, read_only=True, include_wfh_fields=False, hide_submit=True)
+        else:
+            main_form = GeoFencingSetupForm(
+                initial={"start": False, "company_id": company_id},
+                read_only=True,
+                include_wfh_fields=False,
+                hide_submit=True,
+            )
+    if wfh_form is None:
+        if location_obj is not None:
+            wfh_form = WfhGeoFencingConfigForm(instance=location_obj)
+        else:
+            wfh_form = WfhGeoFencingConfigForm(initial={"wfh_start": True, "wfh_radius_in_meters": 250, "company_id": company_id})
 
     employees = Employee.objects.filter(employee_work_info__company_id=company_id).order_by("employee_first_name", "employee_last_name") if company_id and _is_model_instance(company) else Employee.objects.none()
 
@@ -304,7 +297,8 @@ def geo_location_config(request):
         request,
         "geo_config.html",
         {
-            "form": form,
+            "form": main_form,
+            "wfh_form": wfh_form,
             "employees": employees,
             "location_capture_enabled": True,
             "geofencing_enabled": geofencing_is_effectively_enabled(company=company, geofencing=location_obj),

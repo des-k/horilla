@@ -307,6 +307,30 @@ class WfhApiIntegrationTests(AttendanceApiIntegrationMixin, APITestCase):
         self.assertEqual(data["wfh_profile"]["radius_in_meters"], 250)
         self.assertEqual(data["wfh_profile"]["history"], [])
 
+    def test_employee_profile_endpoint_prefers_current_company_wfh_radius_over_stale_profile_radius(self):
+        user, employee = self.create_employee("AliceRadius")
+        company = employee.employee_work_info.company_id
+        GeoFencing.objects.create(
+            company_id=company,
+            latitude=0,
+            longitude=0,
+            radius_in_meters=0,
+            start=False,
+            wfh_start=True,
+            wfh_radius_in_meters=450,
+        )
+        EmployeeWfhProfile.objects.create(
+            employee=employee,
+            home_latitude=-6.2,
+            home_longitude=106.8,
+            home_radius_in_meters=200,
+            is_home_configured=True,
+        )
+        response = self.auth_client(user).get(f"/api/employee/employees/{employee.id}/", format="json")
+        data = self._json(response)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(data["wfh_profile"]["radius_in_meters"], 450)
+
     def test_home_setup_endpoint_persists_profile_and_history(self):
         user, employee = self.create_employee("Bob")
         request = self.factory.post(
@@ -410,6 +434,9 @@ class WfhApiIntegrationTests(AttendanceApiIntegrationMixin, APITestCase):
         self.assertEqual(float(history.old_home_latitude), -6.22)
         self.assertEqual(float(history.old_home_longitude), 106.83)
         self.assertEqual(history.old_radius_in_meters, 300)
+        self.assertIsNone(profile.home_latitude)
+        self.assertIsNone(profile.home_longitude)
+        self.assertFalse(profile.is_home_configured)
 
     def test_admin_reset_face_endpoint_requires_face_permission_and_logs_old_image(self):
         admin_user, admin_employee = self.create_employee("AdminFace")
@@ -435,6 +462,8 @@ class WfhApiIntegrationTests(AttendanceApiIntegrationMixin, APITestCase):
         self.assertEqual(history.action_type, EmployeeWfhProfileHistory.ActionType.FACE_RESET)
         self.assertTrue(history.old_face_image)
         self.assertTrue(history.old_face_image.endswith(".jpg"))
+        face = EmployeeFaceDetection.objects.get(employee_id=employee)
+        self.assertFalse(bool(face.image))
 
     def test_reset_home_endpoint_rejects_face_only_permission(self):
         admin_user, _admin_employee = self.create_employee("AdminFaceOnly")

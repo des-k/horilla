@@ -16,6 +16,7 @@ from employee.models import Employee
 from facedetection.forms import FaceDetectionSetupForm
 from facedetection.models import EmployeeFaceDetection, FaceDetection
 from attendance.models import EmployeeWfhProfile, EmployeeWfhProfileHistory
+from attendance.services.wfh_profile import apply_wfh_face_reset
 from horilla.decorators import hx_request_required
 
 from .serializers import EmployeeFaceDetectionSerializer, FaceDetectionSerializer
@@ -217,24 +218,8 @@ def face_detection_config(request):
             if employee is None:
                 messages.error(request, _("Please choose a valid employee."))
             else:
-                profile, created_profile = EmployeeWfhProfile.objects.get_or_create(
-                    employee=employee,
-                    defaults={"home_radius_in_meters": 250},
-                )
                 actor = getattr(request.user, "employee_get", None)
-                face = EmployeeFaceDetection.objects.filter(employee_id=employee).first()
-                old_face = getattr(face.image, "url", None) if face and getattr(face, "image", None) else None
-                EmployeeWfhProfileHistory.objects.create(
-                    employee=employee,
-                    action_type=EmployeeWfhProfileHistory.ActionType.FACE_RESET,
-                    acted_by=actor,
-                    old_face_image=old_face,
-                    notes="Admin reset face detection",
-                )
-                profile.requires_face_reenrollment = True
-                profile.last_face_reset_at = timezone.now()
-                profile.last_face_reset_by = actor
-                profile.save(update_fields=["requires_face_reenrollment", "last_face_reset_at", "last_face_reset_by"])
+                apply_wfh_face_reset(employee=employee, acted_by=actor)
                 messages.success(request, _("Face detection reset."))
     elif request.method == "POST":
         form = FaceDetectionSetupForm(request.POST, instance=facedetection)

@@ -115,14 +115,13 @@ class GeofencingPolicyTests(SimpleTestCase):
         self.assertIn('Apply Home Reset', content)
         self.assertNotIn('Apply Face Reset', content)
 
-    def test_web_settings_post_is_read_only(self):
+    def test_web_settings_post_updates_only_wfh_config(self):
         request = self.factory.post(
             "/api/geofencing/config/",
             {
-                "latitude": 99.0,
-                "longitude": 99.0,
-                "radius_in_meters": 999,
-                "start": True,
+                "action": "update_wfh_config",
+                "wfh_start": "",
+                "wfh_radius_in_meters": 999,
             },
         )
         request.user = self.user
@@ -134,11 +133,13 @@ class GeofencingPolicyTests(SimpleTestCase):
             longitude=76.5,
             radius_in_meters=300,
             start=False,
+            wfh_start=True,
+            wfh_radius_in_meters=250,
         )
 
         with patch("geofencing.views.get_company", return_value=self.company), patch(
             "geofencing.views.get_company_location", return_value=location
-        ), patch("geofencing.views.render", side_effect=_fake_render):
+        ), patch.object(GeoFencing, "save", return_value=None) as save_mock, patch("geofencing.views.render", side_effect=_fake_render):
             response = geo_location_config(request)
 
         response.render()
@@ -147,6 +148,9 @@ class GeofencingPolicyTests(SimpleTestCase):
         self.assertEqual(location.longitude, 76.5)
         self.assertEqual(location.radius_in_meters, 300)
         self.assertFalse(location.start)
+        self.assertEqual(location.wfh_radius_in_meters, 999)
+        self.assertFalse(location.wfh_start)
+        save_mock.assert_called_once()
 
     def test_location_check_accepts_when_policy_disables_geofencing(self):
         request = self.api_factory.post(

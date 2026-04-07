@@ -16,9 +16,14 @@ class GeoFencingSetupForm(ModelForm):
         fields = "__all__"
         widgets = {"company_id": forms.HiddenInput()}
 
-    def __init__(self, *args, read_only=True, **kwargs):
+    def __init__(self, *args, read_only=True, include_wfh_fields=True, hide_submit=False, **kwargs):
         self.read_only = read_only
+        self.include_wfh_fields = include_wfh_fields
+        self.hide_submit = hide_submit
         super().__init__(*args, **kwargs)
+        if not self.include_wfh_fields:
+            self.fields.pop("wfh_start", None)
+            self.fields.pop("wfh_radius_in_meters", None)
         self.fields["start"].help_text = GEOFENCING_DISABLED_NOTE
 
         if self.read_only:
@@ -36,6 +41,30 @@ class GeoFencingSetupForm(ModelForm):
         """Render the form with the geofencing read-only state."""
         context = {
             "form": self,
-            "hide_submit": False,
+            "hide_submit": self.hide_submit,
         }
         return render_to_string("geofencing/geofencing_form.html", context)
+
+
+class WfhGeoFencingConfigForm(ModelForm):
+    verbose_name = _("WFH Geofence Configuration")
+
+    class Meta:
+        model = GeoFencing
+        fields = ["wfh_start", "wfh_radius_in_meters", "company_id"]
+        widgets = {"company_id": forms.HiddenInput()}
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if "wfh_start" in self.fields:
+            self.fields["wfh_start"].help_text = _("Enable or disable WFH home geofencing.")
+            self.fields["wfh_start"].widget.attrs.update({"class": "oh-switch__checkbox"})
+        if "wfh_radius_in_meters" in self.fields:
+            self.fields["wfh_radius_in_meters"].help_text = _("Global WFH radius in meters. Value must be greater than 0.")
+            self.fields["wfh_radius_in_meters"].widget.attrs.update({"class": "oh-input w-100", "min": 1})
+
+    def clean_wfh_radius_in_meters(self):
+        value = int(self.cleaned_data.get("wfh_radius_in_meters") or 0)
+        if value <= 0:
+            raise forms.ValidationError(_("WFH radius must be greater than 0."))
+        return value

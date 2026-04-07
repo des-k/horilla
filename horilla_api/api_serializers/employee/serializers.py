@@ -11,6 +11,7 @@ from employee.models import (
 )
 from horilla_documents.models import Document, DocumentRequest
 from attendance.models import EmployeeWfhProfileHistory
+from attendance.services.wfh_profile import effective_wfh_radius_for
 from geofencing.models import GeoFencing
 from facedetection.models import EmployeeFaceDetection
 
@@ -71,20 +72,7 @@ class EmployeeSerializer(serializers.ModelSerializer):
 
     def get_wfh_profile(self, obj):
         profile = getattr(obj, "wfh_profile", None)
-        company = None
-        try:
-            company = obj.get_company()
-        except Exception:
-            company = getattr(getattr(obj, "employee_work_info", None), "company_id", None)
-        radius = 250
-        try:
-            if company is not None:
-                config = GeoFencing.objects.filter(company_id=company).first()
-                configured = int(getattr(config, "wfh_radius_in_meters", 0) or 0)
-                if configured > 0:
-                    radius = configured
-        except Exception:
-            radius = 250
+        radius = effective_wfh_radius_for(employee=obj, profile=profile)
         face = EmployeeFaceDetection.objects.filter(employee_id=obj).first()
         history = [
             {
@@ -107,8 +95,7 @@ class EmployeeSerializer(serializers.ModelSerializer):
         ]
         home_latitude = getattr(profile, "home_latitude", None)
         home_longitude = getattr(profile, "home_longitude", None)
-        profile_radius = getattr(profile, "home_radius_in_meters", None)
-        effective_radius = profile_radius if profile_radius not in (None, 0, "") else radius
+        effective_radius = radius
         is_home_configured = bool(
             getattr(profile, "is_home_configured", False)
             and home_latitude is not None

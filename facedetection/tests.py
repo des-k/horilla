@@ -4,6 +4,7 @@ from django.contrib.auth.models import Permission, User
 from django.contrib.messages.storage.fallback import FallbackStorage
 from django.contrib.sessions.middleware import SessionMiddleware
 from django.http import HttpResponse
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.template import engines
 from django.test import RequestFactory, TestCase
 from horilla.horilla_middlewares import _thread_locals
@@ -11,7 +12,7 @@ from horilla.horilla_middlewares import _thread_locals
 from attendance.models import EmployeeWfhProfile
 from base.models import Company
 from employee.models import Employee, EmployeeWorkInformation
-from facedetection.models import FaceDetection
+from facedetection.models import FaceDetection, EmployeeFaceDetection
 from facedetection.views import face_detection_config
 
 
@@ -91,6 +92,10 @@ class FaceDetectionConfigTests(TestCase):
         self.assertLess(content.index('Enable Face Detection'), content.index('Reset Face Detection For'))
 
     def test_reset_face_post_sets_reenrollment_flag(self):
+        EmployeeFaceDetection.objects.create(
+            employee_id=self.target,
+            image=SimpleUploadedFile("face.jpg", b"fake-image-bytes", content_type="image/jpeg"),
+        )
         request = self.factory.post("/facedetection/", {"action": "reset_face", "employee_id": str(self.target.id)}, HTTP_HX_REQUEST="true")
         request.user = self.user
         self._attach_session_and_messages(request)
@@ -101,4 +106,6 @@ class FaceDetectionConfigTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         profile = EmployeeWfhProfile.objects.get(employee=self.target)
+        face = EmployeeFaceDetection.objects.get(employee_id=self.target)
         self.assertTrue(profile.requires_face_reenrollment)
+        self.assertFalse(bool(face.image))

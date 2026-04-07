@@ -38,7 +38,7 @@
 <div class="oh-card">
     <div class="oh-card__header d-flex justify-content-between align-items-center flex-wrap gap-2">
         <div>
-            <h3 class="oh-card__title mb-0">{% trans "Geofencing" %}</h3>
+            <h3 class="oh-card__title mb-0">{% trans "Geofence Configuration" %}</h3>
             <p class="text-muted mb-0">
                 {{ geofencing_policy_help }}
             </p>
@@ -55,6 +55,43 @@
     </div>
 </div>
 
+<div class="oh-card mt-3">
+    <div class="oh-card__header">
+        <h3 class="oh-card__title mb-0">{% trans "WFH Geofence Configuration" %}</h3>
+    </div>
+    <div class="oh-card__body">
+        <form method="post">
+            {% csrf_token %}
+            <input type="hidden" name="action" value="update_wfh_config">
+            {{ wfh_form.company_id }}
+            <div class="row g-3">
+                <div class="col-12 col-md-6" id="id_wfh_start_parent_div">
+                    <div class="oh-label__info">
+                        <label class="oh-label" for="id_wfh_start">{% trans wfh_form.wfh_start.label %}</label>
+                        {% if wfh_form.wfh_start.help_text %}
+                        <span class="oh-info mr-2" title="{{ wfh_form.wfh_start.help_text|safe }}"></span>
+                        {% endif %}
+                    </div>
+                    <div class="oh-switch" style="width: 30px;">{{ wfh_form.wfh_start }}</div>
+                    {{ wfh_form.wfh_start.errors }}
+                </div>
+                <div class="col-12 col-md-6" id="id_wfh_radius_in_meters_parent_div">
+                    <div class="oh-label__info">
+                        <label class="oh-label required-star" for="id_wfh_radius_in_meters">{% trans wfh_form.wfh_radius_in_meters.label %}</label>
+                        {% if wfh_form.wfh_radius_in_meters.help_text %}
+                        <span class="oh-info mr-2" title="{{ wfh_form.wfh_radius_in_meters.help_text|safe }}"></span>
+                        {% endif %}
+                    </div>
+                    {{ wfh_form.wfh_radius_in_meters }}
+                    {{ wfh_form.wfh_radius_in_meters.errors }}
+                </div>
+            </div>
+            <div class="d-flex flex-row-reverse">
+                <button type="submit" class="oh-btn oh-btn--secondary mt-3 mr-0 pl-4 pr-5 oh-btn--w-100-resp">{% trans 'Save' %}</button>
+            </div>
+        </form>
+    </div>
+</div>
 
 <div class="oh-card mt-3">
     <div class="oh-card__header">
