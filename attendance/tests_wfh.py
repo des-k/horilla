@@ -265,6 +265,17 @@ class WfhTemplateSourceRegressionTests(SimpleTestCase):
         self.assertIn("Reset Face Detection For", text)
         self.assertIn("reset_face", text)
 
+    def test_geo_face_partial_forms_submit_back_to_partial_endpoints(self):
+        backend_root = Path(__file__).resolve().parents[1]
+        geo_text = (backend_root / "geofencing" / "templates" / "geo_config.html").read_text()
+        face_text = (backend_root / "facedetection" / "templates" / "face_config.html").read_text()
+        self.assertIn('action=\"{% url \'geo-config\' %}\"', geo_text)
+        self.assertIn('hx-post=\"{% url \'geo-config\' %}\"', geo_text)
+        self.assertIn('hx-target="#geo"', geo_text)
+        self.assertIn('action=\"{% url \'face-config\' %}\"', face_text)
+        self.assertIn('hx-post=\"{% url \'face-config\' %}\"', face_text)
+        self.assertIn('hx-target="#face"', face_text)
+
 
 @override_settings(MEDIA_ROOT="/tmp/horilla_wfh_test_media")
 class WfhApiIntegrationTests(AttendanceApiIntegrationMixin, APITestCase):
