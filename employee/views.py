@@ -51,6 +51,7 @@ from base.methods import (
     filtersubordinatesemployeemodel,
     get_key_instances,
     get_pagination,
+    get_subordinate_employee_ids,
     sortby,
 )
 from base.models import (
@@ -192,19 +193,49 @@ BLOCKED_EXTENSIONS = {
 }
 
 
+def _employee_directory_allowed_ids(request):
+    """
+    Returns the allowed employee IDs for the employee directory.
+
+    - Admin / users with employee.view_employee can see everyone.
+    - Managers can see themselves plus their full subordinate tree.
+    - Staff can see only themselves.
+    """
+    employee = getattr(request.user, "employee_get", None)
+    if employee is None:
+        return []
+    if request.user.has_perm("employee.view_employee"):
+        return None
+    subordinate_ids = get_subordinate_employee_ids(request)
+    return list({employee.id, *subordinate_ids})
+
+
+
+def _employee_directory_queryset(request, queryset):
+    """Restrict employee directory querysets by the current user's scope."""
+    allowed_ids = _employee_directory_allowed_ids(request)
+    if allowed_ids is None:
+        return queryset
+    if not allowed_ids:
+        return queryset.none()
+    return queryset.filter(id__in=allowed_ids).distinct()
+
+
+
+def _can_access_employee_directory(request, *args, **kwargs):
+    """Any authenticated employee can open the employee directory."""
+    return getattr(request.user, "employee_get", None) is not None
+
+
+
 def _check_reporting_manager(request, *args, **kwargs):
     if kwargs.get("obj_id"):
         obj_id = kwargs["obj_id"]
-        emp = Employee.objects.get(id=obj_id)
-        re_manager = None
-        if emp.employee_work_info.reporting_manager_id != None:
-            re_manager = emp.employee_work_info.reporting_manager_id
-        employee = request.user.employee_get
-        if re_manager != None:
-            return re_manager == employee
-        else:
-            return False
-    return request.user.employee_get.reporting_manager.exists()
+        allowed_ids = _employee_directory_allowed_ids(request)
+        if allowed_ids is None:
+            return True
+        return obj_id in allowed_ids
+    return _can_access_employee_directory(request, *args, **kwargs)
 
 
 @login_required
@@ -1136,16 +1167,17 @@ def employee_view(request):
 
     queryset = Employee.objects.filter()
     filter_obj = EmployeeFilter(request.GET, queryset=queryset).qs
+    filter_obj = _employee_directory_queryset(request, filter_obj)
     if request.GET.get("is_active") != "False":
         filter_obj = filter_obj.filter(is_active=True)
 
     update_fields = BulkUpdateFieldForm()
     data_dict = parse_qs(previous_data)
     get_key_instances(Employee, data_dict)
-    emp = Employee.objects.filter()
+    emp = _employee_directory_queryset(request, Employee.objects.filter())
 
     # Store the employees in the session
-    request.session["filtered_employees"] = [employee.id for employee in queryset]
+    request.session["filtered_employees"] = [employee.id for employee in filter_obj]
 
     return render(
         request,
@@ -1864,6 +1896,7 @@ def employee_filter_view(request):
     queryset = Employee.objects.filter()
     selected_company = request.session.get("selected_company")
     employees = EmployeeFilter(request.GET, queryset=queryset).qs
+    employees = _employee_directory_queryset(request, employees)
     if request.GET.get("is_active") != "False":
         employees = employees.filter(is_active=True)
     if (
@@ -1902,7 +1935,11 @@ def employee_filter_view(request):
 
 
 @login_required
-@manager_can_enter("employee.view_employee")
+@enter_if_accessible(
+    feature="employee_view",
+    perm="employee.view_employee",
+    method=_can_access_employee_directory,
+)
 @hx_request_required
 def employee_card(request):
     """
@@ -1912,9 +1949,7 @@ def employee_card(request):
     search = request.GET.get("search")
     if isinstance(search, type(None)):
         search = ""
-    employees = filtersubordinatesemployeemodel(
-        request, Employee.objects.all(), "employee.view_employee"
-    )
+    employees = _employee_directory_queryset(request, Employee.objects.all())
     if request.GET.get("is_active") is None:
         filter_obj = EmployeeFilter(
             request.GET,
@@ -1941,7 +1976,11 @@ def employee_card(request):
 
 
 @login_required
-@manager_can_enter("employee.view_employee")
+@enter_if_accessible(
+    feature="employee_view",
+    perm="employee.view_employee",
+    method=_can_access_employee_directory,
+)
 @hx_request_required
 def employee_list(request):
     """
@@ -1963,9 +2002,7 @@ def employee_list(request):
             request.GET,
             queryset=Employee.objects.filter(employee_first_name__icontains=search),
         )
-    employees = filtersubordinatesemployeemodel(
-        request, filter_obj.qs, "employee.view_employee"
-    )
+    employees = _employee_directory_queryset(request, filter_obj.qs)
     employees = sortby(request, employees, "orderby")
     page_number = request.GET.get("page")
     return render(
@@ -2349,9 +2386,7 @@ def employee_search(request):
     template = "employee_personal_info/employee_card.html"
     if view == "list":
         template = "employee_personal_info/employee_list.html"
-    employees = filtersubordinatesemployeemodel(
-        request, employees, "employee.view_employee"
-    )
+    employees = _employee_directory_queryset(request, employees)
     employees = sortby(request, employees, "orderby")
     data_dict = parse_qs(previous_data)
     get_key_instances(Employee, data_dict)
