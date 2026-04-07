@@ -46,6 +46,18 @@ def effective_wfh_radius_for(*, employee: Any = None, company: Any = None, profi
     return profile_radius if profile_radius > 0 else default
 
 
+def sync_wfh_radius_profiles_for_company(*, company: Any = None, employee: Any = None, radius: Any = None) -> int:
+    company = _resolve_company(employee=employee, company=company)
+    if company is None:
+        return 0
+    normalized_radius = int(radius or 0)
+    if normalized_radius <= 0:
+        normalized_radius = company_wfh_radius_for(company=company)
+    return EmployeeWfhProfile.objects.filter(
+        employee__employee_work_info__company_id=company
+    ).exclude(home_radius_in_meters=normalized_radius).update(home_radius_in_meters=normalized_radius)
+
+
 def apply_wfh_home_reset(*, employee, acted_by=None):
     profile, _ = EmployeeWfhProfile.objects.get_or_create(
         employee=employee,

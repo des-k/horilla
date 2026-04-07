@@ -15,7 +15,7 @@ from rest_framework.views import APIView
 from base.models import Company
 from employee.models import Employee
 from attendance.models import EmployeeWfhProfile, EmployeeWfhProfileHistory
-from attendance.services.wfh_profile import apply_wfh_face_reset, apply_wfh_home_reset
+from attendance.services.wfh_profile import apply_wfh_face_reset, apply_wfh_home_reset, sync_wfh_radius_profiles_for_company
 from facedetection.models import EmployeeFaceDetection
 from geofencing.forms import GeoFencingSetupForm, WfhGeoFencingConfigForm
 
@@ -270,6 +270,7 @@ def geo_location_config(request):
                     obj.longitude = getattr(obj, "longitude", 0.0) or 0.0
                     obj.radius_in_meters = getattr(obj, "radius_in_meters", 0) or 0
                 obj.save()
+                sync_wfh_radius_profiles_for_company(company=company, radius=obj.wfh_radius_in_meters)
                 location_obj = obj
                 messages.success(request, _("WFH geofencing settings updated."))
             else:

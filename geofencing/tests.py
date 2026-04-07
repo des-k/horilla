@@ -139,7 +139,9 @@ class GeofencingPolicyTests(SimpleTestCase):
 
         with patch("geofencing.views.get_company", return_value=self.company), patch(
             "geofencing.views.get_company_location", return_value=location
-        ), patch.object(GeoFencing, "save", return_value=None) as save_mock, patch("geofencing.views.render", side_effect=_fake_render):
+        ), patch.object(GeoFencing, "save", return_value=None) as save_mock, patch(
+            "geofencing.views.sync_wfh_radius_profiles_for_company"
+        ) as sync_mock, patch("geofencing.views.render", side_effect=_fake_render):
             response = geo_location_config(request)
 
         response.render()
@@ -151,6 +153,7 @@ class GeofencingPolicyTests(SimpleTestCase):
         self.assertEqual(location.wfh_radius_in_meters, 999)
         self.assertFalse(location.wfh_start)
         save_mock.assert_called_once()
+        sync_mock.assert_called_once_with(company=self.company, radius=999)
 
     def test_location_check_accepts_when_policy_disables_geofencing(self):
         request = self.api_factory.post(

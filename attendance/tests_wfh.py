@@ -331,6 +331,43 @@ class WfhApiIntegrationTests(AttendanceApiIntegrationMixin, APITestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(data["wfh_profile"]["radius_in_meters"], 450)
 
+    def test_company_wfh_radius_sync_updates_existing_profile_snapshot(self):
+        user, employee = self.create_employee("AliceRadiusSync")
+        company = employee.employee_work_info.company_id
+        GeoFencing.objects.create(
+            company_id=company,
+            latitude=0,
+            longitude=0,
+            radius_in_meters=0,
+            start=False,
+            wfh_start=True,
+            wfh_radius_in_meters=250,
+        )
+        profile = EmployeeWfhProfile.objects.create(
+            employee=employee,
+            home_latitude=-6.2,
+            home_longitude=106.8,
+            home_radius_in_meters=200,
+            is_home_configured=True,
+        )
+
+        from attendance.services.wfh_profile import sync_wfh_radius_profiles_for_company
+
+        geo = GeoFencing.objects.get(company_id=company)
+        geo.wfh_radius_in_meters = 475
+        with patch.object(GeoFencing, "full_clean"):
+            geo.save(update_fields=["wfh_radius_in_meters"])
+
+        updated = sync_wfh_radius_profiles_for_company(company=company, radius=475)
+        profile.refresh_from_db()
+
+        self.assertEqual(updated, 1)
+        self.assertEqual(profile.home_radius_in_meters, 475)
+        response = self.auth_client(user).get(f"/api/employee/employees/{employee.id}/", format="json")
+        data = self._json(response)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(data["wfh_profile"]["radius_in_meters"], 475)
+
     def test_home_setup_endpoint_persists_profile_and_history(self):
         user, employee = self.create_employee("Bob")
         request = self.factory.post(
