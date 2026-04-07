@@ -1063,6 +1063,7 @@ def request_attendance_view(request):
     current_my = list(my_requests.object_list)
     current_app = list(approvals.object_list)
     current_hist = list(approval_history.object_list)
+    history_can_revoke = {obj.id: bool(build_permission_flags(obj, request.user).get("can_revoke")) for obj in current_hist}
 
     return render(
         request,
@@ -1090,6 +1091,7 @@ def request_attendance_view(request):
             "app_shift_info": _web_shift_info_map(current_app),
             "history_shift_info": _web_shift_info_map(current_hist),
             "history_time_surface": {obj.id: build_attendance_request_time_surface(obj) for obj in current_hist},
+            "history_can_revoke": history_can_revoke,
             "pd_my": pd_my,
             "pd_app": pd_app,
             "pd_app_hist": pd_app_hist,

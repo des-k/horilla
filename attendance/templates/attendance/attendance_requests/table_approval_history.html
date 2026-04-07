@@ -96,6 +96,7 @@
             <div class="oh-sticky-table__th">{% trans "Reason / Note" %}</div>
             <div class="oh-sticky-table__th">{% trans "Action By" %}</div>
             <div class="oh-sticky-table__th">{% trans "Action At" %}</div>
+            <div class="oh-sticky-table__th oh-sticky-table__right">{% trans "Actions" %}</div>
           </div>
         </div>
         <div class="oh-sticky-table__tbody">
@@ -171,6 +172,25 @@
                 <div class="oh-sticky-table__td"><span class="text-truncate" style="max-width: 320px; display: inline-block;">{% if r.request_description %}{{ r.request_description }}{% elif r.reason %}{{ r.reason }}{% else %}-{% endif %}</span></div>
                 <div class="oh-sticky-table__td">{{ r.action_actor_display|default:'-' }}</div>
                 <div class="oh-sticky-table__td">{% if r.action_at %}{{ r.action_at|date:"Y-m-d H:i" }}{% else %}-{% endif %}</div>
+                <div class="oh-sticky-table__td oh-sticky-table__right">
+                  <div class="d-flex" style="gap: 6px; justify-content: flex-end; flex-wrap: wrap;">
+                    <button class="oh-btn oh-btn--light-bkg" title="{% trans 'View Details' %}"
+                      data-toggle="oh-modal-toggle" data-target="#validateAttendanceRequest"
+                      hx-get="{% url 'validate-attendance-request' r.id %}"
+                      hx-target="#validateAttendanceRequestModalBody"
+                      onclick="event.preventDefault()">
+                      <ion-icon name="eye-outline"></ion-icon>
+                    </button>
+                    {% if history_can_revoke|get_item:r.id %}
+                      <a class="oh-btn oh-btn--warning" title="{% trans 'Revoke Approval' %}" href="{% url 'revoke-validate-attendance-request' r.id %}"
+                        onclick="return confirm('{% trans "Revoke this approval and restore raw attendance?" %}');">
+                        <ion-icon name="refresh-outline"></ion-icon>
+                      </a>
+                    {% else %}
+                      <span class="text-muted">-</span>
+                    {% endif %}
+                  </div>
+                </div>
               </div>
             {% endfor %}
           {% else %}
