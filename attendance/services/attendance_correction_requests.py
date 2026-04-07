@@ -19,6 +19,7 @@ from attendance.models import (
     AttendanceRequestFile,
 )
 from attendance.services.reconciliation import recompute_attendance
+from notifications.domain_notifications import send_attendance_request_notification
 from base.methods import get_subordinate_employee_ids
 from employee.models import Employee
 
@@ -102,6 +103,42 @@ def _owner_user(request_obj: AttendanceCorrectionRequest):
         return request_obj.employee_id.employee_user_id
     except Exception:
         return None
+
+
+def _approver_user(request_obj: AttendanceCorrectionRequest):
+    employee = getattr(request_obj, 'employee_id', None)
+    work_info = None
+    if employee is not None:
+        try:
+            work_info = employee.employee_work_info
+        except Exception:
+            work_info = None
+    manager = getattr(work_info, 'reporting_manager_id', None)
+    if manager is None:
+        try:
+            from employee.models import EmployeeWorkInformation
+
+            employee_id = getattr(request_obj, 'employee_id_id', None) or getattr(employee, 'id', None)
+            if employee_id:
+                work_info = EmployeeWorkInformation.objects.filter(employee_id=employee_id).select_related('reporting_manager_id__employee_user_id').first()
+                manager = getattr(work_info, 'reporting_manager_id', None)
+        except Exception:
+            manager = None
+    return getattr(manager, 'employee_user_id', None)
+
+
+def _notify_request_event(*, request_obj: AttendanceCorrectionRequest, actor_user, event: str, recipient_role: str, reason: str | None = None):
+    recipient = _approver_user(request_obj) if recipient_role == 'approver' else _owner_user(request_obj)
+    if recipient is None:
+        return
+    send_attendance_request_notification(
+        actor=actor_user,
+        recipient=recipient,
+        attendance=request_obj,
+        event=event,
+        recipient_role=recipient_role,
+        reason=reason,
+    )
 
 
 def user_is_request_owner(user, request_obj: AttendanceCorrectionRequest) -> bool:
@@ -242,6 +279,12 @@ def create_request(*, employee: Employee, actor_user, payload: dict, uploaded_fi
     except IntegrityError:
         raise AttendanceCorrectionError({"scope": "Another active attendance correction request already exists for this slot."})
     _create_attachment_links(request_obj, uploaded_files)
+    _notify_request_event(
+        request_obj=request_obj,
+        actor_user=actor_user,
+        event='attendance_request_created',
+        recipient_role='approver',
+    )
     return request_obj
 
 
@@ -304,6 +347,12 @@ def approve_request(*, request_obj: AttendanceCorrectionRequest, actor_user):
     request_obj.save()
     _sync_session_locks(request_obj)
     recompute_attendance(request_obj.employee_id, request_obj.attendance_date)
+    _notify_request_event(
+        request_obj=request_obj,
+        actor_user=actor_user,
+        event='attendance_request_approved',
+        recipient_role='requester',
+    )
     return request_obj
 
 
@@ -323,6 +372,13 @@ def reject_request(*, request_obj: AttendanceCorrectionRequest, actor_user, reas
     request_obj.action_type = AttendanceRequestActionType.REJECTED
     request_obj.save()
     _sync_session_locks(request_obj)
+    _notify_request_event(
+        request_obj=request_obj,
+        actor_user=actor_user,
+        event='attendance_request_rejected',
+        recipient_role='requester',
+        reason=reason,
+    )
     return request_obj
 
 
@@ -343,6 +399,13 @@ def revoke_request(*, request_obj: AttendanceCorrectionRequest, actor_user, reas
     request_obj.save()
     _sync_session_locks(request_obj)
     recompute_attendance(request_obj.employee_id, request_obj.attendance_date)
+    _notify_request_event(
+        request_obj=request_obj,
+        actor_user=actor_user,
+        event='attendance_request_revoked',
+        recipient_role='requester',
+        reason=reason,
+    )
     return request_obj
 
 
@@ -358,4 +421,10 @@ def cancel_request(*, request_obj: AttendanceCorrectionRequest, actor_user):
     request_obj.action_type = AttendanceRequestActionType.CANCELED
     request_obj.save()
     _sync_session_locks(request_obj)
+    _notify_request_event(
+        request_obj=request_obj,
+        actor_user=actor_user,
+        event='attendance_request_canceled',
+        recipient_role='requester',
+    )
     return request_obj

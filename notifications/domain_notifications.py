@@ -127,6 +127,16 @@ def send_attendance_request_notification(*, actor, recipient, attendance, event:
             'verb_fr': f'La demande de présence pour le {date_label} a été annulée',
         }
         status = 'canceled'
+    elif event == 'attendance_request_revoked':
+        verb = f'Your attendance request for {date_label} has been revoked'
+        message = f'Persetujuan koreksi attendance {date_label} direvoke. Lihat alasannya.'
+        translations = {
+            'verb_ar': f'تم سحب الموافقة على طلب الحضور في {date_label}',
+            'verb_de': f'Die Genehmigung des Anwesenheitsantrags für den {date_label} wurde widerrufen',
+            'verb_es': f'Se revocó la aprobación de la solicitud de asistencia para la fecha {date_label}',
+            'verb_fr': f"L'approbation de la demande de présence pour le {date_label} a été révoquée",
+        }
+        status = 'revoked'
     else:
         raise ValueError(f'Unsupported attendance event: {event}')
 

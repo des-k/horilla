@@ -45,7 +45,7 @@ class InAppNotificationPayloadTests(AttendanceApiIntegrationMixin, TestCase):
         self.assertEqual(notification.data['mobile_route'], '/attendance_request')
         self.assertEqual(notification.data['mobile_args']['tab'], 'attendance_request')
 
-    def test_attendance_reject_and_cancel_payloads_include_reason_and_route_contract(self):
+    def test_attendance_reject_cancel_and_revoke_payloads_include_reason_and_route_contract(self):
         attendance = Attendance.objects.create(
             employee_id=self.owner,
             attendance_date=date(2026, 3, 25),
@@ -69,16 +69,27 @@ class InAppNotificationPayloadTests(AttendanceApiIntegrationMixin, TestCase):
             recipient_role='requester',
             reason='Requester canceled',
         )
+        send_attendance_request_notification(
+            actor=self.manager,
+            recipient=self.owner_user,
+            attendance=attendance,
+            event='attendance_request_revoked',
+            recipient_role='requester',
+            reason='Correction superseded by raw punch',
+        )
 
-        events = [n.data['event'] for n in Notification.objects.order_by('id')]
-        self.assertEqual(events, ['attendance_request_rejected', 'attendance_request_canceled'])
-        rejected = Notification.objects.order_by('id').first()
-        canceled = Notification.objects.order_by('id').last()
+        notifications = list(Notification.objects.order_by('id'))
+        events = [n.data['event'] for n in notifications]
+        self.assertEqual(events, ['attendance_request_rejected', 'attendance_request_canceled', 'attendance_request_revoked'])
+        rejected, canceled, revoked = notifications
         self.assertEqual(rejected.data['reason'], 'Outside attendance window')
         self.assertEqual(rejected.data['status'], 'rejected')
         self.assertEqual(canceled.data['reason'], 'Requester canceled')
         self.assertEqual(canceled.data['status'], 'canceled')
         self.assertEqual(canceled.data['mobile_args']['request_id'], attendance.id)
+        self.assertEqual(revoked.data['reason'], 'Correction superseded by raw punch')
+        self.assertEqual(revoked.data['status'], 'revoked')
+        self.assertEqual(revoked.data['mobile_route'], '/attendance_request')
 
     def test_leave_notification_persists_standard_payload(self):
         leave_type = LeaveType.objects.create(name='Annual Leave', require_approval='yes')
