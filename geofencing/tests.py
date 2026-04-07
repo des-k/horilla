@@ -136,23 +136,34 @@ class GeofencingPolicyTests(SimpleTestCase):
             wfh_start=True,
             wfh_radius_in_meters=250,
         )
+        saved_obj = GeoFencing(
+            latitude=10.5,
+            longitude=76.5,
+            radius_in_meters=300,
+            start=False,
+            wfh_start=False,
+            wfh_radius_in_meters=999,
+        )
 
         with patch("geofencing.views.get_company", return_value=self.company), patch(
             "geofencing.views.get_company_location", return_value=location
-        ), patch.object(GeoFencing, "save", return_value=None) as save_mock, patch(
+        ), patch.object(GeoFencing.objects, "update_or_create", return_value=(saved_obj, False)) as update_mock, patch(
             "geofencing.views.sync_wfh_radius_profiles_for_company"
         ) as sync_mock, patch("geofencing.views.render", side_effect=_fake_render):
             response = geo_location_config(request)
 
         response.render()
+        content = response.content.decode()
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(location.latitude, 10.5)
-        self.assertEqual(location.longitude, 76.5)
-        self.assertEqual(location.radius_in_meters, 300)
-        self.assertFalse(location.start)
-        self.assertEqual(location.wfh_radius_in_meters, 999)
-        self.assertFalse(location.wfh_start)
-        save_mock.assert_called_once()
+        self.assertNotIn('value="250"', content)
+        self.assertIn('value="999"', content)
+        update_mock.assert_called_once_with(
+            company_id=self.company,
+            defaults={
+                "wfh_start": False,
+                "wfh_radius_in_meters": 999,
+            },
+        )
         sync_mock.assert_called_once_with(company=self.company, radius=999)
 
     def test_location_check_accepts_when_policy_disables_geofencing(self):

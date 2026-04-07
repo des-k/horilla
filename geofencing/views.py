@@ -248,10 +248,9 @@ def geo_location_config(request):
                         apply_wfh_face_reset(employee=employee, acted_by=actor)
                         messages.success(request, _("WFH face detection reset."))
         elif action == "update_wfh_config":
-            if location_obj is not None:
-                wfh_form = WfhGeoFencingConfigForm(request.POST, instance=location_obj)
-            else:
-                initial_instance = GeoFencing(
+            bound_instance = location_obj
+            if bound_instance is None:
+                bound_instance = GeoFencing(
                     company_id=company,
                     latitude=0.0,
                     longitude=0.0,
@@ -260,18 +259,29 @@ def geo_location_config(request):
                     wfh_start=True,
                     wfh_radius_in_meters=250,
                 )
-                wfh_form = WfhGeoFencingConfigForm(request.POST, instance=initial_instance)
+            wfh_form = WfhGeoFencingConfigForm(request.POST, instance=bound_instance)
             if wfh_form.is_valid():
-                obj = wfh_form.save(commit=False)
-                obj.company_id = company
+                cleaned = wfh_form.cleaned_data
+                defaults = {
+                    "wfh_start": cleaned.get("wfh_start", True),
+                    "wfh_radius_in_meters": cleaned.get("wfh_radius_in_meters", 250),
+                }
                 if location_obj is None:
-                    obj.start = False
-                    obj.latitude = getattr(obj, "latitude", 0.0) or 0.0
-                    obj.longitude = getattr(obj, "longitude", 0.0) or 0.0
-                    obj.radius_in_meters = getattr(obj, "radius_in_meters", 0) or 0
-                obj.save()
+                    defaults.update(
+                        {
+                            "start": False,
+                            "latitude": 0.0,
+                            "longitude": 0.0,
+                            "radius_in_meters": 0,
+                        }
+                    )
+                obj, _created = GeoFencing.objects.update_or_create(
+                    company_id=company,
+                    defaults=defaults,
+                )
                 sync_wfh_radius_profiles_for_company(company=company, radius=obj.wfh_radius_in_meters)
                 location_obj = obj
+                wfh_form = WfhGeoFencingConfigForm(instance=obj)
                 messages.success(request, _("WFH geofencing settings updated."))
             else:
                 messages.error(request, _("Please correct the errors below."))
