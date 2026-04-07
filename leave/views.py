@@ -5195,6 +5195,8 @@ def employee_profile_leave_tab(request):
     )
     today = datetime.today()
     now = timezone.now()
+    from employee.views import _build_wfh_profile_data
+
     return render(
         request,
         "employee/profile/profile_view.html",
@@ -5204,6 +5206,7 @@ def employee_profile_leave_tab(request):
             "leave_request_ids": leave_request_ids,
             "current_date": today,
             "now": now,
+            "wfh_profile_data": _build_wfh_profile_data(employee),
         },
     )
 

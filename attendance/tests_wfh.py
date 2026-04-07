@@ -491,3 +491,8 @@ class WfhApiIntegrationTests(AttendanceApiIntegrationMixin, APITestCase):
         payload = AttendancePunchingHistorySerializer(punch).data
         self.assertEqual(payload["decision_status"], PunchDecisionStatus.INVALID)
         self.assertEqual(payload["reason"], "invalid_for_wfh_non_mobile_source")
+
+    def test_leave_profile_renderer_also_passes_wfh_profile_data(self):
+        text = Path("leave/views.py").read_text()
+        self.assertIn("employee/profile/profile_view.html", text)
+        self.assertIn('"wfh_profile_data": _build_wfh_profile_data(employee)', text)
