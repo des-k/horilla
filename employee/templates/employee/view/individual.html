@@ -298,7 +298,10 @@
 				<div class="col-12 col-md-4 mb-3">
 					<p class="mb-2"><strong>{% trans "Active Face Photo" %}:</strong></p>
 					{% if wfh_profile_data.face_image_url %}
-					<img src="{{ wfh_profile_data.face_image_url }}" alt="{% trans 'Face Photo' %}" style="max-width:140px;max-height:140px;border-radius:8px;object-fit:cover;">
+					<div>
+						<img src="{{ wfh_profile_data.face_image_url }}" alt="{% trans 'Face Photo' %}" style="max-width:140px;max-height:140px;border-radius:8px;object-fit:cover;" onerror="this.style.display='none'; this.nextElementSibling.style.display='block';">
+						<p style="display:none;">-</p>
+					</div>
 					{% else %}
 					<p>-</p>
 					{% endif %}

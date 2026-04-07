@@ -221,6 +221,27 @@ def get_language_code(request):
 
 
 
+def _safe_face_image_url(face):
+    image = getattr(face, "image", None)
+    if not image:
+        return None
+    name = getattr(image, "name", "")
+    if not name:
+        return None
+    storage = getattr(image, "storage", None)
+    exists_fn = getattr(storage, "exists", None)
+    if callable(exists_fn):
+        try:
+            if not exists_fn(name):
+                return None
+        except Exception:
+            return None
+    try:
+        return image.url
+    except Exception:
+        return None
+
+
 def _build_wfh_profile_data(employee):
     try:
         wfh_profile = employee.wfh_profile
@@ -239,7 +260,7 @@ def _build_wfh_profile_data(employee):
             and getattr(wfh_profile, "home_latitude", None) is not None
             and getattr(wfh_profile, "home_longitude", None) is not None
         ),
-        "face_image_url": getattr(getattr(face, "image", None), "url", None) if face else None,
+        "face_image_url": _safe_face_image_url(face),
         "history": EmployeeWfhProfileHistory.objects.filter(employee=employee).order_by("-acted_at", "-id")[:10],
     }
     if data["home_latitude"] is not None and data["home_longitude"] is not None:

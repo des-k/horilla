@@ -20,6 +20,7 @@ from attendance.tests_api_integration_base import AttendanceApiIntegrationMixin
 from attendance.views import clock_in_out
 from base.worktype_display import normalize_work_type_label
 from facedetection.models import EmployeeFaceDetection
+from employee.views import _build_wfh_profile_data, _safe_face_image_url
 from geofencing.models import GeoFencing
 from geofencing.views import _can_reset_wfh_face, _can_reset_wfh_home
 from horilla_api.api_serializers.employee.serializers import EmployeeSerializer
@@ -568,6 +569,21 @@ class WfhApiIntegrationTests(AttendanceApiIntegrationMixin, APITestCase):
         payload = AttendancePunchingHistorySerializer(punch).data
         self.assertEqual(payload["decision_status"], PunchDecisionStatus.INVALID)
         self.assertEqual(payload["reason"], "invalid_for_wfh_non_mobile_source")
+
+
+    def test_safe_face_image_url_returns_none_when_storage_file_missing(self):
+        storage = MagicMock()
+        storage.exists.return_value = False
+        image = SimpleNamespace(name="missing-face.jpg", url="/media/missing-face.jpg", storage=storage)
+        face = SimpleNamespace(image=image)
+        self.assertIsNone(_safe_face_image_url(face))
+
+    def test_safe_face_image_url_returns_url_when_storage_file_exists(self):
+        storage = MagicMock()
+        storage.exists.return_value = True
+        image = SimpleNamespace(name="face.jpg", url="/media/face.jpg", storage=storage)
+        face = SimpleNamespace(image=image)
+        self.assertEqual(_safe_face_image_url(face), "/media/face.jpg")
 
     def test_leave_profile_renderer_also_passes_wfh_profile_data(self):
         text = Path("leave/views.py").read_text()
