@@ -184,10 +184,15 @@ class EmployeeFaceDetectionGetPostAPIView(APIView):
 def get_company(request):
     try:
         selected_company = request.session.get("selected_company")
-        if selected_company == "all":
-            return None
-        company = Company.objects.get(id=selected_company)
-        return company
+        if selected_company and selected_company != "all":
+            return Company.objects.get(id=selected_company)
+
+        employee = getattr(getattr(request, "user", None), "employee_get", None)
+        if employee is not None:
+            company = employee.get_company()
+            if company is not None:
+                return company
+        return None
     except Exception as e:
         raise serializers.ValidationError(e)
 

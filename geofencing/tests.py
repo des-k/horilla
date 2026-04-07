@@ -166,6 +166,60 @@ class GeofencingPolicyTests(SimpleTestCase):
         )
         sync_mock.assert_called_once_with(company=self.company, radius=999)
 
+    def test_web_settings_post_updates_wfh_config_when_selected_company_is_all(self):
+        employee_company = self.company
+        self.user.employee_get = SimpleNamespace(get_company=lambda: employee_company)
+        request = self.factory.post(
+            "/api/geofencing/config/",
+            {
+                "action": "update_wfh_config",
+                "wfh_start": "on",
+                "wfh_radius_in_meters": 300,
+            },
+        )
+        request.user = self.user
+        self._attach_session_and_messages(request)
+        request.session["selected_company"] = "all"
+
+        location = GeoFencing(
+            latitude=10.5,
+            longitude=76.5,
+            radius_in_meters=300,
+            start=False,
+            wfh_start=True,
+            wfh_radius_in_meters=250,
+            company_id=employee_company,
+        )
+        saved_obj = GeoFencing(
+            latitude=10.5,
+            longitude=76.5,
+            radius_in_meters=300,
+            start=False,
+            wfh_start=True,
+            wfh_radius_in_meters=300,
+            company_id=employee_company,
+        )
+
+        with patch("geofencing.views.get_company_location", return_value=location), patch.object(
+            GeoFencing.objects, "update_or_create", return_value=(saved_obj, False)
+        ) as update_mock, patch(
+            "geofencing.views.sync_wfh_radius_profiles_for_company"
+        ) as sync_mock, patch("geofencing.views.render", side_effect=_fake_render):
+            response = geo_location_config(request)
+
+        response.render()
+        content = response.content.decode()
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('value="300"', content)
+        update_mock.assert_called_once_with(
+            company_id=employee_company,
+            defaults={
+                "wfh_start": True,
+                "wfh_radius_in_meters": 300,
+            },
+        )
+        sync_mock.assert_called_once_with(company=employee_company, radius=300)
+
     def test_location_check_accepts_when_policy_disables_geofencing(self):
         request = self.api_factory.post(
             "/api/geofencing/location-check/",
