@@ -301,6 +301,62 @@ def effective_work_type(employee, target_date: date, want: str) -> EffectiveWork
     return EffectiveWorkType(mode=sched, source="schedule", request=None)
 
 
+
+
+def pick_committed_request(employee, target_date: date, want: str) -> Optional[WorkModeRequest]:
+    """Pick the approved request that is already committed for read/display surfaces.
+
+    Unlike :func:`pick_relevant_request`, this helper ignores waiting/pending requests.
+    It is used by response payloads that must continue showing the scheduled mode until
+    a request is actually approved.
+    """
+
+    if want not in ("in", "out"):
+        raise ValueError("want must be 'in' or 'out'")
+
+    base_qs = (
+        WorkModeRequest.objects.filter(
+            employee_id=employee,
+            start_date__lte=target_date,
+            end_date__gte=target_date,
+            status=WorkModeRequestStatus.APPROVED,
+        )
+        .order_by("-id")
+    )
+
+    scope_first = WorkModeRequestScope.IN if want == "in" else WorkModeRequestScope.OUT
+
+    exact = base_qs.filter(scope=scope_first)
+    if exact.exists():
+        return exact.first()
+
+    full = base_qs.filter(scope=WorkModeRequestScope.FULL)
+    if full.exists():
+        return full.first()
+
+    return None
+
+
+def committed_work_type(employee, target_date: date, want: str) -> EffectiveWorkType:
+    """Resolve the committed/visible work mode for a single session.
+
+    Priority:
+    1. approved request matching the requested session scope
+    2. scheduled/default work mode for that date
+    3. legacy WFO fallback when the schedule cannot be resolved
+
+    This is distinct from :func:`effective_work_type`, which intentionally exposes
+    waiting requests so the API can communicate request state and gate punch
+    permissions.
+    """
+
+    req = pick_committed_request(employee, target_date, want)
+    if req is not None:
+        return EffectiveWorkType(mode=req.mode, source="approved_request", request=req)
+
+    sched = scheduled_attendance_mode(employee, target_date)
+    return EffectiveWorkType(mode=sched, source="schedule", request=None)
+
 def resolve_biometric_work_mode(employee, target_date: date) -> EffectiveWorkType:
     """Resolve work mode for biometric punches.
 

@@ -53,11 +53,27 @@ class WorkTypeRequestRuleTests(SimpleTestCase):
         request.status = WorkModeRequestStatus.APPROVED
         self.assertTrue(work_type_request_rules.punch_allowed(eff))
 
-    def test_scheduled_on_duty_still_allows_punch(self):
-        eff = work_type_request_rules.EffectiveWorkType(mode="on_duty", source="schedule", request=None)
+    def test_committed_work_type_ignores_waiting_request_and_keeps_schedule(self):
+        employee = SimpleNamespace(id=10)
 
-        self.assertTrue(work_type_request_rules.punch_allowed(eff))
+        with patch.object(work_type_request_rules, "pick_committed_request", return_value=None), \
+             patch.object(work_type_request_rules, "scheduled_attendance_mode", return_value=AttendanceWorkMode.WFO):
+            eff = work_type_request_rules.committed_work_type(employee, date(2026, 4, 7), "in")
 
+        self.assertEqual(eff.mode, AttendanceWorkMode.WFO)
+        self.assertEqual(eff.source, "schedule")
+        self.assertIsNone(eff.request)
+
+    def test_committed_work_type_prefers_approved_request(self):
+        employee = SimpleNamespace(id=10)
+        approved_req = SimpleNamespace(mode=AttendanceWorkMode.WFH, status=WorkModeRequestStatus.APPROVED)
+
+        with patch.object(work_type_request_rules, "pick_committed_request", return_value=approved_req):
+            eff = work_type_request_rules.committed_work_type(employee, date(2026, 4, 7), "in")
+
+        self.assertEqual(eff.mode, AttendanceWorkMode.WFH)
+        self.assertEqual(eff.source, "approved_request")
+        self.assertIs(eff.request, approved_req)
 
 
 class WorkTypeRequestValidationMatrixTests(SimpleTestCase):

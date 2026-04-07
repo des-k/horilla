@@ -147,9 +147,11 @@ class MobileAttendanceActionParityTests(SimpleTestCase):
         force_authenticate(request, user=self.user)
         return request
 
-    def _status_patches(self, *, modes, allowed=None, attendance=None):
+    def _status_patches(self, *, modes, allowed=None, attendance=None, committed_modes=None):
         if allowed is None:
             allowed = [True, True]
+        if committed_modes is None:
+            committed_modes = modes
         return [
             patch("horilla_api.api_views.attendance.views._api_now", return_value=self.dt_now),
             patch("horilla_api.api_views.attendance.views.evaluate_attendance_access", return_value=self.access),
@@ -160,6 +162,7 @@ class MobileAttendanceActionParityTests(SimpleTestCase):
             patch("horilla_api.api_views.attendance.views.cio.get_shift_rules", return_value=self.shift_rules),
             patch("horilla_api.api_views.attendance.views.auto_reject_wfa_waiting_for_date"),
             patch("horilla_api.api_views.attendance.views._resolve_effective_work_type", side_effect=modes),
+            patch("horilla_api.api_views.attendance.views._resolve_committed_work_type", side_effect=committed_modes),
             patch("horilla_api.api_views.attendance.views._is_punch_allowed", side_effect=allowed),
             patch("horilla_api.api_views.attendance.views.Attendance.objects.filter", return_value=_FirstSequence(attendance)),
             patch("horilla_api.api_views.attendance.views.AttendanceActivity.objects.filter", return_value=_FirstSequence(None)),
@@ -227,6 +230,33 @@ class MobileAttendanceActionParityTests(SimpleTestCase):
                 return_value={"header_note_effective_duration_seconds": None},
             ),
         ]
+
+    def test_checking_status_keeps_visible_mode_on_schedule_until_request_is_approved(self):
+        waiting_req = SimpleNamespace(id=72, status="waiting_for_approval", scope="full", mode=AttendanceWorkMode.WFH)
+        status_request = self._status_request()
+        status_patches = self._status_patches(
+            modes=[(AttendanceWorkMode.WFH, "request", waiting_req), (AttendanceWorkMode.WFO, "schedule", None)],
+            committed_modes=[(AttendanceWorkMode.WFO, "schedule", None), (AttendanceWorkMode.WFO, "schedule", None)],
+            allowed=[False, True],
+            attendance=None,
+        )
+
+        for manager in status_patches:
+            manager.start()
+        try:
+            status_response = CheckingStatus.as_view()(status_request)
+        finally:
+            for manager in reversed(status_patches):
+                manager.stop()
+
+        self.assertEqual(status_response.status_code, 200)
+        self.assertEqual(status_response.data["in_mode"], AttendanceWorkMode.WFO)
+        self.assertEqual(status_response.data["in_work_type"], AttendanceWorkMode.WFO)
+        self.assertEqual(status_response.data["in_work_type_source"], "schedule")
+        self.assertEqual(status_response.data["in_work_type_request_status"], "waiting_for_approval")
+        self.assertEqual(status_response.data["in_requested_work_type"], AttendanceWorkMode.WFH)
+        self.assertFalse(status_response.data["can_clock_in"])
+        self.assertEqual(status_response.data["check_in_block_reason"], "MODE_NOT_ALLOWED")
 
     def test_checking_status_matches_clock_in_allowance_for_approved_mobile_mode(self):
         approved_req = SimpleNamespace(id=71, status="approved", scope="full")

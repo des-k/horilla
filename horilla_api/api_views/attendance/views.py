@@ -65,6 +65,7 @@ from attendance.services.attachment_validation import validate_uploaded_files
 from attendance.services.image_compression import _extract_error_message
 from attendance.services.work_type_request_rules import (
     effective_work_type,
+    committed_work_type,
     punch_allowed,
     auto_reject_wfa_waiting_for_date,
     apply_rejection_to_attendance,
@@ -785,6 +786,17 @@ def _pick_work_mode_request(employee, target_date: date, want: str):
 def _resolve_effective_work_type(employee, target_date: date, want: str):
     """Return tuple (mode, source, request)."""
     eff = effective_work_type(employee, target_date, want)
+    return eff.mode, eff.source, eff.request
+
+
+def _resolve_committed_work_type(employee, target_date: date, want: str):
+    """Return the committed/read-model work mode for display surfaces.
+
+    Pending or waiting requests must not change the visible IN/OUT work mode on the
+    Check In / Check Out screen before approval. Request state still flows through
+    the dedicated request-status fields.
+    """
+    eff = committed_work_type(employee, target_date, want)
     return eff.mode, eff.source, eff.request
 
 
@@ -3609,9 +3621,13 @@ class CheckingStatus(APIView):
             try:
                 in_mode, in_source, in_req = _resolve_effective_work_type(employee, attendance_date, "in")
                 out_mode, out_source, out_req = _resolve_effective_work_type(employee, attendance_date, "out")
+                display_in_mode, display_in_source, _display_in_req = _resolve_committed_work_type(employee, attendance_date, "in")
+                display_out_mode, display_out_source, _display_out_req = _resolve_committed_work_type(employee, attendance_date, "out")
             except Exception:
                 in_mode, in_source, in_req = (AttendanceWorkMode.WFO, "schedule", None)
                 out_mode, out_source, out_req = (AttendanceWorkMode.WFO, "schedule", None)
+                display_in_mode, display_in_source = (AttendanceWorkMode.WFO, "schedule")
+                display_out_mode, display_out_source = (AttendanceWorkMode.WFO, "schedule")
 
             payload = {
                 "status": False,
@@ -3655,12 +3671,14 @@ class CheckingStatus(APIView):
                 "check_out_window_end": None,
                 "check_in_block_reason": "SHIFT_NOT_ASSIGNED",
                 "check_out_block_reason": "SHIFT_NOT_ASSIGNED",
-                "in_mode": in_mode,
-                "out_mode": out_mode,
-                "in_work_type": in_mode,
-                "out_work_type": out_mode,
-                "in_work_type_source": in_source,
-                "out_work_type_source": out_source,
+                "in_mode": display_in_mode,
+                "out_mode": display_out_mode,
+                "in_work_type": display_in_mode,
+                "out_work_type": display_out_mode,
+                "in_work_type_source": display_in_source,
+                "out_work_type_source": display_out_source,
+                "in_requested_work_type": getattr(in_req, "mode", None),
+                "out_requested_work_type": getattr(out_req, "mode", None),
                 "in_work_type_request_id": getattr(in_req, "id", None),
                 "out_work_type_request_id": getattr(out_req, "id", None),
                 "in_work_type_request_status": getattr(in_req, "status", None),
@@ -3829,9 +3847,14 @@ class CheckingStatus(APIView):
         except Exception:
             pass
 
-# Resolve effective work type (request overrides schedule; IN/OUT can differ)
+        # Resolve punch-gating work type (pending requests can still block punch).
         in_mode, in_source, in_req = _resolve_effective_work_type(employee, attendance_date, "in")
         out_mode, out_source, out_req = _resolve_effective_work_type(employee, attendance_date, "out")
+
+        # Resolve committed/display work type separately so pending requests do not
+        # change the visible IN/OUT mode before approval.
+        display_in_mode, display_in_source, _display_in_req = _resolve_committed_work_type(employee, attendance_date, "in")
+        display_out_mode, display_out_source, _display_out_req = _resolve_committed_work_type(employee, attendance_date, "out")
 
         # Attendance row
         attendance = Attendance.objects.filter(employee_id=employee, attendance_date=attendance_date).first()
@@ -4252,16 +4275,18 @@ class CheckingStatus(APIView):
             "out_related_work_type_request_id": getattr(attendance, "out_related_work_type_request_id", None) if attendance else None,
 
             # Work-mode
-            "in_mode": in_mode,
-                    "out_mode": out_mode,
-                    "in_work_type": in_mode,
-                    "out_work_type": out_mode,
-                    "in_work_type_source": in_source,
-                    "out_work_type_source": out_source,
-                    "in_work_type_request_id": getattr(in_req, 'id', None),
-                    "out_work_type_request_id": getattr(out_req, 'id', None),
-                    "in_work_type_request_status": getattr(in_req, 'status', None),
-                    "out_work_type_request_status": getattr(out_req, 'status', None),
+            "in_mode": display_in_mode,
+            "out_mode": display_out_mode,
+            "in_work_type": display_in_mode,
+            "out_work_type": display_out_mode,
+            "in_work_type_source": display_in_source,
+            "out_work_type_source": display_out_source,
+            "in_requested_work_type": getattr(in_req, 'mode', None),
+            "out_requested_work_type": getattr(out_req, 'mode', None),
+            "in_work_type_request_id": getattr(in_req, 'id', None),
+            "out_work_type_request_id": getattr(out_req, 'id', None),
+            "in_work_type_request_status": getattr(in_req, 'status', None),
+            "out_work_type_request_status": getattr(out_req, 'status', None),
             "in_request_status": getattr(in_req, "status", None),
             "out_request_status": getattr(out_req, "status", None),
             "in_request_scope": getattr(in_req, "scope", None),
