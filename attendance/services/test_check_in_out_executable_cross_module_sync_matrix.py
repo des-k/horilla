@@ -199,6 +199,7 @@ class CrossModuleSyncRegressionTests(SimpleTestCase):
             final_out_mode=AttendanceWorkMode.WFO,
             final_in_request=None,
             final_out_request=None,
+            correction_in_override=True,
             ctx=self._ctx(),
             minimum_hour="08:00",
             is_presence_only=False,
@@ -263,7 +264,7 @@ class CrossModuleSyncRegressionTests(SimpleTestCase):
         self.assertEqual(activity.clock_out_channel, AttendanceChannel.MOBILE)
         self.assertEqual(activity.clock_out_mode, AttendanceWorkMode.WFA)
 
-    def test_approved_request_override_in_keeps_activity_and_history_aligned(self):
+    def test_correction_override_in_keeps_activity_and_history_aligned(self):
         final_in_dt = timezone.make_aware(datetime(2026, 3, 19, 8, 20))
         attendance = _FakeRecord(
             attendance_clock_in_channel=AttendanceChannel.CORRECTION_REQUEST,
@@ -298,6 +299,7 @@ class CrossModuleSyncRegressionTests(SimpleTestCase):
             final_out_mode=AttendanceWorkMode.WFO,
             final_in_request=None,
             final_out_request=None,
+            correction_in_override=True,
             ctx=self._ctx(),
             minimum_hour="08:00",
             is_presence_only=False,
@@ -311,7 +313,7 @@ class CrossModuleSyncRegressionTests(SimpleTestCase):
         self.assertEqual(activity.clock_in_channel, AttendanceChannel.CORRECTION_REQUEST)
         self.assertEqual(activity.clock_in_mode, AttendanceWorkMode.WFA)
 
-    def test_approved_request_override_out_uses_computed_final_mode_not_stale_existing_mode(self):
+    def test_correction_override_out_uses_supplied_final_mode_not_stale_existing_mode(self):
         final_out_dt = timezone.make_aware(datetime(2026, 3, 19, 17, 10))
         attendance = _FakeRecord(
             attendance_clock_in_channel=AttendanceChannel.BIOMETRIC,
@@ -346,6 +348,7 @@ class CrossModuleSyncRegressionTests(SimpleTestCase):
             final_out_mode=AttendanceWorkMode.WFH,
             final_in_request=None,
             final_out_request=None,
+            correction_out_override=True,
             ctx=self._ctx(),
             minimum_hour="08:00",
             is_presence_only=False,

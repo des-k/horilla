@@ -130,7 +130,7 @@ class CheckInOutExecutableSourceMatrixTests(SimpleTestCase):
                 self.assertEqual([log.id for log in raw["invalid_in"]], case["invalid_in"])
                 self.assertEqual([log.id for log in raw["invalid_out"]], case["invalid_out"])
 
-    def test_approved_request_override_wins_over_raw_mobile_and_biometric(self):
+    def test_approved_correction_request_wins_over_raw_mobile_and_biometric(self):
         resolved_in = resolve_final_session(
             session="IN",
             approved_dt=datetime(2026, 3, 19, 8, 15),

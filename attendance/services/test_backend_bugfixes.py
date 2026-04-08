@@ -371,20 +371,6 @@ class BiometricWorkModeBugfixTests(SimpleTestCase):
 
         self.assertEqual(mode, "wfa")
 
-    def test_reconciliation_request_override_mode_has_highest_priority(self):
-        from attendance.services import reconciliation
-
-        with patch("attendance.services.work_type_request_rules.resolve_biometric_work_mode", return_value=SimpleNamespace(mode="wfo")):
-            mode = reconciliation._resolve_final_work_mode(
-                employee="EMP",
-                attendance_date=date(2026, 3, 14),
-                request_override_mode="on_duty",
-                approved_work_request=SimpleNamespace(mode="wfa"),
-                accepted_in_punch=SimpleNamespace(work_mode="wfa"),
-            )
-
-        self.assertEqual(mode, "on_duty")
-
     def test_helper_source_uses_biometric_mode_resolver_instead_of_hardcoded_wfo(self):
         source = Path("attendance/views/clock_in_out.py").read_text()
         self.assertIn('_resolve_biometric_mode_context(request, employee, attendance_date)', source)
