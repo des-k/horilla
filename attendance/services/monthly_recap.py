@@ -333,30 +333,6 @@ def _session_dt(obj, session: str, attendance_date: date) -> Optional[datetime]:
     )
 
 
-def _legacy_approved_request_dt(attendance: Attendance, session: str, attendance_date: date) -> Optional[datetime]:
-    if not attendance or not getattr(attendance, "is_validate_request_approved", False):
-        return None
-
-    data = load_requested_data(getattr(attendance, "requested_data", None)) or {}
-    scope = (get_current_scope(data) or infer_scope_from_values(data) or "").lower()
-    sessions = {s.lower() for s in scope_to_sessions(scope)} if scope else set()
-    want = (session or "IN").lower()
-    if want not in sessions:
-        return None
-
-    if want == "in":
-        return _combine_dt(
-            _parse_date_like(data.get("attendance_clock_in_date"), attendance_date),
-            data.get("attendance_clock_in"),
-            attendance_date,
-        )
-    return _combine_dt(
-        _parse_date_like(data.get("attendance_clock_out_date"), attendance_date),
-        data.get("attendance_clock_out"),
-        attendance_date,
-    )
-
-
 def _approved_request_dt(
     *,
     attendances: List[Attendance],
@@ -378,11 +354,6 @@ def _approved_request_dt(
             dt_obj = _session_dt(obj, session_norm, attendance_date)
             if dt_obj:
                 return _normalize_dt(dt_obj, tzinfo)
-
-    for obj in sorted(attendances, key=lambda x: x.id, reverse=True):
-        dt_obj = _legacy_approved_request_dt(obj, session_norm, attendance_date)
-        if dt_obj:
-            return _normalize_dt(dt_obj, tzinfo)
 
     return None
 

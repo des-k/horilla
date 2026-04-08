@@ -82,11 +82,6 @@ def _requested_sessions(attendance: Attendance) -> Tuple[bool, bool]:
         in_present = in_present or ("IN" in scope_set)
         out_present = out_present or ("OUT" in scope_set)
 
-    # Fallback for approved rows with stripped requested_data but existing final values.
-    if not data and getattr(attendance, "is_validate_request_approved", False):
-        in_present = bool(getattr(attendance, "attendance_clock_in", None) and getattr(attendance, "attendance_clock_in_date", None))
-        out_present = bool(getattr(attendance, "attendance_clock_out", None) and getattr(attendance, "attendance_clock_out_date", None))
-
     return in_present, out_present
 
 
