@@ -48,3 +48,46 @@ def build_employee_face_api_url(employee, request=None, face=None):
     if not image:
         return None
     return _maybe_absolute(request, reverse('api-employee-face-image', args=[employee_id]))
+
+
+
+def _file_name(file_field):
+    try:
+        import os
+        return os.path.basename(getattr(file_field, "name", "") or "file")
+    except Exception:
+        return "file"
+
+
+def build_leave_type_icon_api_url(leave_type, request=None):
+    leave_type_id = _object_id(leave_type)
+    if leave_type_id in (None, ""):
+        return None
+    icon = getattr(leave_type, "icon", None)
+    if not icon:
+        return None
+    return _maybe_absolute(request, reverse("api-leave-type-icon", args=[leave_type_id]))
+
+
+def build_leave_request_attachment_meta(leave_request, request=None):
+    request_id = _object_id(leave_request)
+    attachment = getattr(leave_request, "attachment", None)
+    if request_id in (None, "") or not attachment:
+        return None
+    return {
+        "name": _file_name(attachment),
+        "view_url": _maybe_absolute(request, reverse("api-leave-request-attachment-view", args=[request_id])),
+        "download_url": _maybe_absolute(request, reverse("api-leave-request-attachment-download", args=[request_id])),
+    }
+
+
+def build_leave_allocation_attachment_meta(allocation_request, request=None):
+    request_id = _object_id(allocation_request)
+    attachment = getattr(allocation_request, "attachment", None)
+    if request_id in (None, "") or not attachment:
+        return None
+    return {
+        "name": _file_name(attachment),
+        "view_url": _maybe_absolute(request, reverse("api-leave-allocation-request-attachment-view", args=[request_id])),
+        "download_url": _maybe_absolute(request, reverse("api-leave-allocation-request-attachment-download", args=[request_id])),
+    }

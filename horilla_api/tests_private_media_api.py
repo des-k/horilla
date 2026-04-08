@@ -9,9 +9,19 @@ from horilla_api.api_views.employee.views import (
     EmployeeFaceImageAPIView,
     EmployeeProfileImageAPIView,
 )
+from horilla_api.api_views.leave.views import (
+    LeaveAllocationRequestAttachmentDownloadAPIView,
+    LeaveAllocationRequestAttachmentViewAPIView,
+    LeaveRequestAttachmentDownloadAPIView,
+    LeaveRequestAttachmentViewAPIView,
+    LeaveTypeIconAPIView,
+)
 from horilla_api.utils.private_media_urls import (
     build_employee_face_api_url,
     build_employee_profile_api_url,
+    build_leave_allocation_attachment_meta,
+    build_leave_request_attachment_meta,
+    build_leave_type_icon_api_url,
 )
 
 
@@ -91,3 +101,89 @@ class PrivateMediaEndpointTests(SimpleTestCase):
 
         self.assertEqual(response.status_code, 200)
         mock_response.assert_called_once_with(face.image, as_attachment=False)
+
+
+class LeavePrivateMediaHelperTests(SimpleTestCase):
+    def test_build_leave_type_icon_api_url_uses_private_api_path(self):
+        leave_type = SimpleNamespace(id=9, icon=object())
+        url = build_leave_type_icon_api_url(leave_type)
+        self.assertEqual(url, "/api/leave/leave-type/9/icon/")
+
+    def test_build_leave_request_attachment_meta_uses_private_api_paths(self):
+        leave_request = SimpleNamespace(id=11, attachment=SimpleNamespace(name="leave/request/file.pdf"))
+        meta = build_leave_request_attachment_meta(leave_request)
+        self.assertEqual(meta["name"], "file.pdf")
+        self.assertEqual(meta["view_url"], "/api/leave/request/11/attachment/view/")
+        self.assertEqual(meta["download_url"], "/api/leave/request/11/attachment/download/")
+
+    def test_build_leave_allocation_attachment_meta_uses_private_api_paths(self):
+        allocation = SimpleNamespace(id=12, attachment=SimpleNamespace(name="leave/allocation/proof.png"))
+        meta = build_leave_allocation_attachment_meta(allocation)
+        self.assertEqual(meta["name"], "proof.png")
+        self.assertEqual(meta["view_url"], "/api/leave/allocation-request/12/attachment/view/")
+        self.assertEqual(meta["download_url"], "/api/leave/allocation-request/12/attachment/download/")
+
+
+class LeavePrivateMediaEndpointTests(SimpleTestCase):
+    def setUp(self):
+        self.factory = APIRequestFactory()
+
+    def test_leave_type_icon_endpoint_allows_authenticated_user(self):
+        request = self.factory.get('/api/leave/leave-type/5/icon/')
+        force_authenticate(request, user=_AuthUser(SimpleNamespace(id=1)))
+        leave_type = SimpleNamespace(icon=SimpleNamespace())
+        with patch('horilla_api.api_views.leave.views.get_object_or_404', return_value=leave_type), patch(
+            'horilla_api.api_views.leave.views.private_file_response', return_value=HttpResponse(status=200)
+        ) as mock_response:
+            response = LeaveTypeIconAPIView.as_view()(request, pk=5)
+        self.assertEqual(response.status_code, 200)
+        mock_response.assert_called_once_with(leave_type.icon, as_attachment=False)
+
+    def test_leave_request_attachment_view_allows_owner(self):
+        employee = SimpleNamespace(id=2)
+        leave_request = SimpleNamespace(pk=7, employee_id_id=2, attachment=SimpleNamespace())
+        request = self.factory.get('/api/leave/request/7/attachment/view/')
+        force_authenticate(request, user=_AuthUser(employee))
+        with patch('horilla_api.api_views.leave.views.get_object_or_404', return_value=leave_request), patch(
+            'horilla_api.api_views.leave.views.private_file_response', return_value=HttpResponse(status=200)
+        ) as mock_response:
+            response = LeaveRequestAttachmentViewAPIView.as_view()(request, pk=7)
+        self.assertEqual(response.status_code, 200)
+        mock_response.assert_called_once_with(leave_request.attachment, as_attachment=False)
+
+    def test_leave_request_attachment_download_rejects_out_of_scope_user(self):
+        requester = SimpleNamespace(id=1)
+        leave_request = SimpleNamespace(pk=8, employee_id_id=2, attachment=SimpleNamespace())
+        request = self.factory.get('/api/leave/request/8/attachment/download/')
+        force_authenticate(request, user=_AuthUser(requester))
+        with patch('horilla_api.api_views.leave.views.get_object_or_404', return_value=leave_request), patch(
+            'horilla_api.api_views.leave.views.filtersubordinates'
+        ) as mock_filters, patch('horilla_api.api_views.leave.views.filter_conditional_leave_request') as mock_conditional:
+            mock_filters.return_value.exists.return_value = False
+            mock_conditional.return_value.filter.return_value.exists.return_value = False
+            response = LeaveRequestAttachmentDownloadAPIView.as_view()(request, pk=8)
+        self.assertEqual(response.status_code, 403)
+
+    def test_leave_allocation_attachment_view_allows_creator(self):
+        employee = SimpleNamespace(id=4)
+        allocation = SimpleNamespace(pk=3, employee_id_id=5, created_by_id=4, attachment=SimpleNamespace())
+        request = self.factory.get('/api/leave/allocation-request/3/attachment/view/')
+        force_authenticate(request, user=_AuthUser(employee))
+        with patch('horilla_api.api_views.leave.views.get_object_or_404', return_value=allocation), patch(
+            'horilla_api.api_views.leave.views.private_file_response', return_value=HttpResponse(status=200)
+        ) as mock_response:
+            response = LeaveAllocationRequestAttachmentViewAPIView.as_view()(request, pk=3)
+        self.assertEqual(response.status_code, 200)
+        mock_response.assert_called_once_with(allocation.attachment, as_attachment=False)
+
+    def test_leave_allocation_attachment_download_rejects_out_of_scope_user(self):
+        employee = SimpleNamespace(id=4)
+        allocation = SimpleNamespace(pk=3, employee_id_id=5, created_by_id=6, attachment=SimpleNamespace())
+        request = self.factory.get('/api/leave/allocation-request/3/attachment/download/')
+        force_authenticate(request, user=_AuthUser(employee))
+        with patch('horilla_api.api_views.leave.views.get_object_or_404', return_value=allocation), patch(
+            'horilla_api.api_views.leave.views.filtersubordinates'
+        ) as mock_filters:
+            mock_filters.return_value.exists.return_value = False
+            response = LeaveAllocationRequestAttachmentDownloadAPIView.as_view()(request, pk=3)
+        self.assertEqual(response.status_code, 403)

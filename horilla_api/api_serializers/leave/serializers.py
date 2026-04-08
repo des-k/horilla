@@ -1,7 +1,14 @@
+import os
+
 from rest_framework import serializers
 
 from employee.models import Employee
-from horilla_api.utils.private_media_urls import build_employee_profile_api_url
+from horilla_api.utils.private_media_urls import (
+    build_employee_profile_api_url,
+    build_leave_allocation_attachment_meta,
+    build_leave_request_attachment_meta,
+    build_leave_type_icon_api_url,
+)
 from leave.half_day_rules import validate_second_half_leave_submission
 from leave.methods import calculate_requested_days, active_overlapping_leave_requests
 from leave.models import *
@@ -110,25 +117,26 @@ class GetAvailableLeaveTypeSerializer(serializers.ModelSerializer):
 
     def get_leave_type_id(self, obj):
         if obj.leave_type_id:
-            return LeaveTypeAllGetSerializer(obj.leave_type_id).data
+            return LeaveTypeAllGetSerializer(obj.leave_type_id, context=self.context).data
         return None
 
     def get_icon(self, obj):
         try:
-            return obj.leave_type_id.icon.url
-        except:
+            request = self.context.get("request") if hasattr(self, "context") else None
+            return build_leave_type_icon_api_url(obj.leave_type_id, request=request)
+        except Exception:
             return None
 
 
 class userLeaveRequestGetAllSerilaizer(serializers.ModelSerializer):
     leave_type_id = serializers.SerializerMethodField()
+    attachment = serializers.SerializerMethodField()
 
     class Meta:
         model = LeaveRequest
         exclude = [
             "requested_date",
             "description",
-            "attachment",
             "approved_available_days",
             "approved_carryforward_days",
             "created_at",
@@ -139,12 +147,17 @@ class userLeaveRequestGetAllSerilaizer(serializers.ModelSerializer):
 
     def get_leave_type_id(self, obj):
         if obj.leave_type_id:
-            return LeaveTypeAllGetSerializer(obj.leave_type_id).data
+            return LeaveTypeAllGetSerializer(obj.leave_type_id, context=self.context).data
         return None
+
+    def get_attachment(self, obj):
+        request = self.context.get("request") if hasattr(self, "context") else None
+        return build_leave_request_attachment_meta(obj, request=request)
 
 
 class UserLeaveRequestGetSerilaizer(serializers.ModelSerializer):
     leave_type_id = serializers.SerializerMethodField()
+    attachment = serializers.SerializerMethodField()
 
     class Meta:
         model = LeaveRequest
@@ -160,8 +173,12 @@ class UserLeaveRequestGetSerilaizer(serializers.ModelSerializer):
 
     def get_leave_type_id(self, obj):
         if obj.leave_type_id:
-            return LeaveTypeAllGetSerializer(obj.leave_type_id).data
+            return LeaveTypeAllGetSerializer(obj.leave_type_id, context=self.context).data
         return None
+
+    def get_attachment(self, obj):
+        request = self.context.get("request") if hasattr(self, "context") else None
+        return build_leave_request_attachment_meta(obj, request=request)
 
 
 class LeaveRequestCreateUpdateSerializer(serializers.ModelSerializer):
@@ -237,9 +254,15 @@ class LeaveTypeGetCreateSerilaizer(serializers.ModelSerializer):
 
 
 class LeaveTypeAllGetSerializer(serializers.ModelSerializer):
+    icon = serializers.SerializerMethodField()
+
     class Meta:
         model = LeaveType
         fields = ["id", "name", "icon"]
+
+    def get_icon(self, obj):
+        request = self.context.get("request") if hasattr(self, "context") else None
+        return build_leave_type_icon_api_url(obj, request=request)
 
 
 class LeaveAllocationRequestCreateSerializer(serializers.ModelSerializer):
@@ -292,12 +315,12 @@ class AssignLeaveGetSerializer(serializers.ModelSerializer):
     def get_employee_id(self, obj):
         employee = obj.employee_id
         if employee:
-            return EmployeeGetSerializer(employee).data
+            return EmployeeGetSerializer(employee, context=self.context).data
         return None
 
     def get_leave_type_id(self, obj):
         if obj.leave_type_id:
-            return LeaveTypeAllGetSerializer(obj.leave_type_id).data
+            return LeaveTypeAllGetSerializer(obj.leave_type_id, context=self.context).data
         return None
 
 
@@ -329,13 +352,13 @@ class LeaveRequestGetAllSerilaizer(serializers.ModelSerializer):
     employee_id = serializers.SerializerMethodField()
     leave_type_id = serializers.SerializerMethodField()
     multiple_approve = serializers.SerializerMethodField()
+    attachment = serializers.SerializerMethodField()
 
     class Meta:
         model = LeaveRequest
         exclude = [
             "requested_date",
             "description",
-            "attachment",
             "approved_available_days",
             "approved_carryforward_days",
             "created_at",
@@ -346,13 +369,17 @@ class LeaveRequestGetAllSerilaizer(serializers.ModelSerializer):
     def get_employee_id(self, obj):
         employee = obj.employee_id
         if employee:
-            return EmployeeGetSerializer(employee).data
+            return EmployeeGetSerializer(employee, context=self.context).data
         return None
 
     def get_leave_type_id(self, obj):
         if obj.leave_type_id:
-            return LeaveTypeAllGetSerializer(obj.leave_type_id).data
+            return LeaveTypeAllGetSerializer(obj.leave_type_id, context=self.context).data
         return None
+
+    def get_attachment(self, obj):
+        request = self.context.get("request") if hasattr(self, "context") else None
+        return build_leave_request_attachment_meta(obj, request=request)
 
     def get_multiple_approve(self, obj):
         approvals = LeaveRequestConditionApproval.objects.filter(leave_request_id=obj)
@@ -371,6 +398,7 @@ class LeaveRequestGetSerilaizer(serializers.ModelSerializer):
     employee_id = serializers.SerializerMethodField()
     leave_type_id = serializers.SerializerMethodField()
     multiple_approve = serializers.SerializerMethodField()
+    attachment = serializers.SerializerMethodField()
 
     class Meta:
         model = LeaveRequest
@@ -386,13 +414,17 @@ class LeaveRequestGetSerilaizer(serializers.ModelSerializer):
     def get_employee_id(self, obj):
         employee = obj.employee_id
         if employee:
-            return EmployeeGetSerializer(employee).data
+            return EmployeeGetSerializer(employee, context=self.context).data
         return None
 
     def get_leave_type_id(self, obj):
         if obj.leave_type_id:
-            return LeaveTypeAllGetSerializer(obj.leave_type_id).data
+            return LeaveTypeAllGetSerializer(obj.leave_type_id, context=self.context).data
         return None
+
+    def get_attachment(self, obj):
+        request = self.context.get("request") if hasattr(self, "context") else None
+        return build_leave_request_attachment_meta(obj, request=request)
 
     def get_multiple_approve(self, obj):
         approvals = LeaveRequestConditionApproval.objects.filter(leave_request_id=obj)
@@ -408,6 +440,12 @@ class LeaveRequestGetSerilaizer(serializers.ModelSerializer):
 
 
 class LeaveAllocationRequestSerilaizer(serializers.ModelSerializer):
+    attachment = serializers.SerializerMethodField()
+
+    def get_attachment(self, obj):
+        request = self.context.get("request") if hasattr(self, "context") else None
+        return build_leave_allocation_attachment_meta(obj, request=request)
+
     class Meta:
         model = LeaveAllocationRequest
         exclude = [
@@ -423,6 +461,7 @@ class LeaveAllocationRequestGetSerializer(serializers.ModelSerializer):
     employee_id = serializers.SerializerMethodField()
     leave_type_id = serializers.SerializerMethodField()
     created_by = serializers.SerializerMethodField()
+    attachment = serializers.SerializerMethodField()
 
     class Meta:
         model = LeaveAllocationRequest
@@ -431,18 +470,22 @@ class LeaveAllocationRequestGetSerializer(serializers.ModelSerializer):
     def get_employee_id(self, obj):
         employee = obj.employee_id
         if employee:
-            return EmployeeGetSerializer(employee).data
+            return EmployeeGetSerializer(employee, context=self.context).data
         return None
 
     def get_leave_type_id(self, obj):
         if obj.leave_type_id:
-            return LeaveTypeAllGetSerializer(obj.leave_type_id).data
+            return LeaveTypeAllGetSerializer(obj.leave_type_id, context=self.context).data
         return None
+
+    def get_attachment(self, obj):
+        request = self.context.get("request") if hasattr(self, "context") else None
+        return build_leave_allocation_attachment_meta(obj, request=request)
 
     def get_created_by(self, obj):
         created_by = obj.created_by
         if created_by:
-            return EmployeeGetSerializer(created_by).data
+            return EmployeeGetSerializer(created_by, context=self.context).data
         return None
 
 

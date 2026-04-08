@@ -4,6 +4,7 @@ from django.contrib.auth.decorators import permission_required
 from django.contrib.auth.models import AnonymousUser
 from django.db.models import Count
 from django.http import Http404, QueryDict
+from django.shortcuts import get_object_or_404
 from django.utils.decorators import method_decorator
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.pagination import PageNumberPagination
@@ -13,6 +14,7 @@ from rest_framework.views import APIView
 
 from base.methods import filtersubordinates
 from horilla_api.api_serializers.leave.serializers import *
+from horilla_api.utils.private_file_response import private_file_response
 from leave.filters import *
 from leave.methods import filter_conditional_leave_request
 from leave.models import AvailableLeave, LeaveAllocationRequest, LeaveRequest, LeaveType
@@ -40,6 +42,115 @@ def _refresh_leave_attendance_truth(leave_request):
             )
 
 
+def _current_employee(request):
+    with contextlib.suppress(Exception):
+        return request.user.employee_get
+    return None
+
+
+def _can_access_leave_request_attachment(request, leave_request):
+    employee = _current_employee(request)
+    if employee is not None and getattr(leave_request, 'employee_id_id', None) == getattr(employee, 'id', None):
+        return True
+    try:
+        if request.user.has_perm('leave.view_leaverequest'):
+            allowed = filtersubordinates(
+                request,
+                LeaveRequest.objects.filter(pk=leave_request.pk),
+                'leave.view_leaverequest',
+            )
+            if allowed.exists():
+                return True
+    except Exception:
+        pass
+    try:
+        if filter_conditional_leave_request(request).filter(pk=leave_request.pk).exists():
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _can_access_leave_allocation_attachment(request, allocation_request):
+    employee = _current_employee(request)
+    employee_id = getattr(employee, 'id', None)
+    if employee_id is not None and (
+        getattr(allocation_request, 'employee_id_id', None) == employee_id
+        or getattr(allocation_request, 'created_by_id', None) == employee_id
+    ):
+        return True
+    try:
+        if request.user.has_perm('leave.view_leaveallocationrequest'):
+            allowed = filtersubordinates(
+                request,
+                LeaveAllocationRequest.objects.filter(pk=allocation_request.pk),
+                'leave.view_leaveallocationrequest',
+            )
+            if allowed.exists():
+                return True
+    except Exception:
+        pass
+    return False
+
+
+class LeaveTypeIconAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        leave_type = get_object_or_404(LeaveType, pk=pk)
+        if not getattr(leave_type, 'icon', None):
+            raise Http404('Icon not found')
+        return private_file_response(leave_type.icon, as_attachment=False)
+
+
+class LeaveRequestAttachmentViewAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        leave_request = get_object_or_404(LeaveRequest, pk=pk)
+        if not _can_access_leave_request_attachment(request, leave_request):
+            return Response({'detail': 'You do not have permission.'}, status=403)
+        if not getattr(leave_request, 'attachment', None):
+            raise Http404('Attachment not found')
+        return private_file_response(leave_request.attachment, as_attachment=False)
+
+
+class LeaveRequestAttachmentDownloadAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        leave_request = get_object_or_404(LeaveRequest, pk=pk)
+        if not _can_access_leave_request_attachment(request, leave_request):
+            return Response({'detail': 'You do not have permission.'}, status=403)
+        if not getattr(leave_request, 'attachment', None):
+            raise Http404('Attachment not found')
+        return private_file_response(leave_request.attachment, as_attachment=True)
+
+
+class LeaveAllocationRequestAttachmentViewAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        allocation_request = get_object_or_404(LeaveAllocationRequest, pk=pk)
+        if not _can_access_leave_allocation_attachment(request, allocation_request):
+            return Response({'detail': 'You do not have permission.'}, status=403)
+        if not getattr(allocation_request, 'attachment', None):
+            raise Http404('Attachment not found')
+        return private_file_response(allocation_request.attachment, as_attachment=False)
+
+
+class LeaveAllocationRequestAttachmentDownloadAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        allocation_request = get_object_or_404(LeaveAllocationRequest, pk=pk)
+        if not _can_access_leave_allocation_attachment(request, allocation_request):
+            return Response({'detail': 'You do not have permission.'}, status=403)
+        if not getattr(allocation_request, 'attachment', None):
+            raise Http404('Attachment not found')
+        return private_file_response(allocation_request.attachment, as_attachment=True)
+
+
 class EmployeeAvailableLeaveGetAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -48,7 +159,7 @@ class EmployeeAvailableLeaveGetAPIView(APIView):
         available_leave = employee.available_leave.all()
         paginator = PageNumberPagination()
         page = paginator.paginate_queryset(available_leave, request)
-        serializer = GetAvailableLeaveTypeSerializer(page, many=True)
+        serializer = GetAvailableLeaveTypeSerializer(page, context={"request": request}, many=True)
         return paginator.get_paginated_response(serializer.data)
 
 
@@ -77,7 +188,7 @@ class EmployeeLeaveRequestGetCreateAPIView(APIView):
             url = request.build_absolute_uri()
             return groupby_queryset(request, url, field_name, filterset.qs)
         page = paginator.paginate_queryset(filterset.qs, request)
-        serializer = userLeaveRequestGetAllSerilaizer(page, many=True)
+        serializer = userLeaveRequestGetAllSerilaizer(page, context={"request": request}, many=True)
         return paginator.get_paginated_response(serializer.data)
 
     def post(self, request):
@@ -106,7 +217,7 @@ class EmployeeLeaveRequestGetCreateAPIView(APIView):
                     api_redirect=f"/api/leave/request/{leave_request.id}/",
                 )
             return Response(
-                userLeaveRequestGetAllSerilaizer(leave_request).data, status=201
+                userLeaveRequestGetAllSerilaizer(leave_request, context={"request": request}).data, status=201
             )
         return Response(serializer.errors, status=400)
 
@@ -124,7 +235,7 @@ class EmployeeLeaveRequestUpdateDeleteAPIView(APIView):
 
     def get(self, request, pk):
         leave_request = self.get_leave_request(request, pk)
-        serializer = UserLeaveRequestGetSerilaizer(leave_request)
+        serializer = UserLeaveRequestGetSerilaizer(leave_request, context={"request": request})
         return Response(serializer.data, status=200)
 
     def put(self, request, pk):
@@ -147,7 +258,7 @@ class EmployeeLeaveRequestUpdateDeleteAPIView(APIView):
             if serializer.is_valid():
                 leave_request = serializer.save()
                 return Response(
-                    UserLeaveRequestGetSerilaizer(leave_request).data, status=201
+                    UserLeaveRequestGetSerilaizer(leave_request, context={"request": request}).data, status=201
                 )
             return Response(serializer.errors, status=400)
         raise serializers.ValidationError({"error": "Access Denied.."})
@@ -184,7 +295,7 @@ class LeaveTypeGetCreateAPIView(APIView):
         filterset = self.filterset_class(request.GET, queryset=leave_type)
         paginator = PageNumberPagination()
         page = paginator.paginate_queryset(filterset.qs, request)
-        serializer = LeaveTypeAllGetSerializer(page, many=True)
+        serializer = LeaveTypeAllGetSerializer(page, context={"request": request}, many=True)
         return paginator.get_paginated_response(serializer.data)
 
     @method_decorator(
@@ -275,7 +386,7 @@ class LeaveAllocationRequestGetCreateAPIView(APIView):
             url = request.build_absolute_uri()
             return groupby_queryset(request, url, field_name, filterset.qs)
         page = paginator.paginate_queryset(filterset.qs, request)
-        serializer = LeaveAllocationRequestGetSerializer(page, many=True)
+        serializer = LeaveAllocationRequestGetSerializer(page, context={"request": request}, many=True)
         return paginator.get_paginated_response(serializer.data)
 
     def post(self, request):
@@ -301,7 +412,7 @@ class LeaveAllocationRequestGetCreateAPIView(APIView):
                     api_redirect=f"/api/leave/allocation-request/{allocation_request.id}/",
                 )
             return Response(
-                LeaveAllocationRequestGetSerializer(allocation_request).data, status=201
+                LeaveAllocationRequestGetSerializer(allocation_request, context={"request": request}).data, status=201
             )
         return Response(serializer.errors, status=400)
 
@@ -318,7 +429,7 @@ class LeaveAllocationRequestGetUpdateDeleteAPIView(APIView):
     @manager_permission_required("leave.view_leaveallocationrequest")
     def get(self, request, pk):
         allocation_request = self.get_leave_allocation_request(pk)
-        serializer = LeaveAllocationRequestGetSerializer(allocation_request)
+        serializer = LeaveAllocationRequestGetSerializer(allocation_request, context={"request": request})
         return Response(serializer.data, status=200)
 
     @manager_permission_required("leave.change_leaveallocationrequest")
@@ -331,7 +442,7 @@ class LeaveAllocationRequestGetUpdateDeleteAPIView(APIView):
             if serializer.is_valid():
                 allocation_request = serializer.save()
                 return Response(
-                    LeaveAllocationRequestGetSerializer(allocation_request).data,
+                    LeaveAllocationRequestGetSerializer(allocation_request, context={"request": request}).data,
                     status=201,
                 )
             return Response(serializer.errors, status=400)
@@ -1028,7 +1139,7 @@ class EmployeeLeaveAllocationGetCreateAPIView(APIView):
             url = request.build_absolute_uri()
             return groupby_queryset(request, url, field_name, filterset.qs)
         page = paginator.paginate_queryset(filterset.qs, request)
-        serializer = LeaveAllocationRequestGetSerializer(page, many=True)
+        serializer = LeaveAllocationRequestGetSerializer(page, context={"request": request}, many=True)
         return paginator.get_paginated_response(serializer.data)
 
     def post(self, request):
@@ -1072,7 +1183,7 @@ class EmployeeLeaveAllocationUpdateDeleteAPIView(APIView):
             if serializer.is_valid():
                 allocation_request = serializer.save()
                 return Response(
-                    LeaveAllocationRequestGetSerializer(allocation_request).data,
+                    LeaveAllocationRequestGetSerializer(allocation_request, context={"request": request}).data,
                     status=201,
                 )
             return Response(serializer.errors, status=400)
@@ -1120,7 +1231,7 @@ class EmployeeAvailableLeaveTypeGetAPIView(APIView):
         leave_types = LeaveType.objects.filter(id__in=leave_type_ids)
         paginator = PageNumberPagination()
         page = paginator.paginate_queryset(leave_types, request)
-        serializer = LeaveTypeAllGetSerializer(page, many=True)
+        serializer = LeaveTypeAllGetSerializer(page, context={"request": request}, many=True)
         return paginator.get_paginated_response(serializer.data)
 
 
