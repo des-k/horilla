@@ -13,7 +13,7 @@ from django.conf import settings
 from django.contrib.auth.models import Permission, User
 from django.core.exceptions import ValidationError
 from django.core.files.storage import default_storage
-from django.db import models
+from django.db import IntegrityError, models
 from django.db.models.query import QuerySet
 from django.db.models.signals import post_save
 from django.dispatch import receiver
@@ -936,8 +936,10 @@ class BonusPoint(HorillaModel):
                                 post-save signal.
             **_kwargs: Additional keyword arguments passed by the signal.
         """
-        if not BonusPoint.objects.filter(employee_id__id=instance.id).exists():
-            BonusPoint.objects.create(employee_id=instance)
+        try:
+            BonusPoint.objects.get_or_create(employee_id=instance)
+        except IntegrityError:
+            pass
 
 
 @receiver(post_save, sender=EmployeeWorkInformation)

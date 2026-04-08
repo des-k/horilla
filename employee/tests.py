@@ -109,7 +109,7 @@ class EmployeeDirectoryVisibilityTests(TestCase):
         response = client.get(reverse("employee-view-list"), HTTP_HX_REQUEST="true")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
-            list(response.context["data"].object_list.values_list("id", flat=True)),
+            [employee.id for employee in response.context["data"].object_list],
             [self.staff_employee.id],
         )
 
@@ -117,7 +117,7 @@ class EmployeeDirectoryVisibilityTests(TestCase):
         response = client.get(reverse("employee-view-list"), HTTP_HX_REQUEST="true")
         self.assertEqual(response.status_code, 200)
         self.assertSetEqual(
-            set(response.context["data"].object_list.values_list("id", flat=True)),
+            {employee.id for employee in response.context["data"].object_list},
             {self.manager_employee.id, self.sub_manager_employee.id, self.leaf_employee.id},
         )
 
@@ -125,7 +125,7 @@ class EmployeeDirectoryVisibilityTests(TestCase):
         response = client.get(reverse("employee-view-list"), HTTP_HX_REQUEST="true")
         self.assertEqual(response.status_code, 200)
         self.assertSetEqual(
-            set(response.context["data"].object_list.values_list("id", flat=True)),
+            {employee.id for employee in response.context["data"].object_list},
             {
                 self.admin_employee.id,
                 self.manager_employee.id,

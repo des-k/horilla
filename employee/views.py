@@ -206,7 +206,7 @@ def _employee_directory_allowed_ids(request):
         return []
     if request.user.has_perm("employee.view_employee"):
         return None
-    subordinate_ids = get_subordinate_employee_ids(request)
+    subordinate_ids = get_subordinate_employee_ids(request, nested=True)
     return list({employee.id, *subordinate_ids})
 
 
