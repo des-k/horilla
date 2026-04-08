@@ -7,8 +7,9 @@ from django.test import SimpleTestCase, TestCase
 from attendance.models import Attendance, AttendanceChannel, AttendancePunchDirection, AttendancePunchSource, AttendancePunchingHistory
 from leave.models import LeaveRequest, LeaveType
 from attendance.services import activity_sync, monthly_recap
-from attendance.services.activity_sync import mark_approved_request_channels, sync_single_session_activity
+from attendance.services.activity_sync import sync_single_session_activity
 from attendance.services.punching_history import capture_request_restore_snapshot, clear_raw_links_for_request_override, restore_raw_state_after_request
+from attendance.services.attendance_correction_requests import approve_request, create_request, revoke_request
 from attendance.services.reconciliation import (
     NOTE_APPROVED_ATTENDANCE_REQUEST,
     NOTE_FULL_DAY_LEAVE,
@@ -203,30 +204,28 @@ class CheckInOutExecutableMonthBoundaryOvernightDbIntegrationTests(AttendanceApi
         self.assertEqual(april_before['summary']['late_minutes'], 0)
         self.assertEqual(april_before['summary']['early_out_minutes'], 0)
 
-        capture_request_restore_snapshot(attendance, include_out=True)
-        attendance.request_type = 'update_request'
-        attendance.is_validate_request = True
-        attendance.is_validate_request_approved = True
-        attendance.requested_data = {
-            'attendance_clock_out': '06:30:00',
-            'attendance_clock_out_date': '2026-04-01',
-            '__meta': {'approved_scopes': ['OUT'], 'current_scope': 'OUT'},
-        }
-        attendance.attendance_clock_out_date = date(2026, 4, 1)
-        attendance.attendance_clock_out = time(6, 30)
-        mark_approved_request_channels(attendance)
-        clear_raw_links_for_request_override(attendance, include_out=True)
-        attendance.save()
+        request_obj = create_request(
+            employee=self.employee,
+            actor_user=self.user,
+            payload={
+                'attendance_date': self.attendance_date.isoformat(),
+                'scope': 'OUT',
+                'reason': 'Extend overnight checkout',
+                'requested_check_out_date': '2026-04-01',
+                'requested_check_out_time': '06:30',
+            },
+            uploaded_files=[],
+        )
 
         with self._shift_rule_context():
-            approved = recompute_attendance(self.employee, self.attendance_date)
+            approved = approve_request(request_obj=request_obj, actor_user=self.user)
 
         attendance.refresh_from_db()
         out_punch.refresh_from_db()
-        self.assertEqual(approved.attendance.reconciliation_source, SOURCE_ATTENDANCE_REQUEST)
-        self.assertEqual(approved.attendance.reconciliation_note, NOTE_APPROVED_ATTENDANCE_REQUEST)
-        self.assertEqual(approved.attendance.attendance_clock_out_date, date(2026, 4, 1))
-        self.assertEqual(approved.attendance.attendance_clock_out, time(6, 30))
+        self.assertEqual(attendance.reconciliation_source, SOURCE_ATTENDANCE_REQUEST)
+        self.assertEqual(attendance.reconciliation_note, NOTE_APPROVED_ATTENDANCE_REQUEST)
+        self.assertEqual(attendance.attendance_clock_out_date, date(2026, 4, 1))
+        self.assertEqual(attendance.attendance_clock_out, time(6, 30))
         self.assertFalse(out_punch.accepted_to_attendance)
 
         march_approved = self._get_recap_for_month('2026-03')
@@ -238,23 +237,17 @@ class CheckInOutExecutableMonthBoundaryOvernightDbIntegrationTests(AttendanceApi
         self.assertEqual(april_approved['summary']['late_minutes'], 0)
         self.assertEqual(april_approved['summary']['early_out_minutes'], 0)
 
-        restore_raw_state_after_request(attendance, include_out=True)
-        attendance.request_type = 'revoke_request'
-        attendance.is_validate_request = False
-        attendance.is_validate_request_approved = False
-        attendance.save(update_fields=['request_type', 'is_validate_request', 'is_validate_request_approved'])
-
         with self._shift_rule_context():
-            revoked = recompute_attendance(self.employee, self.attendance_date)
+            revoked = revoke_request(request_obj=request_obj, actor_user=self.user, reason='Manager revoked overnight correction')
 
         attendance.refresh_from_db()
         out_punch.refresh_from_db()
-        self.assertEqual(revoked.attendance.reconciliation_source, SOURCE_NORMAL)
-        self.assertEqual(revoked.attendance.reconciliation_note, 'Present')
-        self.assertEqual(revoked.attendance.attendance_clock_out_date, date(2026, 4, 1))
-        self.assertEqual(revoked.attendance.attendance_clock_out, time(5, 30))
-        self.assertEqual(revoked.attendance.attendance_clock_out_channel, AttendanceChannel.BIOMETRIC)
-        self.assertEqual(revoked.attendance.attendance_clock_out_punch_id, out_punch.id)
+        self.assertEqual(attendance.reconciliation_source, SOURCE_NORMAL)
+        self.assertEqual(attendance.reconciliation_note, 'Present')
+        self.assertEqual(attendance.attendance_clock_out_date, date(2026, 4, 1))
+        self.assertEqual(attendance.attendance_clock_out, time(5, 30))
+        self.assertEqual(attendance.attendance_clock_out_channel, AttendanceChannel.BIOMETRIC)
+        self.assertEqual(attendance.attendance_clock_out_punch_id, out_punch.id)
         self.assertTrue(out_punch.accepted_to_attendance)
         self.assertEqual(Attendance.objects.filter(employee_id=self.employee, attendance_date=self.attendance_date).count(), 1)
         self.assertEqual(AttendancePunchingHistory.objects.filter(id__in=[in_punch.id, out_punch.id]).count(), 2)
@@ -538,31 +531,29 @@ class CheckInOutExecutableOvernightDbIntegrationTests(AttendanceApiIntegrationMi
         self.assertEqual(row_before.check_out, '05:30 D+1')
         self.assertEqual(recap_before['summary']['early_out_minutes'], 30)
 
-        capture_request_restore_snapshot(attendance, include_out=True)
-        attendance.request_type = 'update_request'
-        attendance.is_validate_request = True
-        attendance.is_validate_request_approved = True
-        attendance.requested_data = {
-            'attendance_clock_out': '06:30:00',
-            'attendance_clock_out_date': '2026-03-15',
-            '__meta': {'approved_scopes': ['OUT'], 'current_scope': 'OUT'},
-        }
-        attendance.attendance_clock_out_date = date(2026, 3, 15)
-        attendance.attendance_clock_out = time(6, 30)
-        mark_approved_request_channels(attendance)
-        clear_raw_links_for_request_override(attendance, include_out=True)
-        attendance.save()
+        request_obj = create_request(
+            employee=self.employee,
+            actor_user=self.user,
+            payload={
+                'attendance_date': self.attendance_date.isoformat(),
+                'scope': 'OUT',
+                'reason': 'Extend overnight checkout',
+                'requested_check_out_date': '2026-03-15',
+                'requested_check_out_time': '06:30',
+            },
+            uploaded_files=[],
+        )
 
         with self._shift_rule_context():
-            approved = recompute_attendance(self.employee, self.attendance_date)
+            approved = approve_request(request_obj=request_obj, actor_user=self.user)
 
         attendance.refresh_from_db()
         out_punch.refresh_from_db()
-        self.assertEqual(approved.attendance.attendance_date, self.attendance_date)
-        self.assertEqual(approved.attendance.attendance_clock_out_date, date(2026, 3, 15))
-        self.assertEqual(approved.attendance.attendance_clock_out, time(6, 30))
-        self.assertEqual(approved.attendance.attendance_clock_out_channel, AttendanceChannel.CORRECTION_REQUEST)
-        self.assertIsNone(approved.attendance.attendance_clock_out_punch_id)
+        self.assertEqual(attendance.attendance_date, self.attendance_date)
+        self.assertEqual(attendance.attendance_clock_out_date, date(2026, 3, 15))
+        self.assertEqual(attendance.attendance_clock_out, time(6, 30))
+        self.assertEqual(attendance.attendance_clock_out_channel, AttendanceChannel.CORRECTION_REQUEST)
+        self.assertIsNone(attendance.attendance_clock_out_punch_id)
         self.assertFalse(out_punch.accepted_to_attendance)
         self.assertEqual(AttendancePunchingHistory.objects.filter(id=out_punch.id).count(), 1)
 
@@ -571,24 +562,19 @@ class CheckInOutExecutableOvernightDbIntegrationTests(AttendanceApiIntegrationMi
         self.assertEqual(recap_approved['summary']['early_out_minutes'], 0)
         self.assertEqual(recap_approved['summary']['late_minutes'], 15)
 
-        restore_raw_state_after_request(attendance, include_out=True)
-        attendance.request_type = 'revoke_request'
-        attendance.is_validate_request = False
-        attendance.is_validate_request_approved = False
-        attendance.save(update_fields=['request_type', 'is_validate_request', 'is_validate_request_approved'])
-
         with self._shift_rule_context():
-            revoked = recompute_attendance(self.employee, self.attendance_date)
+            revoked = revoke_request(request_obj=request_obj, actor_user=self.user, reason='Manager revoked overnight correction')
+
 
         attendance.refresh_from_db()
         out_punch.refresh_from_db()
-        self.assertEqual(revoked.attendance.attendance_date, self.attendance_date)
-        self.assertEqual(revoked.attendance.attendance_clock_out_date, date(2026, 3, 15))
-        self.assertEqual(revoked.attendance.attendance_clock_out, time(5, 30))
-        self.assertEqual(revoked.attendance.attendance_clock_out_channel, AttendanceChannel.BIOMETRIC)
-        self.assertEqual(revoked.attendance.attendance_clock_out_punch_id, out_punch.id)
+        self.assertEqual(attendance.attendance_date, self.attendance_date)
+        self.assertEqual(attendance.attendance_clock_out_date, date(2026, 3, 15))
+        self.assertEqual(attendance.attendance_clock_out, time(5, 30))
+        self.assertEqual(attendance.attendance_clock_out_channel, AttendanceChannel.BIOMETRIC)
+        self.assertEqual(attendance.attendance_clock_out_punch_id, out_punch.id)
         self.assertTrue(out_punch.accepted_to_attendance)
-        self.assertEqual(out_punch.attendance_id_id, revoked.attendance.id)
+        self.assertEqual(out_punch.attendance_id_id, attendance.id)
         self.assertEqual(Attendance.objects.filter(employee_id=self.employee, attendance_date=self.attendance_date).count(), 1)
         self.assertEqual(AttendancePunchingHistory.objects.filter(id__in=[in_punch.id, out_punch.id]).count(), 2)
 

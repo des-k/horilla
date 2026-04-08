@@ -19,8 +19,9 @@ from attendance.models import (
     WorkModeRequestStatus,
 )
 from attendance.services import activity_sync
-from attendance.services.activity_sync import mark_approved_request_channels, sync_single_session_activity
+from attendance.services.activity_sync import sync_single_session_activity
 from attendance.services.punching_history import capture_request_restore_snapshot, clear_raw_links_for_request_override, restore_raw_state_after_request
+from attendance.services.attendance_correction_requests import approve_request, create_request, revoke_request
 from attendance.services.reconciliation import (
     NOTE_ON_DUTY_FINAL,
     NOTE_ON_DUTY_NOT_GRANTED,
@@ -294,23 +295,23 @@ class CrossModuleAuditViewsConsistencyDbIntegrationTests(AttendanceApiIntegratio
             recompute_attendance(self.employee, self.target_date)
 
         attendance = self._attendance()
-        capture_request_restore_snapshot(attendance, include_in=True, include_out=True)
-        attendance.request_type = 'update_request'
-        attendance.is_validate_request = True
-        attendance.is_validate_request_approved = True
-        attendance.requested_data = {
-            'attendance_clock_in': '08:30:00',
-            'attendance_clock_out': '17:30:00',
-            '__meta': {'approved_scopes': ['IN', 'OUT'], 'current_scope': 'FULL'},
-        }
-        attendance.attendance_clock_in = time(8, 30)
-        attendance.attendance_clock_out = time(17, 30)
-        mark_approved_request_channels(attendance)
-        clear_raw_links_for_request_override(attendance, include_in=True, include_out=True)
-        attendance.save()
+        request_obj = create_request(
+            employee=self.employee,
+            actor_user=self.user,
+            payload={
+                'attendance_date': self.target_date.isoformat(),
+                'scope': 'FULL',
+                'reason': 'Correct both sessions',
+                'requested_check_in_date': self.target_date.isoformat(),
+                'requested_check_in_time': '08:30',
+                'requested_check_out_date': self.target_date.isoformat(),
+                'requested_check_out_time': '17:30',
+            },
+            uploaded_files=[],
+        )
 
         with self._shift_rule_context():
-            recompute_attendance(self.employee, self.target_date)
+            approve_request(request_obj=request_obj, actor_user=self.user)
 
         attendance, _ = self._assert_layers(
             in_time_value=time(8, 30),
@@ -328,14 +329,8 @@ class CrossModuleAuditViewsConsistencyDbIntegrationTests(AttendanceApiIntegratio
         self.assertEqual(in_punch.attendance_id_id, attendance.id)
         self.assertEqual(out_punch.attendance_id_id, attendance.id)
 
-        restore_raw_state_after_request(attendance, include_in=True, include_out=True)
-        attendance.request_type = 'revoke_request'
-        attendance.is_validate_request = False
-        attendance.is_validate_request_approved = False
-        attendance.save(update_fields=['request_type', 'is_validate_request', 'is_validate_request_approved'])
-
         with self._shift_rule_context():
-            recompute_attendance(self.employee, self.target_date)
+            revoke_request(request_obj=request_obj, actor_user=self.user, reason='Manager revoked correction')
 
         self._assert_layers(
             in_time_value=time(8, 0),
@@ -582,21 +577,21 @@ class CrossModuleAuditViewsConsistencyDbIntegrationTests(AttendanceApiIntegratio
         self.assertEqual(baseline_attendance.attendance_clock_out, time(17, 20))
         self.assertEqual(baseline_attendance.attendance_clock_out_channel, AttendanceChannel.MOBILE)
 
-        capture_request_restore_snapshot(baseline_attendance, include_out=True)
-        baseline_attendance.request_type = 'update_request'
-        baseline_attendance.is_validate_request = True
-        baseline_attendance.is_validate_request_approved = True
-        baseline_attendance.requested_data = {
-            'attendance_clock_out': '17:45:00',
-            '__meta': {'approved_scopes': ['OUT'], 'current_scope': 'OUT'},
-        }
-        baseline_attendance.attendance_clock_out = time(17, 45)
-        baseline_attendance.attendance_clock_out_channel = AttendanceChannel.CORRECTION_REQUEST
-        clear_raw_links_for_request_override(baseline_attendance, include_out=True)
-        baseline_attendance.save()
+        request_obj = create_request(
+            employee=self.employee,
+            actor_user=self.user,
+            payload={
+                'attendance_date': self.target_date.isoformat(),
+                'scope': 'OUT',
+                'reason': 'Correct generated checkout',
+                'requested_check_out_date': self.target_date.isoformat(),
+                'requested_check_out_time': '17:45',
+            },
+            uploaded_files=[],
+        )
 
         with self._shift_rule_context():
-            recompute_attendance(self.employee, self.target_date)
+            approve_request(request_obj=request_obj, actor_user=self.user)
 
         overridden = self._attendance()
         self.assertEqual(overridden.attendance_clock_out, time(17, 45))
@@ -607,14 +602,8 @@ class CrossModuleAuditViewsConsistencyDbIntegrationTests(AttendanceApiIntegratio
         self.assertFalse(early_out_punch.accepted_to_attendance)
         self.assertFalse(latest_out_punch.accepted_to_attendance)
 
-        restore_raw_state_after_request(overridden, include_out=True)
-        overridden.request_type = 'revoke_request'
-        overridden.is_validate_request = False
-        overridden.is_validate_request_approved = False
-        overridden.save(update_fields=['request_type', 'is_validate_request', 'is_validate_request_approved'])
-
         with self._shift_rule_context():
-            recompute_attendance(self.employee, self.target_date)
+            revoke_request(request_obj=request_obj, actor_user=self.user, reason='Manager revoked correction')
 
         attendance, activity = self._assert_layers(
             in_time_value=time(8, 0),
