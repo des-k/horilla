@@ -63,6 +63,25 @@ def _normalize(s: str) -> str:
     return (s or "").strip().lower().replace("-", " ").replace("_", " ")
 
 
+def _resolve_object_id(value):
+    if value is None:
+        return None
+    pk = getattr(value, "pk", None)
+    if pk not in (None, ""):
+        return pk
+    obj_id = getattr(value, "id", None)
+    if obj_id not in (None, ""):
+        return obj_id
+    return value if isinstance(value, int) else None
+
+
+def _employee_lookup_kwargs(employee) -> Optional[dict]:
+    employee_pk = _resolve_object_id(employee)
+    if employee_pk in (None, ""):
+        return None
+    return {"employee_id_id": employee_pk}
+
+
 def _scheduled_attendance_mode_or_none(employee, target_date: date) -> Optional[str]:
     """Resolve scheduled/default work mode without forcing WFO on unknown data.
 
@@ -262,9 +281,13 @@ def pick_relevant_request(employee, target_date: date, want: str) -> Optional[Wo
     if want not in ("in", "out"):
         raise ValueError("want must be 'in' or 'out'")
 
+    employee_lookup = _employee_lookup_kwargs(employee)
+    if employee_lookup is None:
+        return None
+
     base_qs = (
         WorkModeRequest.objects.filter(
-            employee_id=employee,
+            **employee_lookup,
             start_date__lte=target_date,
             end_date__gte=target_date,
         )
@@ -314,9 +337,13 @@ def pick_committed_request(employee, target_date: date, want: str) -> Optional[W
     if want not in ("in", "out"):
         raise ValueError("want must be 'in' or 'out'")
 
+    employee_lookup = _employee_lookup_kwargs(employee)
+    if employee_lookup is None:
+        return None
+
     base_qs = (
         WorkModeRequest.objects.filter(
-            employee_id=employee,
+            **employee_lookup,
             start_date__lte=target_date,
             end_date__gte=target_date,
             status=WorkModeRequestStatus.APPROVED,
@@ -379,16 +406,19 @@ def resolve_biometric_work_mode(employee, target_date: date) -> EffectiveWorkTyp
     3. WFO only when no business truth can be resolved
     """
 
-    approved_request = (
-        WorkModeRequest.objects.filter(
-            employee_id=employee,
-            start_date__lte=target_date,
-            end_date__gte=target_date,
-            status=WorkModeRequestStatus.APPROVED,
+    employee_lookup = _employee_lookup_kwargs(employee)
+    approved_request = None
+    if employee_lookup is not None:
+        approved_request = (
+            WorkModeRequest.objects.filter(
+                **employee_lookup,
+                start_date__lte=target_date,
+                end_date__gte=target_date,
+                status=WorkModeRequestStatus.APPROVED,
+            )
+            .order_by("-id")
+            .first()
         )
-        .order_by("-id")
-        .first()
-    )
     if approved_request is not None:
         return EffectiveWorkType(
             mode=approved_request.mode,
@@ -491,7 +521,11 @@ def validate_work_type_request(
     )
 
     # Overlap rules
-    qs = WorkModeRequest.objects.filter(employee_id=employee).filter(_active_status_q())
+    employee_lookup = _employee_lookup_kwargs(employee)
+    if employee_lookup is None:
+        return
+
+    qs = WorkModeRequest.objects.filter(**employee_lookup).filter(_active_status_q())
     if instance_id:
         qs = qs.exclude(id=instance_id)
 
@@ -565,8 +599,12 @@ def auto_reject_wfa_waiting_for_date(
     Returns number of requests auto-rejected.
     """
 
+    employee_lookup = _employee_lookup_kwargs(employee)
+    if employee_lookup is None:
+        return 0
+
     qs = WorkModeRequest.objects.select_for_update().filter(
-        employee_id=employee,
+        **employee_lookup,
         mode=AttendanceWorkMode.WFA,
         status=WorkModeRequestStatus.WAITING_FOR_APPROVAL,
         start_date__lte=target_date,

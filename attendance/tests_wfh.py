@@ -71,9 +71,10 @@ class WfhSpecTests(SimpleTestCase):
         self.assertTrue(response.data["requires_face_reenrollment"])
         self.assertTrue(response.data["has_home_location_configured"])
 
+    @patch("horilla_api.api_views.attendance.views.effective_wfh_radius_for", return_value=250)
     @patch("horilla_api.api_views.attendance.views._get_company_geofencing")
     @patch("horilla_api.api_views.attendance.views._get_wfh_profile")
-    def test_validate_wfh_punch_blocks_outside_radius(self, mock_profile, mock_geo):
+    def test_validate_wfh_punch_blocks_outside_radius(self, mock_profile, mock_geo, _mock_radius):
         mock_profile.return_value = SimpleNamespace(
             requires_face_reenrollment=False,
             requires_home_reconfiguration=False,
@@ -92,9 +93,10 @@ class WfhSpecTests(SimpleTestCase):
         )
         self.assertIn("luar radius", error)
 
+    @patch("horilla_api.api_views.attendance.views.effective_wfh_radius_for", return_value=250)
     @patch("horilla_api.api_views.attendance.views._get_company_geofencing")
     @patch("horilla_api.api_views.attendance.views._get_wfh_profile")
-    def test_validate_wfh_punch_allows_inside_radius(self, mock_profile, mock_geo):
+    def test_validate_wfh_punch_allows_inside_radius(self, mock_profile, mock_geo, _mock_radius):
         mock_profile.return_value = SimpleNamespace(
             requires_face_reenrollment=False,
             requires_home_reconfiguration=False,
@@ -171,9 +173,8 @@ class WfhSpecRegressionTests(SimpleTestCase):
 
     @patch("horilla_api.api_serializers.employee.serializers.EmployeeWfhProfileHistory.objects.filter")
     @patch("horilla_api.api_serializers.employee.serializers.EmployeeFaceDetection.objects.filter")
-    @patch("horilla_api.api_serializers.employee.serializers.GeoFencing.objects.filter")
-    def test_employee_serializer_returns_default_wfh_profile_without_row(self, mock_geo, mock_face, mock_history):
-        mock_geo.return_value.first.return_value = SimpleNamespace(wfh_radius_in_meters=250)
+    @patch("horilla_api.api_serializers.employee.serializers.effective_wfh_radius_for", return_value=250)
+    def test_employee_serializer_returns_default_wfh_profile_without_row(self, mock_resolve_radius, mock_face, mock_history):
         mock_face.return_value.first.return_value = None
         history_qs = MagicMock()
         history_qs.order_by.return_value.__getitem__.return_value = []
@@ -322,14 +323,16 @@ class WfhApiIntegrationTests(AttendanceApiIntegrationMixin, APITestCase):
     def test_employee_profile_endpoint_prefers_current_company_wfh_radius_over_stale_profile_radius(self):
         user, employee = self.create_employee("AliceRadius")
         company = employee.employee_work_info.company_id
-        GeoFencing.objects.create(
+        GeoFencing.objects.update_or_create(
             company_id=company,
-            latitude=0,
-            longitude=0,
-            radius_in_meters=0,
-            start=False,
-            wfh_start=True,
-            wfh_radius_in_meters=450,
+            defaults={
+                "latitude": 0,
+                "longitude": 0,
+                "radius_in_meters": 0,
+                "start": False,
+                "wfh_start": True,
+                "wfh_radius_in_meters": 450,
+            },
         )
         EmployeeWfhProfile.objects.create(
             employee=employee,
@@ -346,14 +349,16 @@ class WfhApiIntegrationTests(AttendanceApiIntegrationMixin, APITestCase):
     def test_company_wfh_radius_sync_updates_existing_profile_snapshot(self):
         user, employee = self.create_employee("AliceRadiusSync")
         company = employee.employee_work_info.company_id
-        GeoFencing.objects.create(
+        GeoFencing.objects.update_or_create(
             company_id=company,
-            latitude=0,
-            longitude=0,
-            radius_in_meters=0,
-            start=False,
-            wfh_start=True,
-            wfh_radius_in_meters=250,
+            defaults={
+                "latitude": 0,
+                "longitude": 0,
+                "radius_in_meters": 0,
+                "start": False,
+                "wfh_start": True,
+                "wfh_radius_in_meters": 250,
+            },
         )
         profile = EmployeeWfhProfile.objects.create(
             employee=employee,

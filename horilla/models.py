@@ -139,20 +139,24 @@ class HorillaModel(models.Model):
         # self.full_clean()
 
         request = getattr(_thread_locals, "request", None)
+        user = getattr(request, "user", None) if request is not None else None
+        user_is_valid = bool(
+            user is not None
+            and getattr(user, "is_authenticated", False)
+            and getattr(user, "pk", None) not in (None, "")
+        )
 
-        if request:
-            user = request.user
-
+        if user_is_valid:
             if (
                 hasattr(self, "created_by")
                 and hasattr(self._meta.get_field("created_by"), "related_model")
                 and self._meta.get_field("created_by").related_model == User
+                and not self.pk
+                and getattr(self, "created_by_id", None) in (None, "")
             ):
-                if request and not self.pk:
-                    if user.is_authenticated:
-                        self.created_by = user
+                self.created_by = user
 
-            if request and not request.user.is_anonymous:
+            if hasattr(self, "modified_by"):
                 self.modified_by = user
 
         super(HorillaModel, self).save(*args, **kwargs)

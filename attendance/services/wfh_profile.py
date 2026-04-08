@@ -12,6 +12,23 @@ from geofencing.models import GeoFencing
 DEFAULT_WFH_RADIUS_METERS = 250
 
 
+def _resolve_object_id(value: Any):
+    if value is None:
+        return None
+    pk = getattr(value, "pk", None)
+    if pk not in (None, ""):
+        return pk
+    obj_id = getattr(value, "id", None)
+    if obj_id not in (None, ""):
+        return obj_id
+    return value if isinstance(value, int) else None
+
+
+def _resolve_company_pk(employee: Any = None, company: Any = None):
+    resolved = _resolve_company(employee=employee, company=company)
+    return _resolve_object_id(resolved)
+
+
 def _resolve_company(employee: Any = None, company: Any = None):
     if company is not None:
         return company
@@ -27,18 +44,18 @@ def _resolve_company(employee: Any = None, company: Any = None):
 
 
 def company_wfh_radius_for(*, employee: Any = None, company: Any = None, default: int = DEFAULT_WFH_RADIUS_METERS) -> int:
-    company = _resolve_company(employee=employee, company=company)
-    if company is None:
+    company_pk = _resolve_company_pk(employee=employee, company=company)
+    if company_pk is None:
         return default
-    config = GeoFencing.objects.filter(company_id=company).only("wfh_radius_in_meters").first()
+    config = GeoFencing.objects.filter(company_id_id=company_pk).only("wfh_radius_in_meters").first()
     configured = int(getattr(config, "wfh_radius_in_meters", 0) or 0)
     return configured if configured > 0 else default
 
 
 def effective_wfh_radius_for(*, employee: Any = None, company: Any = None, profile: Any = None, default: int = DEFAULT_WFH_RADIUS_METERS) -> int:
-    company = _resolve_company(employee=employee, company=company)
-    if company is not None:
-        config = GeoFencing.objects.filter(company_id=company).only("wfh_radius_in_meters").first()
+    company_pk = _resolve_company_pk(employee=employee, company=company)
+    if company_pk is not None:
+        config = GeoFencing.objects.filter(company_id_id=company_pk).only("wfh_radius_in_meters").first()
         configured = int(getattr(config, "wfh_radius_in_meters", 0) or 0)
         if configured > 0:
             return configured
@@ -47,14 +64,14 @@ def effective_wfh_radius_for(*, employee: Any = None, company: Any = None, profi
 
 
 def sync_wfh_radius_profiles_for_company(*, company: Any = None, employee: Any = None, radius: Any = None) -> int:
-    company = _resolve_company(employee=employee, company=company)
-    if company is None:
+    company_pk = _resolve_company_pk(employee=employee, company=company)
+    if company_pk is None:
         return 0
     normalized_radius = int(radius or 0)
     if normalized_radius <= 0:
-        normalized_radius = company_wfh_radius_for(company=company)
+        normalized_radius = company_wfh_radius_for(company=company_pk)
     return EmployeeWfhProfile.objects.filter(
-        employee__employee_work_info__company_id=company
+        employee__employee_work_info__company_id_id=company_pk
     ).exclude(home_radius_in_meters=normalized_radius).update(home_radius_in_meters=normalized_radius)
 
 
@@ -106,7 +123,8 @@ def apply_wfh_face_reset(*, employee, acted_by=None):
         employee=employee,
         defaults={"home_radius_in_meters": effective_wfh_radius_for(employee=employee)},
     )
-    face = EmployeeFaceDetection.objects.filter(employee_id=employee).first()
+    employee_pk = _resolve_object_id(employee)
+    face = EmployeeFaceDetection.objects.filter(employee_id_id=employee_pk).first() if employee_pk is not None else None
     old_face = getattr(face.image, "url", None) if face and getattr(face, "image", None) else None
     EmployeeWfhProfileHistory.objects.create(
         employee=employee,

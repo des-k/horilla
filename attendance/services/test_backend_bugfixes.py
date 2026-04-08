@@ -49,7 +49,7 @@ class ClockInPunchHistoryBugfixTests(SimpleTestCase):
              patch("horilla_api.api_views.attendance.views.evaluate_attendance_access", return_value=SimpleNamespace(allowed=True, message=None)), \
              patch("horilla_api.api_views.attendance.views._api_today", return_value=attendance_date), \
              patch("horilla_api.api_views.attendance.views._api_resolve_attendance_date_and_day", return_value=(attendance_date, day, "08:00", None, None, "08:05", None)), \
-             patch("horilla_api.api_views.attendance.views._resolve_effective_work_type", side_effect=[("wfa", "request", in_req), ("wfa", "request", in_req), ("on_duty", "request", out_req)]), \
+             patch("horilla_api.api_views.attendance.views._resolve_punch_work_type", side_effect=[("wfa", "request", in_req), ("wfa", "request", in_req), ("on_duty", "request", out_req)]), \
              patch("horilla_api.api_views.attendance.views._is_punch_allowed", return_value=True), \
              patch("horilla_api.api_views.attendance.views.cio.get_shift_rules", return_value={"cutoff_in_dt": None, "check_in_window_start_dt": None, "check_in_window_end_dt": None}), \
              patch("horilla_api.api_views.attendance.views.auto_reject_wfa_waiting_for_date"), \
@@ -256,7 +256,7 @@ class BiometricWorkModeBugfixTests(SimpleTestCase):
     def test_resolve_biometric_work_mode_prefers_approved_request(self):
         from attendance.services.work_type_request_rules import resolve_biometric_work_mode
 
-        employee = SimpleNamespace(employee_work_info=SimpleNamespace(work_type_id=SimpleNamespace(work_type="WFO")))
+        employee = SimpleNamespace(id=1, employee_work_info=SimpleNamespace(work_type_id=SimpleNamespace(work_type="WFO")))
         approved_request = SimpleNamespace(mode="wfa")
         manager = MagicMock()
         qs = MagicMock()
@@ -273,7 +273,7 @@ class BiometricWorkModeBugfixTests(SimpleTestCase):
     def test_resolve_biometric_work_mode_uses_schedule_without_request(self):
         from attendance.services.work_type_request_rules import resolve_biometric_work_mode
 
-        employee = SimpleNamespace(employee_work_info=SimpleNamespace(work_type_id=SimpleNamespace(work_type="Work From Anywhere")))
+        employee = SimpleNamespace(id=1, employee_work_info=SimpleNamespace(work_type_id=SimpleNamespace(work_type="Work From Anywhere")))
         manager = MagicMock()
         qs = MagicMock()
         qs.order_by.return_value.first.return_value = None
@@ -289,7 +289,7 @@ class BiometricWorkModeBugfixTests(SimpleTestCase):
     def test_resolve_biometric_work_mode_falls_back_to_wfo_only_when_unknown(self):
         from attendance.services.work_type_request_rules import resolve_biometric_work_mode
 
-        employee = SimpleNamespace(employee_work_info=SimpleNamespace(work_type_id=SimpleNamespace(work_type="Mystery")))
+        employee = SimpleNamespace(id=1, employee_work_info=SimpleNamespace(work_type_id=SimpleNamespace(work_type="Mystery")))
         manager = MagicMock()
         qs = MagicMock()
         qs.order_by.return_value.first.return_value = None

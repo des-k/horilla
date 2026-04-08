@@ -126,7 +126,7 @@ class CheckingStatusCheckoutWindowRegressionTests(SimpleTestCase):
             ),
             patch('horilla_api.api_views.attendance.views.cio.get_shift_rules', return_value=self.shift_rules),
             patch('horilla_api.api_views.attendance.views.auto_reject_wfa_waiting_for_date'),
-            patch('horilla_api.api_views.attendance.views._resolve_effective_work_type', side_effect=modes),
+            patch('horilla_api.api_views.attendance.views._resolve_punch_work_type', side_effect=modes),
             patch('horilla_api.api_views.attendance.views._is_punch_allowed', side_effect=allowed),
             patch('horilla_api.api_views.attendance.views.Attendance.objects.filter', return_value=_FirstSequence(attendance)),
             patch('horilla_api.api_views.attendance.views.AttendanceActivity.objects.filter', return_value=_FirstSequence(None)),

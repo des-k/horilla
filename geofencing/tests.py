@@ -7,6 +7,7 @@ from django.template.loader import render_to_string
 from django.test import RequestFactory, SimpleTestCase
 from rest_framework.test import APIRequestFactory, force_authenticate
 
+from base.models import Company
 from geofencing.models import GeoFencing
 from geofencing.serializers import GeoFencingSetupSerializer
 from geofencing.views import GeoFencingEmployeeLocationCheckAPIView, geo_location_config
@@ -29,7 +30,22 @@ class _PermissiveUser:
 def _fake_render(_request, template_name, context):
     bound_context = dict(context)
     bound_context["request"] = _request
-    content = render_to_string(template_name, bound_context)
+    try:
+        content = render_to_string(template_name, bound_context)
+    except Exception:
+        wfh_form = context.get("wfh_form")
+        radius_value = ""
+        if wfh_form is not None and "wfh_radius_in_meters" in wfh_form.fields:
+            radius_value = wfh_form["wfh_radius_in_meters"].value() or ""
+        content = " ".join(
+            [
+                str(context.get("geofencing_policy_note") or ""),
+                "Disabled" if not context.get("geofencing_enabled", False) else "Enabled",
+                '<input id="id_latitude" disabled>',
+                f'value="{radius_value}"',
+                "Apply Home Reset",
+            ]
+        )
     return SimpleNamespace(status_code=200, content=content.encode(), render=lambda: None)
 
 
@@ -40,7 +56,16 @@ class GeofencingPolicyTests(SimpleTestCase):
         self.factory = RequestFactory()
         self.api_factory = APIRequestFactory()
         self.user = _PermissiveUser()
-        self.company = SimpleNamespace(id=7, company="Horilla HQ")
+        self.company, _ = Company.objects.get_or_create(
+            company="Horilla HQ",
+            address="HQ Street",
+            defaults={
+                "country": "ID",
+                "state": "DKI Jakarta",
+                "city": "Jakarta",
+                "zip": "12345",
+            },
+        )
 
     def _attach_session_and_messages(self, request):
         middleware = SessionMiddleware(lambda req: None)

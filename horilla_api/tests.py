@@ -161,7 +161,7 @@ class MobileAttendanceActionParityTests(SimpleTestCase):
             ),
             patch("horilla_api.api_views.attendance.views.cio.get_shift_rules", return_value=self.shift_rules),
             patch("horilla_api.api_views.attendance.views.auto_reject_wfa_waiting_for_date"),
-            patch("horilla_api.api_views.attendance.views._resolve_effective_work_type", side_effect=modes),
+            patch("horilla_api.api_views.attendance.views._resolve_punch_work_type", side_effect=modes),
             patch("horilla_api.api_views.attendance.views._resolve_committed_work_type", side_effect=committed_modes),
             patch("horilla_api.api_views.attendance.views._is_punch_allowed", side_effect=allowed),
             patch("horilla_api.api_views.attendance.views.Attendance.objects.filter", return_value=_FirstSequence(attendance)),
@@ -217,7 +217,7 @@ class MobileAttendanceActionParityTests(SimpleTestCase):
             ),
             patch("horilla_api.api_views.attendance.views.cio.get_shift_rules", return_value=self.shift_rules),
             patch("horilla_api.api_views.attendance.views.auto_reject_wfa_waiting_for_date"),
-            patch("horilla_api.api_views.attendance.views._resolve_effective_work_type", side_effect=_mode_side_effect),
+            patch("horilla_api.api_views.attendance.views._resolve_punch_work_type", side_effect=_mode_side_effect),
             patch("horilla_api.api_views.attendance.views._is_punch_allowed", return_value=True),
             patch("horilla_api.api_views.attendance.views._requires_proof", side_effect=lambda mode: mode in {AttendanceWorkMode.WFA, AttendanceWorkMode.ON_DUTY}),
             patch(
@@ -228,6 +228,20 @@ class MobileAttendanceActionParityTests(SimpleTestCase):
             patch(
                 "horilla_api.api_views.attendance.views._build_mobile_header_note_context",
                 return_value={"header_note_effective_duration_seconds": None},
+            ),
+            patch(
+                "horilla_api.api_views.attendance.views._serialize_wfh_profile",
+                return_value={
+                    "home_latitude": None,
+                    "home_longitude": None,
+                    "google_maps_link": None,
+                    "radius_in_meters": 250,
+                    "is_home_configured": False,
+                    "requires_home_reconfiguration": False,
+                    "requires_face_reenrollment": False,
+                    "face_image": None,
+                    "history": [],
+                },
             ),
         ]
 
@@ -475,7 +489,7 @@ class MobileAttendanceActionParityTests(SimpleTestCase):
             patch("horilla_api.api_views.attendance.views.cio.get_shift_rules", return_value=self.shift_rules),
             patch("horilla_api.api_views.attendance.views.auto_reject_wfa_waiting_for_date"),
             patch(
-                "horilla_api.api_views.attendance.views._resolve_effective_work_type",
+                "horilla_api.api_views.attendance.views._resolve_punch_work_type",
                 side_effect=[(AttendanceWorkMode.WFO, "schedule", None), (AttendanceWorkMode.WFO, "schedule", None)],
             ),
             patch("horilla_api.api_views.attendance.views._is_punch_allowed", return_value=True),
@@ -737,12 +751,13 @@ class MobileAttendanceActionParityTests(SimpleTestCase):
             patch("horilla_api.api_views.attendance.views._api_resolve_attendance_date_and_day", return_value=(self.attendance_date, self.day, "08:00", 8 * 3600, 17 * 3600, "08:05", 8 * 3600 + 5 * 60)),
             patch("horilla_api.api_views.attendance.views.cio.get_shift_rules", return_value=self.shift_rules),
             patch("horilla_api.api_views.attendance.views.auto_reject_wfa_waiting_for_date"),
-            patch("horilla_api.api_views.attendance.views._resolve_effective_work_type", side_effect=(lambda *args, **kwargs: (AttendanceWorkMode.WFA, "request", approved_req))),
+            patch("horilla_api.api_views.attendance.views._resolve_punch_work_type", side_effect=(lambda *args, **kwargs: (AttendanceWorkMode.WFA, "request", approved_req))),
             patch("horilla_api.api_views.attendance.views._is_punch_allowed", return_value=True),
             patch("horilla_api.api_views.attendance.views._requires_proof", side_effect=lambda mode: mode in {AttendanceWorkMode.WFA, AttendanceWorkMode.ON_DUTY}),
             patch("horilla_api.api_views.attendance.views.Attendance.objects.filter", return_value=qs),
             patch("horilla_api.api_views.attendance.views.reconcile_attendance_punches"),
             patch("horilla_api.api_views.attendance.views._build_mobile_header_note_context", return_value={"header_note_effective_duration_seconds": None}),
+            patch("horilla_api.api_views.attendance.views._serialize_wfh_profile", return_value={"home_latitude": None, "home_longitude": None, "google_maps_link": None, "radius_in_meters": 250, "is_home_configured": False, "requires_home_reconfiguration": False, "requires_face_reenrollment": False, "face_image": None, "history": []}),
             patch("horilla_api.api_views.attendance.views.update_punch_history", update_punch_history),
             patch("horilla_api.api_views.attendance.views.clock_in_attendance_and_activity", clock_in_attendance),
         ]
@@ -803,7 +818,7 @@ class MobileAttendanceActionParityTests(SimpleTestCase):
             "horilla_api.api_views.attendance.views._api_resolve_attendance_date_and_day",
             return_value=(self.attendance_date, self.day, "08:00", 8 * 3600, 17 * 3600, "17:05", 17 * 3600 + 5 * 60),
         ), patch(
-            "horilla_api.api_views.attendance.views._resolve_effective_work_type",
+            "horilla_api.api_views.attendance.views._resolve_punch_work_type",
             side_effect=[
                 (AttendanceWorkMode.WFA, "request", approved_req),
                 (AttendanceWorkMode.WFA, "request", approved_req),
@@ -825,6 +840,9 @@ class MobileAttendanceActionParityTests(SimpleTestCase):
         ), patch("horilla_api.api_views.attendance.views.reconcile_attendance_punches"), patch(
             "horilla_api.api_views.attendance.views._build_mobile_header_note_context",
             return_value={"header_note_effective_duration_seconds": None},
+        ), patch(
+            "horilla_api.api_views.attendance.views._serialize_wfh_profile",
+            return_value={"home_latitude": None, "home_longitude": None, "google_maps_link": None, "radius_in_meters": 250, "is_home_configured": False, "requires_home_reconfiguration": False, "requires_face_reenrollment": False, "face_image": None, "history": []},
         ):
             response_one = ClockOutAPIView().post(request_one)
             response_two = ClockOutAPIView().post(request_two)

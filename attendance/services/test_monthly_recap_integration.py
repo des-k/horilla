@@ -484,7 +484,7 @@ class MonthlyRecapIntegrationTests(SimpleTestCase):
 
         _, row = self._get_recap(attendances=[canonical_attendance], requests=[verified_on_duty_in])
 
-        self.assertEqual(row.work_type, 'IN: On Duty<br>OUT: WFA')
+        self.assertEqual(row.work_type, 'IN: On Duty<br>OUT: WFO')
         self.assertEqual(row.check_in, '09:12')
         self.assertEqual(row.check_out, '-')
         self.assertEqual(row.late, '00:00')

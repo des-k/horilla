@@ -32,8 +32,14 @@ class ThreadLocalMiddleware:
 
     def __call__(self, request):
         _thread_locals.request = request
-        response = self.get_response(request)
-        return response
+        try:
+            response = self.get_response(request)
+            return response
+        finally:
+            if hasattr(_thread_locals, "request"):
+                delattr(_thread_locals, "request")
+            if hasattr(_thread_locals, "queryset_filter"):
+                delattr(_thread_locals, "queryset_filter")
 
 
 class MethodNotAllowedMiddleware:

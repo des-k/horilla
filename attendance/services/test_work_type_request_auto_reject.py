@@ -128,7 +128,7 @@ class WorkTypeAutoRejectCutoffTests(SimpleTestCase):
             side_effect=lambda req, actor=None, now_dt=None: calls.append((req.scope, now_dt)) or (SimpleNamespace(auto_rejected=True) if req.scope == WorkModeRequestScope.IN else None),
         ):
             rejected = work_type_request_rules.auto_reject_wfa_waiting_for_date.__wrapped__(
-                employee='EMP-1',
+                employee=SimpleNamespace(id=1),
                 target_date=date(2026, 3, 14),
                 now_dt=current_time,
                 cutoff_in_dt=datetime(2026, 3, 14, 10, 0),

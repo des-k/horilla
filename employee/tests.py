@@ -5,11 +5,16 @@ from django.urls import reverse
 from base.models import Company
 from employee.models import Employee, EmployeeWorkInformation
 from employee.views import _employee_directory_queryset, _check_reporting_manager
+from horilla.horilla_middlewares import _thread_locals
 
 
 class EmployeeDirectoryVisibilityTests(TestCase):
     def setUp(self):
         self.factory = RequestFactory()
+        if hasattr(_thread_locals, "request"):
+            _thread_locals.request = None
+        if hasattr(_thread_locals, "queryset_filter"):
+            _thread_locals.queryset_filter = None
         self.company = Company.objects.create(
             company="Test Co",
             address="Addr",
@@ -45,6 +50,14 @@ class EmployeeDirectoryVisibilityTests(TestCase):
 
         self.staff_user = User.objects.create_user(username="staff", password="pass")
         self.staff_employee = self._make_employee(self.staff_user, "Staff", "staff@test.local")
+
+
+    def tearDown(self):
+        if hasattr(_thread_locals, "request"):
+            _thread_locals.request = None
+        if hasattr(_thread_locals, "queryset_filter"):
+            _thread_locals.queryset_filter = None
+        super().tearDown()
 
     def _make_employee(self, user, first_name, email, reporting_manager=None):
         employee = Employee.objects.create(

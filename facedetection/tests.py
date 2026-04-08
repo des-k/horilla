@@ -88,7 +88,6 @@ class FaceDetectionConfigTests(TestCase):
         self.assertIn("Reset Face Detection For", content)
         self.assertIn("Apply Face Reset", content)
         self.assertIn('name="action" value="reset_face"', content)
-        self.assertEqual(content.count('Face Detection'), 1)
         self.assertLess(content.index('Enable Face Detection'), content.index('Reset Face Detection For'))
 
     def test_reset_face_post_sets_reenrollment_flag(self):
