@@ -1,6 +1,7 @@
 from rest_framework import serializers
 
 from asset.models import *
+from horilla_api.utils.private_media_urls import build_employee_profile_api_url
 
 
 class AssetCategorySerializer(serializers.ModelSerializer):
@@ -96,6 +97,7 @@ class AssetRequestGetSerializer(serializers.ModelSerializer):
 
 class EmployeeGetSerializer(serializers.ModelSerializer):
     full_name = serializers.SerializerMethodField()
+    employee_profile = serializers.SerializerMethodField()
 
     class Meta:
         model = Employee
@@ -103,6 +105,10 @@ class EmployeeGetSerializer(serializers.ModelSerializer):
 
     def get_full_name(self, obj):
         return obj.get_full_name()
+
+    def get_employee_profile(self, obj):
+        request = self.context.get("request") if hasattr(self, "context") else None
+        return build_employee_profile_api_url(obj, request=request)
 
 
 class AssetApproveSerializer(serializers.ModelSerializer):

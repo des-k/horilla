@@ -1,6 +1,7 @@
 from rest_framework import serializers
 
 from employee.models import Employee
+from horilla_api.utils.private_media_urls import build_employee_profile_api_url
 from leave.half_day_rules import validate_second_half_leave_submission
 from leave.methods import calculate_requested_days, active_overlapping_leave_requests
 from leave.models import *
@@ -302,6 +303,7 @@ class AssignLeaveGetSerializer(serializers.ModelSerializer):
 
 class EmployeeGetSerializer(serializers.ModelSerializer):
     full_name = serializers.SerializerMethodField()
+    employee_profile = serializers.SerializerMethodField()
 
     class Meta:
         model = Employee
@@ -309,6 +311,10 @@ class EmployeeGetSerializer(serializers.ModelSerializer):
 
     def get_full_name(self, obj):
         return obj.get_full_name()
+
+    def get_employee_profile(self, obj):
+        request = self.context.get("request") if hasattr(self, "context") else None
+        return build_employee_profile_api_url(obj, request=request)
 
 
 class AvailableLeaveUpdateSerializer(serializers.ModelSerializer):

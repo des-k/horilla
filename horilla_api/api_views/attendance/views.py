@@ -120,6 +120,7 @@ from attendance.services.attendance_request_access import (
 from attendance.services.attendance_correction_scope_rules import load_requested_data
 from attendance.services.request_audit import log_request_action
 from attendance.services.work_type_request_exceptions import WorkModeRequestConsistencyError
+from horilla_api.utils.private_media_urls import build_employee_face_api_url, build_employee_profile_api_url
 from attendance.services.attendance_access import evaluate_attendance_access
 from attendance.services.canonical_attendance_policy import (
     build_attendance_policy,
@@ -949,7 +950,7 @@ def _serialize_wfh_profile(employee):
             "is_home_configured": False,
             "requires_home_reconfiguration": False,
             "requires_face_reenrollment": False,
-            "face_image": getattr(face.image, "url", None) if face and getattr(face, "image", None) else None,
+            "face_image": build_employee_face_api_url(employee, face=face),
             "history": [],
         }
     return {
@@ -960,7 +961,7 @@ def _serialize_wfh_profile(employee):
         "is_home_configured": bool(profile.is_home_configured and profile.home_latitude is not None and profile.home_longitude is not None),
         "requires_home_reconfiguration": bool(profile.requires_home_reconfiguration),
         "requires_face_reenrollment": bool(profile.requires_face_reenrollment),
-        "face_image": getattr(face.image, "url", None) if face and getattr(face, "image", None) else None,
+        "face_image": build_employee_face_api_url(employee, face=face),
         "history": _serialize_wfh_history(profile.employee.wfh_profile_history.all()) if _is_model_instance(employee) else [],
     }
 
@@ -3472,11 +3473,9 @@ class OfflineEmployeesListView(APIView):
         )
 
         for employee in employees_with_leave_status:
-
-            if employee["employee_profile"]:
-                employee["employee_profile"] = (
-                    settings.MEDIA_URL + employee["employee_profile"]
-                )
+            if employee.get("employee_profile"):
+                temp_employee = type("EmployeeMediaProxy", (), {"id": employee.get("id"), "employee_profile": employee.get("employee_profile")})()
+                employee["employee_profile"] = build_employee_profile_api_url(temp_employee)
         return employees_with_leave_status
 
 

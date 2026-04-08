@@ -13,6 +13,7 @@ from payroll.models.models import (
     ReimbursementMultipleAttachment,
 )
 from payroll.models.tax_models import TaxBracket
+from horilla_api.utils.private_media_urls import build_employee_profile_api_url
 
 
 class PayslipSerializer(serializers.ModelSerializer):
@@ -40,11 +41,8 @@ class PayslipSerializer(serializers.ModelSerializer):
         #            'installment_ids', 'created_at']
 
     def get_employee_profile_url(self, obj):
-        try:
-            employee_profile = obj.employee_id.employee_profile
-            return employee_profile.url
-        except:
-            return None
+        request = self.context.get("request") if hasattr(self, "context") else None
+        return build_employee_profile_api_url(getattr(obj, "employee_id", None), request=request)
 
 
 class ContractSerializer(serializers.ModelSerializer):
@@ -71,11 +69,8 @@ class ContractSerializer(serializers.ModelSerializer):
     )
 
     def get_employee_profile_url(self, obj):
-        try:
-            employee_profile = obj.employee_id.employee_profile
-            return employee_profile.url
-        except:
-            return None
+        request = self.context.get("request") if hasattr(self, "context") else None
+        return build_employee_profile_api_url(getattr(obj, "employee_id", None), request=request)
 
     class Meta:
         model = Contract
@@ -191,11 +186,8 @@ class LoanAccountSerializer(serializers.ModelSerializer):
         fields = "__all__"
 
     def get_employee_profile_url(self, obj):
-        try:
-            employee_profile = obj.employee_id.employee_profile
-            return employee_profile.url
-        except:
-            return None
+        request = self.context.get("request") if hasattr(self, "context") else None
+        return build_employee_profile_api_url(getattr(obj, "employee_id", None), request=request)
 
 
 class ReimbursementSerializer(serializers.ModelSerializer):
@@ -206,11 +198,8 @@ class ReimbursementSerializer(serializers.ModelSerializer):
     employee_full_name = serializers.CharField(source="employee_id.get_full_name")
 
     def get_employee_profile_url(self, obj):
-        try:
-            employee_profile = obj.employee_id.employee_profile
-            return employee_profile.url
-        except:
-            return None
+        request = self.context.get("request") if hasattr(self, "context") else None
+        return build_employee_profile_api_url(getattr(obj, "employee_id", None), request=request)
 
     class Meta:
         model = Reimbursement

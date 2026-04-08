@@ -23,6 +23,9 @@ from employee.models import (
     Policy,
 )
 from employee.views import work_info_export, work_info_import
+from facedetection.models import EmployeeFaceDetection
+from horilla_api.utils.private_media_urls import _object_id
+from horilla_api.utils.private_file_response import private_file_response
 from horilla.decorators import owner_can_enter
 from horilla_api.api_decorators.base.decorators import permission_required
 from horilla_api.api_methods.employee.methods import get_next_badge_id
@@ -70,6 +73,55 @@ def object_delete(cls, pk):
         return {"error": str(e)}, 400
 
 
+def _can_view_employee_media(user, employee):
+    if not user or not getattr(user, "is_authenticated", False) or employee is None:
+        return False
+    try:
+        if user.has_perm("employee.view_employee"):
+            return True
+    except Exception:
+        pass
+    actor = getattr(user, "employee_get", None)
+    actor_id = _object_id(actor)
+    employee_id = _object_id(employee)
+    if actor_id is not None and employee_id is not None and actor_id == employee_id:
+        return True
+    try:
+        subordinates = actor.get_subordinate_employees()
+        return subordinates.filter(pk=employee_id).exists()
+    except Exception:
+        return False
+
+
+class EmployeeProfileImageAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        employee = object_check(Employee, pk)
+        if employee is None:
+            raise Http404
+        if not _can_view_employee_media(request.user, employee):
+            return Response({"error": "Permission denied"}, status=status.HTTP_403_FORBIDDEN)
+        if not getattr(employee, "employee_profile", None):
+            raise Http404
+        return private_file_response(employee.employee_profile, as_attachment=False)
+
+
+class EmployeeFaceImageAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        employee = object_check(Employee, pk)
+        if employee is None:
+            raise Http404
+        if not _can_view_employee_media(request.user, employee):
+            return Response({"error": "Permission denied"}, status=status.HTTP_403_FORBIDDEN)
+        face = EmployeeFaceDetection.objects.filter(employee_id=employee).first()
+        if face is None or not getattr(face, "image", None):
+            raise Http404
+        return private_file_response(face.image, as_attachment=False)
+
+
 class EmployeeTypeAPIView(APIView):
     """
     Retrieves employee types.
@@ -115,18 +167,18 @@ class EmployeeAPIView(APIView):
 
         # If user has global view permission
         if user.has_perm("employee.view_employee"):
-            serializer = EmployeeSerializer(employee)
+            serializer = EmployeeSerializer(employee, context={"request": request})
             return Response(serializer.data)
 
         # If employee is in user's subordinates
         subordinates = user.employee_get.get_subordinate_employees()
         if subordinates.filter(pk=pk).exists():
-            serializer = EmployeeSerializer(employee)
+            serializer = EmployeeSerializer(employee, context={"request": request})
             return Response(serializer.data)
 
         # If requesting own data
         if employee.pk == user.employee_get.id:
-            serializer = EmployeeSerializer(employee)
+            serializer = EmployeeSerializer(employee, context={"request": request})
             return Response(serializer.data)
 
         return Response(
@@ -225,7 +277,7 @@ class EmployeeListAPIView(APIView):
         paginator = PageNumberPagination()
         page = paginator.paginate_queryset(employees_queryset, request)
 
-        serializer = EmployeeListSerializer(page, many=True)
+        serializer = EmployeeListSerializer(page, many=True, context={"request": request})
         return paginator.get_paginated_response(serializer.data)
 
 
@@ -936,7 +988,7 @@ class EmployeeSelectorView(APIView):
 
         paginator = PageNumberPagination()
         page = paginator.paginate_queryset(employees, request)
-        serializer = EmployeeSelectorSerializer(page, many=True)
+        serializer = EmployeeSelectorSerializer(page, many=True, context={"request": request})
         return paginator.get_paginated_response(serializer.data)
 
 

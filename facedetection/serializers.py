@@ -1,5 +1,7 @@
 from rest_framework import serializers
 
+from horilla_api.utils.private_media_urls import build_employee_face_api_url
+
 from .models import *
 
 
@@ -19,3 +21,13 @@ class EmployeeFaceDetectionSerializer(serializers.ModelSerializer):
     class Meta:
         model = EmployeeFaceDetection
         fields = "__all__"
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        request = self.context.get("request") if hasattr(self, "context") else None
+        data["image"] = build_employee_face_api_url(
+            getattr(instance, "employee_id", None),
+            request=request,
+            face=instance,
+        )
+        return data

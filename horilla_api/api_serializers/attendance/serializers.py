@@ -28,6 +28,7 @@ from attendance.services.attendance_request_presentation import (
     build_attendance_request_time_surface,
 )
 from attendance.services.attendance_correction_requests import build_permission_flags as build_attendance_correction_permission_flags
+from horilla_api.utils.private_media_urls import build_employee_profile_api_url
 
 
 class AttendanceSerializer(serializers.ModelSerializer):
@@ -111,11 +112,8 @@ class AttendanceSerializer(serializers.ModelSerializer):
         return self.get_attachment_urls(obj)
 
     def get_employee_profile_url(self, obj):
-        try:
-            employee_profile = obj.employee_id.employee_profile
-            return employee_profile.url
-        except:
-            return None
+        request = self.context.get("request") if hasattr(self, "context") else None
+        return build_employee_profile_api_url(getattr(obj, "employee_id", None), request=request)
 
 
 class AttendanceRequestSerializer(serializers.ModelSerializer):
@@ -254,11 +252,8 @@ class AttendanceRequestSerializer(serializers.ModelSerializer):
         return status_value
 
     def get_employee_profile_url(self, obj):
-        try:
-            employee_profile = obj.employee_id.employee_profile
-            return employee_profile.url
-        except Exception:
-            return None
+        request = self.context.get("request") if hasattr(self, "context") else None
+        return build_employee_profile_api_url(getattr(obj, "employee_id", None), request=request)
 
     def get_action_by_name(self, obj):
         try:
@@ -448,11 +443,8 @@ class AttendanceOverTimeSerializer(serializers.ModelSerializer):
         return self.get_attachment_urls(obj)
 
     def get_employee_profile_url(self, obj):
-        try:
-            employee_profile = obj.employee_id.employee_profile
-            return employee_profile.url
-        except:
-            return None
+        request = self.context.get("request") if hasattr(self, "context") else None
+        return build_employee_profile_api_url(getattr(obj, "employee_id", None), request=request)
 
 
 class AttendanceLateComeEarlyOutSerializer(serializers.ModelSerializer):
@@ -862,11 +854,8 @@ class WorkModeRequestSerializer(serializers.ModelSerializer):
         return getattr(obj, "action_effective_at", None)
 
     def get_employee_profile_url(self, obj):
-        try:
-            employee_profile = obj.employee_id.employee_profile
-            return employee_profile.url
-        except Exception:
-            return None
+        request = self.context.get("request") if hasattr(self, "context") else None
+        return build_employee_profile_api_url(getattr(obj, "employee_id", None), request=request)
 
     def get_approved_by_name(self, obj):
         return getattr(obj, "approved_actor_display", None)

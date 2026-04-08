@@ -14,6 +14,10 @@ from attendance.models import EmployeeWfhProfileHistory
 from attendance.services.wfh_profile import effective_wfh_radius_for
 from geofencing.models import GeoFencing
 from facedetection.models import EmployeeFaceDetection
+from horilla_api.utils.private_media_urls import (
+    build_employee_face_api_url,
+    build_employee_profile_api_url,
+)
 
 from ...api_methods.employee.methods import get_next_badge_id
 
@@ -25,6 +29,7 @@ class ActiontypeSerializer(serializers.ModelSerializer):
 
 
 class EmployeeListSerializer(serializers.ModelSerializer):
+    employee_profile = serializers.SerializerMethodField()
     job_position_name = serializers.CharField(
         source="employee_work_info.job_position_id.job_position", read_only=True
     )
@@ -48,8 +53,13 @@ class EmployeeListSerializer(serializers.ModelSerializer):
             "employee_bank_details_id",
         ]
 
+    def get_employee_profile(self, obj):
+        request = self.context.get("request") if hasattr(self, "context") else None
+        return build_employee_profile_api_url(obj, request=request)
+
 
 class EmployeeSerializer(serializers.ModelSerializer):
+    employee_profile = serializers.SerializerMethodField()
     wfh_profile = serializers.SerializerMethodField()
     department_name = serializers.CharField(
         source="employee_work_info.department_id.department", read_only=True
@@ -109,9 +119,13 @@ class EmployeeSerializer(serializers.ModelSerializer):
             "is_home_configured": is_home_configured,
             "requires_home_reconfiguration": bool(getattr(profile, "requires_home_reconfiguration", False)),
             "requires_face_reenrollment": bool(getattr(profile, "requires_face_reenrollment", False)),
-            "face_image": getattr(face.image, "url", None) if face and getattr(face, "image", None) else None,
+            "face_image": build_employee_face_api_url(obj, request=self.context.get("request") if hasattr(self, "context") else None, face=face),
             "history": history,
         }
+
+    def get_employee_profile(self, obj):
+        request = self.context.get("request") if hasattr(self, "context") else None
+        return build_employee_profile_api_url(obj, request=request)
 
     class Meta:
         model = Employee
@@ -215,6 +229,7 @@ class DocumentSerializer(serializers.ModelSerializer):
 
 
 class EmployeeSelectorSerializer(serializers.ModelSerializer):
+    employee_profile = serializers.SerializerMethodField()
     class Meta:
         model = Employee
         fields = [
@@ -224,3 +239,7 @@ class EmployeeSelectorSerializer(serializers.ModelSerializer):
             "badge_id",
             "employee_profile",
         ]
+
+    def get_employee_profile(self, obj):
+        request = self.context.get("request") if hasattr(self, "context") else None
+        return build_employee_profile_api_url(obj, request=request)

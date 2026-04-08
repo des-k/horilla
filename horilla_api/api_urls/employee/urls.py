@@ -3,6 +3,16 @@ from django.urls import path
 from ...api_views.employee import views as views
 
 urlpatterns = [
+    path(
+        "employees/<int:pk>/profile-image/",
+        views.EmployeeProfileImageAPIView.as_view(),
+        name="api-employee-profile-image",
+    ),
+    path(
+        "employees/<int:pk>/face-image/",
+        views.EmployeeFaceImageAPIView.as_view(),
+        name="api-employee-face-image",
+    ),
     # path('employees/', views.EmployeeAPIView.as_view(), name='api-employees-list'),
     path(
         "employees/<int:pk>/",

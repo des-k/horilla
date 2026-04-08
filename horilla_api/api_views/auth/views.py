@@ -6,6 +6,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 
 from horilla_api.docs import document_api
 from geofencing.policy import geofencing_is_effectively_enabled
+from horilla_api.utils.private_media_urls import build_employee_face_api_url
 
 from ...api_serializers.auth.serializers import (
     GetEmployeeSerializer,
@@ -28,7 +29,7 @@ class LoginAPIView(APIView):
                             "full_name": openapi.Schema(type=openapi.TYPE_STRING),
                             "employee_profile": openapi.Schema(
                                 type=openapi.TYPE_STRING,
-                                description="Profile image URL",
+                                description="Authenticated employee profile image URL",
                             ),
                         },
                     ),
@@ -38,7 +39,7 @@ class LoginAPIView(APIView):
                     "face_detection": openapi.Schema(type=openapi.TYPE_BOOLEAN),
                     "face_detection_image": openapi.Schema(
                         type=openapi.TYPE_STRING,
-                        description="Face detection image URL",
+                        description="Authenticated face detection image URL",
                         nullable=True,
                     ),
                     "geo_fencing": openapi.Schema(type=openapi.TYPE_BOOLEAN),
@@ -71,7 +72,7 @@ class LoginAPIView(APIView):
                 except Exception:
                     geo_fencing = geofencing_is_effectively_enabled()
                 try:
-                    face_detection_image = employee.face_detection.image.url
+                    face_detection_image = build_employee_face_api_url(employee, request=request)
                 except:
                     pass
                 try:
@@ -79,7 +80,7 @@ class LoginAPIView(APIView):
                 except:
                     pass
                 result = {
-                    "employee": GetEmployeeSerializer(employee).data,
+                    "employee": GetEmployeeSerializer(employee, context={"request": request}).data,
                     "access": str(refresh.access_token),
                     "face_detection": face_detection,
                     "face_detection_image": face_detection_image,

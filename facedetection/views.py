@@ -149,7 +149,7 @@ class EmployeeFaceDetectionGetPostAPIView(APIView):
                 {"detail": "No face registration found for this employee."},
                 status=status.HTTP_404_NOT_FOUND,
             )
-        serializer = EmployeeFaceDetectionSerializer(employee_facedetection)
+        serializer = EmployeeFaceDetectionSerializer(employee_facedetection, context={"request": request})
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     def post(self, request):
@@ -174,7 +174,7 @@ class EmployeeFaceDetectionGetPostAPIView(APIView):
                 new_face_image=getattr(obj.image, "url", None),
             )
 
-        serializer = EmployeeFaceDetectionSerializer(obj)
+        serializer = EmployeeFaceDetectionSerializer(obj, context={"request": request})
         return Response(
             serializer.data,
             status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
