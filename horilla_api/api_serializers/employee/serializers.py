@@ -59,7 +59,7 @@ class EmployeeListSerializer(serializers.ModelSerializer):
 
 
 class EmployeeSerializer(serializers.ModelSerializer):
-    employee_profile = serializers.SerializerMethodField()
+    employee_profile = serializers.ImageField(required=False, allow_null=True)
     wfh_profile = serializers.SerializerMethodField()
     department_name = serializers.CharField(
         source="employee_work_info.department_id.department", read_only=True
@@ -130,6 +130,12 @@ class EmployeeSerializer(serializers.ModelSerializer):
     class Meta:
         model = Employee
         fields = "__all__"
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        data["employee_profile"] = self.get_employee_profile(instance)
+        data["wfh_profile"] = self.get_wfh_profile(instance)
+        return data
 
     def create(self, validated_data):
         validated_data["badge_id"] = get_next_badge_id()
