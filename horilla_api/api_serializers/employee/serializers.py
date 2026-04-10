@@ -150,6 +150,7 @@ class EmployeeWorkInformationSerializer(serializers.ModelSerializer):
         source="department_id.department", read_only=True
     )
     shift_name = serializers.CharField(source="shift_id.employee_shift", read_only=True)
+    job_role_name = serializers.CharField(source="job_role_id.job_role", read_only=True)
     employee_type_name = serializers.CharField(
         source="employee_type_id.employee_type", read_only=True
     )
