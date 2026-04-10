@@ -172,9 +172,10 @@ class WfhSpecRegressionTests(SimpleTestCase):
         self.assertEqual(normalize_work_type_label("remote"), "WFA")
 
     @patch("horilla_api.api_serializers.employee.serializers.EmployeeWfhProfileHistory.objects.filter")
+    @patch("horilla_api.api_serializers.employee.serializers.build_employee_face_api_version", return_value=None)
     @patch("horilla_api.api_serializers.employee.serializers.EmployeeFaceDetection.objects.filter")
     @patch("horilla_api.api_serializers.employee.serializers.effective_wfh_radius_for", return_value=250)
-    def test_employee_serializer_returns_default_wfh_profile_without_row(self, mock_resolve_radius, mock_face, mock_history):
+    def test_employee_serializer_returns_default_wfh_profile_without_row(self, mock_resolve_radius, mock_face, _mock_face_version, mock_history):
         mock_face.return_value.first.return_value = None
         history_qs = MagicMock()
         history_qs.order_by.return_value.__getitem__.return_value = []
@@ -188,6 +189,7 @@ class WfhSpecRegressionTests(SimpleTestCase):
         self.assertIsInstance(payload, dict)
         self.assertEqual(payload["radius_in_meters"], 250)
         self.assertFalse(payload["is_home_configured"])
+        self.assertIsNone(payload["face_image_version"])
         self.assertEqual(payload["history"], [])
 
     @patch("attendance.views.clock_in_out.update_punch_history")

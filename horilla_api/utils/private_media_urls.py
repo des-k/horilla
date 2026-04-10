@@ -1,6 +1,42 @@
+from datetime import timezone
 from django.urls import reverse
 
 from facedetection.models import EmployeeFaceDetection
+
+
+def _file_version(file_field):
+    if not file_field:
+        return None
+    name = getattr(file_field, "name", None)
+    storage = getattr(file_field, "storage", None)
+    if not name or storage is None:
+        return None
+    try:
+        modified = storage.get_modified_time(name)
+        if modified is None:
+            return None
+        if getattr(modified, "tzinfo", None) is not None:
+            modified = modified.astimezone(timezone.utc)
+        return modified.isoformat().replace("+00:00", "Z")
+    except Exception:
+        return None
+
+
+def build_employee_profile_api_version(employee):
+    return _file_version(getattr(employee, "employee_profile", None))
+
+
+def build_employee_face_api_version(employee, face=None):
+    face_obj = face
+    if face_obj is None:
+        employee_id = _object_id(employee)
+        if employee_id in (None, ""):
+            return None
+        try:
+            face_obj = EmployeeFaceDetection.objects.filter(employee_id_id=employee_id).only("id", "image").first()
+        except Exception:
+            face_obj = None
+    return _file_version(getattr(face_obj, "image", None))
 
 
 def _object_id(value):

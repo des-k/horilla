@@ -16,7 +16,9 @@ from geofencing.models import GeoFencing
 from facedetection.models import EmployeeFaceDetection
 from horilla_api.utils.private_media_urls import (
     build_employee_face_api_url,
+    build_employee_face_api_version,
     build_employee_profile_api_url,
+    build_employee_profile_api_version,
 )
 
 from ...api_methods.employee.methods import get_next_badge_id
@@ -60,6 +62,7 @@ class EmployeeListSerializer(serializers.ModelSerializer):
 
 class EmployeeSerializer(serializers.ModelSerializer):
     employee_profile = serializers.ImageField(required=False, allow_null=True)
+    employee_profile_version = serializers.SerializerMethodField()
     wfh_profile = serializers.SerializerMethodField()
     department_name = serializers.CharField(
         source="employee_work_info.department_id.department", read_only=True
@@ -120,12 +123,16 @@ class EmployeeSerializer(serializers.ModelSerializer):
             "requires_home_reconfiguration": bool(getattr(profile, "requires_home_reconfiguration", False)),
             "requires_face_reenrollment": bool(getattr(profile, "requires_face_reenrollment", False)),
             "face_image": build_employee_face_api_url(obj, request=self.context.get("request") if hasattr(self, "context") else None, face=face),
+            "face_image_version": build_employee_face_api_version(obj, face=face),
             "history": history,
         }
 
     def get_employee_profile(self, obj):
         request = self.context.get("request") if hasattr(self, "context") else None
         return build_employee_profile_api_url(obj, request=request)
+
+    def get_employee_profile_version(self, obj):
+        return build_employee_profile_api_version(obj)
 
     class Meta:
         model = Employee
@@ -134,6 +141,7 @@ class EmployeeSerializer(serializers.ModelSerializer):
     def to_representation(self, instance):
         data = super().to_representation(instance)
         data["employee_profile"] = self.get_employee_profile(instance)
+        data["employee_profile_version"] = self.get_employee_profile_version(instance)
         data["wfh_profile"] = self.get_wfh_profile(instance)
         return data
 

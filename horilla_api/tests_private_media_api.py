@@ -18,7 +18,9 @@ from horilla_api.api_views.leave.views import (
 )
 from horilla_api.utils.private_media_urls import (
     build_employee_face_api_url,
+    build_employee_face_api_version,
     build_employee_profile_api_url,
+    build_employee_profile_api_version,
     build_leave_allocation_attachment_meta,
     build_leave_request_attachment_meta,
     build_leave_type_icon_api_url,
@@ -51,6 +53,20 @@ class PrivateMediaUrlHelperTests(SimpleTestCase):
         url = build_employee_face_api_url(employee, face=face)
         self.assertEqual(url, "/api/employee/employees/7/face-image/")
 
+
+
+    def test_build_employee_profile_api_version_uses_storage_modified_time(self):
+        storage = SimpleNamespace(get_modified_time=lambda name: __import__("datetime").datetime(2026, 4, 10, 9, 30, tzinfo=__import__("datetime").timezone.utc))
+        employee = SimpleNamespace(employee_profile=SimpleNamespace(name="employee/profile/avatar.png", storage=storage))
+        version = build_employee_profile_api_version(employee)
+        self.assertEqual(version, "2026-04-10T09:30:00Z")
+
+    def test_build_employee_face_api_version_uses_storage_modified_time(self):
+        storage = SimpleNamespace(get_modified_time=lambda name: __import__("datetime").datetime(2026, 4, 10, 9, 45, tzinfo=__import__("datetime").timezone.utc))
+        employee = SimpleNamespace(id=7)
+        face = SimpleNamespace(image=SimpleNamespace(name="face/image/face.jpg", storage=storage))
+        version = build_employee_face_api_version(employee, face=face)
+        self.assertEqual(version, "2026-04-10T09:45:00Z")
 
 class PrivateMediaEndpointTests(SimpleTestCase):
     def setUp(self):
