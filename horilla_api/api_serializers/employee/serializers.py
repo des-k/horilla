@@ -34,6 +34,9 @@ class ActiontypeSerializer(serializers.ModelSerializer):
 
 class EmployeeListSerializer(serializers.ModelSerializer):
     employee_profile = serializers.SerializerMethodField()
+    employee_profile_version = serializers.SerializerMethodField()
+    employee_profile_avatar = serializers.SerializerMethodField()
+    employee_profile_avatar_version = serializers.SerializerMethodField()
     job_position_name = serializers.CharField(
         source="employee_work_info.job_position_id.job_position", read_only=True
     )
@@ -54,12 +57,25 @@ class EmployeeListSerializer(serializers.ModelSerializer):
             "job_position_name",
             "employee_work_info_id",
             "employee_profile",
+            "employee_profile_version",
+            "employee_profile_avatar",
+            "employee_profile_avatar_version",
             "employee_bank_details_id",
         ]
 
     def get_employee_profile(self, obj):
         request = self.context.get("request") if hasattr(self, "context") else None
         return build_employee_profile_api_url(obj, request=request)
+
+    def get_employee_profile_version(self, obj):
+        return build_employee_profile_api_version(obj)
+
+    def get_employee_profile_avatar(self, obj):
+        request = self.context.get("request") if hasattr(self, "context") else None
+        return build_employee_profile_avatar_api_url(obj, request=request)
+
+    def get_employee_profile_avatar_version(self, obj):
+        return build_employee_profile_avatar_api_version(obj)
 
 
 class EmployeeSerializer(serializers.ModelSerializer):
