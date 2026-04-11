@@ -19,6 +19,8 @@ from horilla_api.utils.private_media_urls import (
     build_employee_face_api_version,
     build_employee_profile_api_url,
     build_employee_profile_api_version,
+    build_employee_profile_avatar_api_url,
+    build_employee_profile_avatar_api_version,
 )
 
 from ...api_methods.employee.methods import get_next_badge_id
@@ -63,6 +65,8 @@ class EmployeeListSerializer(serializers.ModelSerializer):
 class EmployeeSerializer(serializers.ModelSerializer):
     employee_profile = serializers.ImageField(required=False, allow_null=True)
     employee_profile_version = serializers.SerializerMethodField()
+    employee_profile_avatar = serializers.SerializerMethodField()
+    employee_profile_avatar_version = serializers.SerializerMethodField()
     wfh_profile = serializers.SerializerMethodField()
     department_name = serializers.CharField(
         source="employee_work_info.department_id.department", read_only=True
@@ -134,6 +138,13 @@ class EmployeeSerializer(serializers.ModelSerializer):
     def get_employee_profile_version(self, obj):
         return build_employee_profile_api_version(obj)
 
+    def get_employee_profile_avatar(self, obj):
+        request = self.context.get("request") if hasattr(self, "context") else None
+        return build_employee_profile_avatar_api_url(obj, request=request)
+
+    def get_employee_profile_avatar_version(self, obj):
+        return build_employee_profile_avatar_api_version(obj)
+
     class Meta:
         model = Employee
         fields = "__all__"
@@ -142,6 +153,8 @@ class EmployeeSerializer(serializers.ModelSerializer):
         data = super().to_representation(instance)
         data["employee_profile"] = self.get_employee_profile(instance)
         data["employee_profile_version"] = self.get_employee_profile_version(instance)
+        data["employee_profile_avatar"] = self.get_employee_profile_avatar(instance)
+        data["employee_profile_avatar_version"] = self.get_employee_profile_avatar_version(instance)
         data["wfh_profile"] = self.get_wfh_profile(instance)
         return data
 

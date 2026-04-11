@@ -127,3 +127,17 @@ def build_leave_allocation_attachment_meta(allocation_request, request=None):
         "view_url": _maybe_absolute(request, reverse("api-leave-allocation-request-attachment-view", args=[request_id])),
         "download_url": _maybe_absolute(request, reverse("api-leave-allocation-request-attachment-download", args=[request_id])),
     }
+
+
+def build_employee_profile_avatar_api_url(employee, request=None):
+    employee_id = _object_id(employee)
+    if employee_id in (None, ""):
+        return None
+    image = getattr(employee, "employee_profile", None)
+    if not image:
+        return None
+    return _maybe_absolute(request, reverse("api-employee-profile-avatar", args=[employee_id]))
+
+
+def build_employee_profile_avatar_api_version(employee):
+    return build_employee_profile_api_version(employee)

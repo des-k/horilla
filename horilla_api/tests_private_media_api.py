@@ -7,6 +7,7 @@ from rest_framework.test import APIRequestFactory, force_authenticate
 
 from horilla_api.api_views.employee.views import (
     EmployeeFaceImageAPIView,
+    EmployeeProfileAvatarAPIView,
     EmployeeProfileImageAPIView,
 )
 from horilla_api.api_views.leave.views import (
@@ -21,6 +22,8 @@ from horilla_api.utils.private_media_urls import (
     build_employee_face_api_version,
     build_employee_profile_api_url,
     build_employee_profile_api_version,
+    build_employee_profile_avatar_api_url,
+    build_employee_profile_avatar_api_version,
     build_leave_allocation_attachment_meta,
     build_leave_request_attachment_meta,
     build_leave_type_icon_api_url,
@@ -53,7 +56,10 @@ class PrivateMediaUrlHelperTests(SimpleTestCase):
         url = build_employee_face_api_url(employee, face=face)
         self.assertEqual(url, "/api/employee/employees/7/face-image/")
 
-
+    def test_build_employee_profile_avatar_api_url_uses_private_api_path(self):
+        employee = SimpleNamespace(id=5, employee_profile=object())
+        url = build_employee_profile_avatar_api_url(employee)
+        self.assertEqual(url, "/api/employee/employees/5/profile-avatar/")
 
     def test_build_employee_profile_api_version_uses_storage_modified_time(self):
         storage = SimpleNamespace(get_modified_time=lambda name: __import__("datetime").datetime(2026, 4, 10, 9, 30, tzinfo=__import__("datetime").timezone.utc))
@@ -67,6 +73,12 @@ class PrivateMediaUrlHelperTests(SimpleTestCase):
         face = SimpleNamespace(image=SimpleNamespace(name="face/image/face.jpg", storage=storage))
         version = build_employee_face_api_version(employee, face=face)
         self.assertEqual(version, "2026-04-10T09:45:00Z")
+
+    def test_build_employee_profile_avatar_api_version_matches_profile_version(self):
+        storage = SimpleNamespace(get_modified_time=lambda name: __import__("datetime").datetime(2026, 4, 10, 9, 30, tzinfo=__import__("datetime").timezone.utc))
+        employee = SimpleNamespace(employee_profile=SimpleNamespace(name="employee/profile/avatar.png", storage=storage))
+        version = build_employee_profile_avatar_api_version(employee)
+        self.assertEqual(version, "2026-04-10T09:30:00Z")
 
 class PrivateMediaEndpointTests(SimpleTestCase):
     def setUp(self):
@@ -98,6 +110,28 @@ class PrivateMediaEndpointTests(SimpleTestCase):
             response = EmployeeProfileImageAPIView.as_view()(request, pk=2)
 
         self.assertEqual(response.status_code, 403)
+
+    def test_profile_avatar_endpoint_allows_self(self):
+        employee = SimpleNamespace(id=3, employee_profile=SimpleNamespace())
+        user = _AuthUser(employee)
+        request = self.factory.get("/api/employee/employees/3/profile-avatar/")
+        force_authenticate(request, user=user)
+
+        avatar_file = SimpleNamespace()
+        with patch("horilla_api.api_views.employee.views.object_check", return_value=employee), patch(
+            "horilla_api.api_views.employee.views.ensure_employee_profile_avatar",
+            return_value="employee/profile/avatar__avatar.jpg",
+        ), patch(
+            "horilla_api.api_views.employee.views.employee_profile_avatar_file",
+            return_value=avatar_file,
+        ), patch(
+            "horilla_api.api_views.employee.views.private_file_response",
+            return_value=HttpResponse(status=200),
+        ) as mock_response:
+            response = EmployeeProfileAvatarAPIView.as_view()(request, pk=3)
+
+        self.assertEqual(response.status_code, 200)
+        mock_response.assert_called_once_with(avatar_file, as_attachment=False)
 
     def test_face_image_endpoint_allows_self(self):
         employee = SimpleNamespace(id=4)

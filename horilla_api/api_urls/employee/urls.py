@@ -13,6 +13,11 @@ urlpatterns = [
         views.EmployeeFaceImageAPIView.as_view(),
         name="api-employee-face-image",
     ),
+    path(
+        "employees/<int:pk>/profile-avatar/",
+        views.EmployeeProfileAvatarAPIView.as_view(),
+        name="api-employee-profile-avatar",
+    ),
     # path('employees/', views.EmployeeAPIView.as_view(), name='api-employees-list'),
     path(
         "employees/<int:pk>/",

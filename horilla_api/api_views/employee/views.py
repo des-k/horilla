@@ -26,6 +26,7 @@ from employee.views import work_info_export, work_info_import
 from facedetection.models import EmployeeFaceDetection
 from horilla_api.utils.private_media_urls import _object_id
 from horilla_api.utils.private_file_response import private_file_response
+from employee.methods.profile_image_variants import ensure_employee_profile_avatar, employee_profile_avatar_file
 from horilla.decorators import owner_can_enter
 from horilla_api.api_decorators.base.decorators import permission_required
 from horilla_api.api_methods.employee.methods import get_next_badge_id
@@ -104,6 +105,25 @@ class EmployeeProfileImageAPIView(APIView):
             return Response({"error": "Permission denied"}, status=status.HTTP_403_FORBIDDEN)
         if not getattr(employee, "employee_profile", None):
             raise Http404
+        return private_file_response(employee.employee_profile, as_attachment=False)
+
+
+class EmployeeProfileAvatarAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        employee = object_check(Employee, pk)
+        if employee is None:
+            raise Http404
+        if not _can_view_employee_media(request.user, employee):
+            return Response({"error": "Permission denied"}, status=status.HTTP_403_FORBIDDEN)
+        if not getattr(employee, "employee_profile", None):
+            raise Http404
+
+        avatar_name = ensure_employee_profile_avatar(employee)
+        avatar_file = employee_profile_avatar_file(employee) if avatar_name else None
+        if avatar_file is not None:
+            return private_file_response(avatar_file, as_attachment=False)
         return private_file_response(employee.employee_profile, as_attachment=False)
 
 
