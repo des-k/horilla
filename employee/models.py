@@ -15,7 +15,7 @@ from django.core.exceptions import ValidationError
 from django.core.files.storage import default_storage
 from django.db import IntegrityError, models
 from django.db.models.query import QuerySet
-from django.db.models.signals import post_save
+from django.db.models.signals import post_save, pre_save
 from django.dispatch import receiver
 from django.templatetags.static import static
 from django.utils.translation import gettext as _
@@ -35,6 +35,10 @@ from base.models import (
     validate_time_format,
 )
 from employee.methods.duration_methods import format_time, strtime_seconds
+from employee.methods.profile_image_variants import (
+    delete_employee_profile_avatar_by_profile_name,
+    ensure_employee_profile_avatar,
+)
 from horilla import horilla_middlewares
 from horilla.methods import get_horilla_model_class
 from horilla.models import HorillaModel, has_xss, upload_path
@@ -939,6 +943,34 @@ class BonusPoint(HorillaModel):
         try:
             BonusPoint.objects.get_or_create(employee_id=instance)
         except IntegrityError:
+            pass
+
+
+@receiver(pre_save, sender=Employee)
+def employee_profile_avatar_track_old_name(sender, instance, **_kwargs):
+    if not getattr(instance, "pk", None):
+        instance._old_employee_profile_name = None
+        return
+    try:
+        instance._old_employee_profile_name = sender.objects.filter(pk=instance.pk).values_list("employee_profile", flat=True).first() or None
+    except Exception:
+        instance._old_employee_profile_name = None
+
+
+@receiver(post_save, sender=Employee)
+def employee_profile_avatar_sync(sender, instance, **_kwargs):
+    old_name = getattr(instance, "_old_employee_profile_name", None)
+    profile = getattr(instance, "employee_profile", None)
+    current_name = getattr(profile, "name", "") or None
+    storage = getattr(profile, "storage", None)
+
+    if old_name and old_name != current_name:
+        delete_employee_profile_avatar_by_profile_name(old_name, storage=storage)
+
+    if current_name:
+        try:
+            ensure_employee_profile_avatar(instance)
+        except Exception:
             pass
 
 
